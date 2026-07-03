@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .DS_Store
 .ipynb_checkpoints/
+
+# Data (raw inputs + generated intermediate/processed artifacts) -- not tracked in git
+/data/
+
+# Generated Excel outputs (e.g. code/params.xlsx) and any raw Excel inputs
+*.xlsx
