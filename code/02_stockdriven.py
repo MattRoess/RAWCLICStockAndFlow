@@ -92,7 +92,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -113,9 +113,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.artifacts import load_many, save_many, artifact_status  # type: ignore
-from src.stock_flow import prepare_backcasting_state  # type: ignore
-from src.params_schema import WeibullLifetime, LifetimeOverride  # type: ignore
-from src.monte_carlo import Triangular, run_monte_carlo  # type: ignore
+from src.monte_carlo import Triangular, summarize_distribution  # type: ignore
+from src.stockflow_model import (  # type: ignore
+    BackcastState, build_backcast_state,
+    run_cohort_survival_model, run_cohort_survival_monte_carlo,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -143,297 +145,7 @@ from src.monte_carlo import Triangular, run_monte_carlo  # type: ignore
 # earlier years changes the state every later year's computation starts from) -- see
 # stock_driven_negative_inflow.png. Almost certainly the reason behind the
 # Hybrid/PHEV/HEV scale_lambda=9.0 tuning comment in params_schema.py.
-def weibull_hazard_lookup(shape_k: float, scale_lambda: float, max_age: int) -> np.ndarray:
-    """
-    Annual hazard by age: h[a] = 1 - S(a+1)/S(a) with S(a) = exp(-(a/lambda)^k).
-    h[max_age] is forced to 1 (a Weibull-tail truncation so cohorts don't persist
-    forever). `mask = S[:-1] > 0` guards against divide-by-zero if S(a) underflows to
-    exactly 0.0 for very old ages -- currently unreachable for max_age=50 and
-    lambda in [9, 13], but worth knowing if those change.
-    """
-    ages = np.arange(max_age + 1, dtype=float)
-    S = np.exp(-((ages / scale_lambda) ** shape_k))
-
-    h = np.zeros(max_age + 1, dtype=float)
-    mask = S[:-1] > 0
-    h[:-1][mask] = 1.0 - (S[1:][mask] / S[:-1][mask])
-    h[-1] = 1.0
-    return np.clip(h, 0.0, 1.0)
-
-
-def get_effective_lifetime_params(
-    drivetrain: str,
-    year: int,
-    base_params_by_drv: dict[str, WeibullLifetime],
-    override_by_drv: dict[str, LifetimeOverride | None],
-) -> tuple[float, float]:
-    """
-    Return (shape_k, scale_lambda) for `drivetrain` in `year`, applying a time-windowed
-    override if one is configured and `year` falls inside [start_year, end_year].
-    As shipped, every entry in `lifetime_override_by_drv` is `None` -- this mechanism is
-    currently inactive for every drivetrain.
-    """
-    base = base_params_by_drv[drivetrain]
-    k, lam = base.shape_k, base.scale_lambda
-
-    ov = override_by_drv.get(drivetrain)
-    if ov is None:
-        return k, lam
-
-    if ov.start_year <= year <= ov.end_year:
-        return ov.shape_k, ov.scale_lambda
-    return k, lam
-
-
-def apply_negative_inflow_policy(
-    policy: str,
-    inflow: float,
-    cohort_stock_after_survival: np.ndarray,
-) -> tuple[np.ndarray, float, float]:
-    """
-    Decide what actually happens to the cohort matrix in a given year, given the raw
-    (possibly negative) residual inflow computed from the target-vs-survival identity.
-
-    Returns (final_cohort_stock, inflow_applied, excess_outflow):
-      - final_cohort_stock: per-cohort stock AFTER this policy's adjustment, BEFORE any
-        positive inflow is added to the "born this year" slot by the caller.
-      - inflow_applied: the inflow actually added to the cohort matrix (0 if inflow <= 0
-        under either policy -- neither policy invents negative registrations).
-      - excess_outflow: additional outflow (beyond natural survival) this policy forced,
-        0 under "report_only".
-
-    "report_only" (ORIGINAL, default): if inflow <= 0, do nothing further -- the cohort
-    matrix keeps whatever natural survival alone produced, silently falling short of
-    the prescribed target. This is a passthrough, added only so both policies share one
-    call site rather than an if/else scattered through the caller.
-
-    "clip_to_target": if inflow <= 0, forces `-inflow` of ADDITIONAL outflow, spread
-    pro-rata across all currently-surviving cohorts (proportional to each cohort's
-    share of total remaining stock), so the cohort matrix's total exactly equals the
-    prescribed target this year. If total remaining stock is already 0 (nothing left to
-    remove), no adjustment is possible and the policy degrades to "report_only" for
-    that single year (there is nothing else it could do).
-    """
-    if inflow > 0:
-        return cohort_stock_after_survival, float(inflow), 0.0
-
-    if policy == "report_only":
-        return cohort_stock_after_survival, 0.0, 0.0
-
-    if policy == "clip_to_target":
-        total = float(cohort_stock_after_survival.sum())
-        excess = -float(inflow)
-        if total <= 0.0:
-            return cohort_stock_after_survival, 0.0, 0.0
-        scale = max(0.0, (total - excess) / total)
-        adjusted = cohort_stock_after_survival * scale
-        actual_excess = total - float(adjusted.sum())
-        return adjusted, 0.0, actual_excess
-
-    raise ValueError(
-        f"negative_inflow_policy={policy!r} is not one of ['report_only', 'clip_to_target']."
-    )
-
-
-NEGATIVE_INFLOW_POLICIES: tuple[str, ...] = ("report_only", "clip_to_target")
-
-
-class BackcastState(NamedTuple):
-    """Lightweight wrapper around prepare_backcasting_state()'s return, for readability."""
-    tau_back: np.ndarray
-    stock0_by_cohort: np.ndarray
-    h_out_life_age: np.ndarray
-    max_age: int
-
-
-def build_backcast_state(
-    stock_series: pd.Series,
-    model_end_year: int,
-    shape_k: float,
-    scale_lambda: float,
-    init_max_age: int = 50,
-) -> BackcastState:
-    """
-    Reconstruct the pre-t0 cohort age structure via `src.stock_flow.prepare_backcasting_state`
-    (contract, per that function's usage here): given `stock0` at `t0` and a Weibull
-    survival curve, returns the cohort "birth years" tracked (`tau_back`), stock0 split
-    by cohort (`stock0_by_cohort`), a precomputed hazard-by-age lookup
-    (`h_out_life_age`), and the truncation age (`max_age`).
-    """
-    t0 = int(stock_series.index.min())
-    stock0 = float(stock_series.loc[t0])
-
-    tau_back, stock0_by_cohort, h_out_life_age, max_age = prepare_backcasting_state(
-        t0=t0,
-        t_end=int(model_end_year),
-        stock0=stock0,
-        init_max_age=init_max_age,
-        shape_k=shape_k,
-        scale_lambda=scale_lambda,
-    )
-    return BackcastState(tau_back, stock0_by_cohort, h_out_life_age, max_age)
-
-
-def run_cohort_survival_model(
-    stock_series: pd.Series,
-    model_end_year: int,
-    drivetrain: str,
-    base_shape_k: float,
-    base_scale_lambda: float,
-    lifetime_override: LifetimeOverride | None,
-    backcast: BackcastState,
-    negative_inflow_policy: str = "report_only",
-) -> dict[str, pd.DataFrame]:
-    """
-    Pure, I/O-free cohort-survival simulation for ONE (region, drivetrain) key.
-
-    MONTE CARLO NOTE: this function takes `stock_series`, `base_shape_k`,
-    `base_scale_lambda`, and `backcast` as plain arguments, with no dependency on the
-    params object or the artifact store. A Monte Carlo sampler can call this directly,
-    many times, with resampled values for any of these (re-deriving `backcast` via
-    `build_backcast_state()` first, since it also depends on shape_k/scale_lambda) --
-    no change to this function or to `main()`'s I/O is needed to do that.
-
-    `negative_inflow_policy`: "report_only" (default, original behavior) or
-    "clip_to_target" -- see `apply_negative_inflow_policy()` above and
-    `MATH_MODELS.md` §2.3 for the exact mechanics of both.
-
-    Returns a dict with keys: "stock_t_tau_df", "outflow_surv_df", "flows_df",
-    "diag_df", "results_df" -- same shapes as the original per-key outputs, plus a new
-    "out_excess" column in `flows_df`/`diag_df` (always 0 under "report_only").
-    """
-    tau_back = backcast.tau_back
-    max_age = backcast.max_age
-
-    t0 = int(stock_series.index.min())
-    t = np.arange(t0, model_end_year + 1, dtype=int)
-    N_t = len(t)
-
-    stock_t = stock_series.reindex(t).ffill().bfill().to_numpy(dtype=float)
-
-    N_tau = tau_back.size
-    stock_t_tau = np.zeros((N_t, N_tau), dtype=float)
-    stock_t_tau[0, :] = backcast.stock0_by_cohort
-
-    inflow_t = np.zeros(N_t, dtype=float)
-    outflow_surv_t = np.zeros(N_t, dtype=float)
-    outflow_excess_t = np.zeros(N_t, dtype=float)
-    outflow_total_t = np.zeros(N_t, dtype=float)
-    outflow_surv_t_tau = np.zeros_like(stock_t_tau)
-
-    diag_rows: list[dict[str, Any]] = []
-
-    # [NEW, performance + Monte Carlo readiness] Cache the hazard-by-age lookup keyed by
-    # (shape_k, scale_lambda). Without an active lifetime_override (the shipped default
-    # for every drivetrain), k_eff/lam_eff are IDENTICAL every single year, so
-    # weibull_hazard_lookup() was being recomputed with the same inputs N_t times per
-    # (region, drivetrain) key -- confirmed via the original notebook's own comment on
-    # prepare_backcasting_state's h_out_life_age (computed once, then silently discarded
-    # in favor of a fresh recomputation every year). Negligible for one deterministic
-    # run, but this function is exactly what Monte Carlo calls repeatedly (see
-    # src/monte_carlo.py) -- multiplying the redundant recomputation by every draw. This
-    # cache makes repeated calls with unchanged (shape_k, scale_lambda) free after the
-    # first, with zero behavior change (same array returned either way).
-    _hazard_cache: dict[tuple[float, float], np.ndarray] = {}
-
-    for i_t in range(1, N_t):
-        year = int(t[i_t])
-        prev_year = int(t[i_t - 1])
-        prev_stock = stock_t_tau[i_t - 1, :].copy()
-
-        ages_prev = (prev_year - tau_back).astype(int)
-        valid_prev = ages_prev >= 0
-
-        k_eff, lam_eff = get_effective_lifetime_params(
-            drivetrain=drivetrain,
-            year=year,
-            base_params_by_drv={drivetrain: WeibullLifetime(base_shape_k, base_scale_lambda)},
-            override_by_drv={drivetrain: lifetime_override},
-        )
-
-        cache_key = (k_eff, lam_eff)
-        h_eff = _hazard_cache.get(cache_key)
-        if h_eff is None:
-            h_eff = weibull_hazard_lookup(shape_k=k_eff, scale_lambda=lam_eff, max_age=max_age)
-            _hazard_cache[cache_key] = h_eff
-
-        hazard = np.zeros_like(prev_stock)
-        in_age_range = valid_prev & (ages_prev <= max_age)
-        hazard[in_age_range] = h_eff[ages_prev[in_age_range]]
-        hazard = np.clip(hazard, 0.0, 1.0)
-
-        out_surv = prev_stock * hazard
-        out_surv = np.minimum(out_surv, prev_stock)
-        stock_after_surv = prev_stock - out_surv
-        # No export/loss term here -- deferred to stage 03.
-        stock_after_both = stock_after_surv
-
-        target = float(stock_t[i_t])
-        remaining_total = float(stock_after_both.sum())
-        inflow_raw = target - remaining_total
-        # inflow_raw < 0: prescribed stock declined faster than natural attrition
-        # explains. What happens next is determined entirely by `negative_inflow_policy`
-        # -- see apply_negative_inflow_policy() and MATH_MODELS.md §2.3.
-
-        cohort_stock_final, inflow_applied, excess_outflow = apply_negative_inflow_policy(
-            policy=negative_inflow_policy,
-            inflow=inflow_raw,
-            cohort_stock_after_survival=stock_after_both,
-        )
-
-        stock_t_tau[i_t, :] = cohort_stock_final
-        j_new = np.where(tau_back == year)[0]
-        if j_new.size != 1:
-            raise ValueError(f"Year {year} not found in tau_back range.")
-        if inflow_applied > 0:
-            stock_t_tau[i_t, j_new[0]] += inflow_applied
-        # NOTE: `inflow_raw` (not `inflow_applied`) is recorded in flows_df/diag_df --
-        # the raw, possibly-negative value stays visible for diagnostics
-        # (check_negative_inflows() reads this column) regardless of which policy is
-        # active, so switching policies never hides that a negative-inflow year occurred.
-        inflow_t[i_t] = inflow_raw
-
-        outflow_surv_t_tau[i_t, :] = out_surv
-        outflow_surv_t[i_t] = float(out_surv.sum())
-        outflow_excess_t[i_t] = excess_outflow
-        outflow_total_t[i_t] = outflow_surv_t[i_t] + outflow_excess_t[i_t]
-
-        diag_rows.append({
-            "year": year,
-            "prev_stock_total": float(prev_stock.sum()),
-            "target_stock": target,
-            "nas": target - float(prev_stock.sum()),
-            "out_survival": outflow_surv_t[i_t],
-            "out_excess": outflow_excess_t[i_t],
-            "out_total": outflow_total_t[i_t],
-            "inflow_residual": inflow_raw,
-        })
-
-    stock_df = pd.DataFrame({"year": t, "stock_prescribed": stock_t}).set_index("year")
-
-    stock_t_tau_df = pd.DataFrame(stock_t_tau, index=t, columns=tau_back)
-    stock_t_tau_df.index.name = "year"
-    stock_t_tau_df.columns.name = "cohort_year"
-
-    outflow_surv_df = pd.DataFrame(outflow_surv_t_tau, index=t, columns=tau_back)
-    outflow_surv_df.index.name = "year"
-    outflow_surv_df.columns.name = "cohort_year"
-
-    flows_df = pd.DataFrame({
-        "year": t, "inflow": inflow_t, "out_survival": outflow_surv_t,
-        "out_excess": outflow_excess_t, "out_total": outflow_total_t,
-    }).set_index("year")
-
-    diag_df = pd.DataFrame(diag_rows).set_index("year")
-    results_df = stock_df.join(diag_df, how="left")
-
-    return {
-        "stock_t_tau_df": stock_t_tau_df,
-        "outflow_surv_df": outflow_surv_df,
-        "flows_df": flows_df,
-        "diag_df": diag_df,
-        "results_df": results_df,
-    }
+# See src/stockflow_model.py for the actual implementation of everything above.
 
 
 def plot_flows_by_drivetrain(
@@ -550,32 +262,6 @@ def plot_stock_vs_target(
     return fig, ax
 
 
-def plot_monte_carlo_histogram(
-    values: list[float],
-    title: str,
-    xlabel: str,
-) -> tuple[plt.Figure, plt.Axes]:
-    """Generic histogram of Monte Carlo draw results -- no EV-specific logic, just a
-    plain distribution plot with mean/percentile markers."""
-    values_arr = np.asarray(values, dtype=float)
-    fig, ax = plt.subplots(figsize=(9, 5.5))
-    ax.hist(values_arr, bins=30, color="#4a7fb5", alpha=0.85, edgecolor="white")
-    mean = values_arr.mean()
-    p5, p95 = np.percentile(values_arr, [5, 95])
-    ax.axvline(mean, color="black", linewidth=1.6, label=f"mean = {mean:.2f}")
-    ax.axvline(p5, color="black", linewidth=1.0, linestyle="--", label=f"5th pct = {p5:.2f}")
-    ax.axvline(p95, color="black", linewidth=1.0, linestyle="--", label=f"95th pct = {p95:.2f}")
-    ax.set_title(title, fontsize=12)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Draws")
-    ax.grid(True, linestyle="--", alpha=0.3, axis="y")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(frameon=False)
-    plt.tight_layout()
-    return fig, ax
-
-
 def main() -> dict[str, Path]:
     """Run the full stage-02 stock-driven cohort model and persist `matrices_by_key`."""
     try:
@@ -601,7 +287,7 @@ def main() -> dict[str, Path]:
     # both are actually consumed by stage 03. Declared under stock_flow for historical
     # reasons; not moved this round since stage 03 isn't fixed yet.
 
-    init_max_age = 50
+    init_max_age = p02.init_max_age
     results_by_key: dict[tuple[str, str], pd.DataFrame] = {}
     matrices_by_key: dict[tuple[str, str], dict[str, pd.DataFrame]] = {}
 
@@ -667,93 +353,177 @@ def main() -> dict[str, Path]:
     print("Saved artifacts:", saved)
 
     # -----------------------------------------------------------------------
-    # Monte Carlo demonstration (opt-in via params.monte_carlo.enabled, default False --
-    # does not affect or slow down a normal deterministic run). See src/monte_carlo.py
-    # for the generic, product-agnostic sampling machinery this uses.
+    # Monte Carlo (opt-in via params.monte_carlo.enabled, default False -- does not
+    # affect or slow down a normal deterministic run above; everything above this
+    # point is unchanged whether or not this block runs).
     #
-    # WHY THIS LIVES HERE, AS A CONCRETE EXAMPLE, NOT JUST LIBRARY CODE: proving Monte
-    # Carlo readiness means actually running it, not just building an API that could
-    # theoretically be called. This varies BEV's Weibull scale_lambda (a genuinely
-    # uncertain parameter -- "TODO: change per scenario" in params_schema.py) via a
-    # Triangular(11, 13, 15) distribution centered on the current point estimate, and
-    # collects the resulting distribution of EUR BEV stock in the model's final year.
-    # Swap the `spec` dict below for any other path in the params tree to explore a
-    # different uncertain input -- the mechanism is fully generic (see
-    # src/monte_carlo.py's UncertaintySpec).
+    # Uses the SAME `_run_cohort_recurrence()` core as the deterministic run above
+    # (via `run_cohort_survival_monte_carlo`, a thin wrapper around it) -- there is no
+    # separate/duplicate implementation of the cohort model for Monte Carlo. Every
+    # varying value (which drivetrains, what spread) comes from `params` --
+    # nothing here is hardcoded.
+    #
+    # IMPORTANT, READ BEFORE COMPARING THIS TO THE TWO DIAGNOSTIC PLOTS ABOVE:
+    # `02_stock_vs_target_check.png` CANNOT show any Monte Carlo variation, ever, no
+    # matter how this block is extended -- it's not a limitation of this code, it's
+    # what "stock-driven" means: modeled stock is FORCED to exactly equal the
+    # REMIND-prescribed target every year, regardless of lifetime assumptions
+    # (verified directly: `abs(modeled_stock - target) < 1e-6` for every year, always).
+    # `02_flows_by_drivetrain_check.png`'s underlying quantities (inflow, outflow) DO
+    # genuinely vary with lifetime uncertainty -- this block now tracks that variation
+    # YEAR BY YEAR (not just a single 2070 total) and plots it directly against the
+    # deterministic flows chart's own style, so the two are actually comparable.
+    #
+    # Saves the RAW per-draw CUMULATIVE arrays (not the full per-year-per-draw arrays,
+    # which would be ~1GB+ at 200,000 draws x 5 drivetrains x 2 metrics x 65 years --
+    # too large to pickle by default) as `mc_stage02_draws`: stage 03 needs these,
+    # with the SAME draw index, to apply its own (unknown_whereabouts_share,
+    # export_share) uncertainty on top of THIS stage's lifetime uncertainty. The
+    # per-YEAR uncertainty bands (median + P2.5/P97.5, tiny -- one number per year,
+    # not per draw) are saved in `mc_stage02_summary` instead.
     # -----------------------------------------------------------------------
     if params.monte_carlo.enabled:
-        bev_key = ("EUR", "BEV")
-        if bev_key not in stock_dict:
-            print("Monte Carlo skipped: no ('EUR', 'BEV') key in stock_dict.")
-        else:
-            bev_stock_series = pd.to_numeric(stock_dict[bev_key]["stock"], errors="coerce").fillna(0.0)
-            bev_stock_series.index = bev_stock_series.index.astype(int)
-            bev_stock_series = bev_stock_series.sort_index()
+        n_draws = params.monte_carlo.n_draws
+        rng_seed_seq = np.random.SeedSequence(params.monte_carlo.seed)
+        drivetrains_present = sorted({drv for (_, drv) in stock_dict.keys()})
+        # Each drivetrain gets its own independently-seeded generator (spawned from
+        # the one params.monte_carlo.seed) -- stable under adding/removing
+        # drivetrains, same reasoning as monte_carlo.sample_scalars().
+        child_seeds = rng_seed_seq.spawn(len(drivetrains_present))
 
-            def compute_total_bev_inflow(params_variant) -> float:
-                """
-                Pure function of params_variant -- re-runs the exact same
-                deterministic per-key computation stage 02 already uses, just with a
-                resampled BEV scale_lambda.
+        draws_by_drv: dict[str, dict[str, np.ndarray]] = {}
+        summary_by_drv: dict[str, dict] = {}
 
-                METRIC CHOICE, worth understanding: this returns TOTAL CUMULATIVE
-                INFLOW over the horizon, not final stock. In a stock-driven model,
-                final stock is PINNED to the REMIND-prescribed target regardless of
-                lifetime assumptions (verified directly: varying scale_lambda from 11
-                to 15 left final EUR BEV stock byte-identical) -- inflow is the
-                residual that adjusts to hit that fixed target, so it's inflow/outflow
-                that actually carries the lifetime uncertainty, not stock itself. This
-                is a structural property of stock-driven models generally, not
-                specific to BEV or this dataset -- worth remembering when choosing a
-                Monte Carlo output metric for any stock-driven model.
-                """
-                p_variant = params_variant.stock_flow
-                base = p_variant.lifetime_by_drv["BEV"]
-                backcast_variant = build_backcast_state(
-                    stock_series=bev_stock_series,
-                    model_end_year=model_end_year,
-                    shape_k=base.shape_k,
-                    scale_lambda=base.scale_lambda,
-                    init_max_age=init_max_age,
-                )
-                out_variant = run_cohort_survival_model(
-                    stock_series=bev_stock_series,
-                    model_end_year=model_end_year,
-                    drivetrain="BEV",
-                    base_shape_k=base.shape_k,
-                    base_scale_lambda=base.scale_lambda,
-                    lifetime_override=p_variant.lifetime_override_by_drv.get("BEV"),
-                    backcast=backcast_variant,
-                    negative_inflow_policy=p_variant.negative_inflow_policy,
-                )
-                return float(out_variant["flows_df"]["inflow"].sum())
+        for drivetrain, child_seed in zip(drivetrains_present, child_seeds):
+            rng = np.random.default_rng(child_seed)
+            base = LIFETIME_BY_DRV[drivetrain]
+            spread = p02.lifetime_scale_lambda_relative_spread[drivetrain]
+            scale_lambda_draws = Triangular(
+                base.scale_lambda * (1 - spread), base.scale_lambda, base.scale_lambda * (1 + spread),
+            ).sample(rng, n=n_draws)
 
-            spec = {
-                ("stock_flow", "lifetime_by_drv", "BEV", "scale_lambda"): Triangular(11.0, 13.0, 15.0),
+            stock_series = pd.to_numeric(stock_dict[("EUR", drivetrain)]["stock"], errors="coerce").fillna(0.0)
+            stock_series.index = stock_series.index.astype(int)
+            stock_series = stock_series.sort_index()
+
+            backcast = build_backcast_state(
+                stock_series=stock_series, model_end_year=model_end_year,
+                shape_k=base.shape_k, scale_lambda=base.scale_lambda,  # point-estimate backcast, shared across draws
+                init_max_age=init_max_age,
+            )
+            result = run_cohort_survival_monte_carlo(
+                stock_series=stock_series, model_end_year=model_end_year, drivetrain=drivetrain,
+                shape_k_draws=np.full(n_draws, base.shape_k), scale_lambda_draws=scale_lambda_draws,
+                lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain), backcast=backcast,
+                negative_inflow_policy=negative_inflow_policy,
+            )
+            draws_by_drv[drivetrain] = {
+                "scale_lambda": scale_lambda_draws,
+                "cumulative_inflow": result["cumulative_inflow"],
+                "cumulative_out_survival": result["cumulative_out_survival"],
             }
-            mc_results = run_monte_carlo(
-                base_params=params,
-                spec=spec,
-                n_draws=params.monte_carlo.n_draws,
-                compute_fn=compute_total_bev_inflow,
-                seed=params.monte_carlo.seed,
-            )
+
+            # Per-YEAR uncertainty band (median, P2.5, P97.5) -- computed from the
+            # full (n_years, n_draws) arrays, but only the tiny summarized band (one
+            # triple of numbers PER YEAR, not per draw) is kept/saved.
+            years_list = result["t"].tolist()
+            inflow_band = {
+                "years": years_list,
+                "p2_5": np.percentile(result["inflow_by_year"], 2.5, axis=1).tolist(),
+                "median": np.percentile(result["inflow_by_year"], 50, axis=1).tolist(),
+                "p97_5": np.percentile(result["inflow_by_year"], 97.5, axis=1).tolist(),
+            }
+            out_survival_band = {
+                "years": years_list,
+                "p2_5": np.percentile(result["out_survival_by_year"], 2.5, axis=1).tolist(),
+                "median": np.percentile(result["out_survival_by_year"], 50, axis=1).tolist(),
+                "p97_5": np.percentile(result["out_survival_by_year"], 97.5, axis=1).tolist(),
+            }
+
+            summary_by_drv[drivetrain] = {
+                "cumulative_inflow": summarize_distribution(result["cumulative_inflow"]),
+                "cumulative_out_survival": summarize_distribution(result["cumulative_out_survival"]),
+                "inflow_by_year_band": inflow_band,
+                "out_survival_by_year_band": out_survival_band,
+            }
+            s = summary_by_drv[drivetrain]["cumulative_out_survival"]
             print(
-                f"Monte Carlo: {len(mc_results)} draws of BEV scale_lambda ~ "
-                f"Triangular(11, 13, 15) -> cumulative BEV inflow through "
-                f"{model_end_year}: mean={np.mean(mc_results):.3f}, std={np.std(mc_results):.3f}"
+                f"Monte Carlo [{drivetrain}]: {n_draws:,} draws, cumulative_out_survival -- "
+                f"mean={s['mean']:.2f}, median={s['median']:.2f}, mode={s['mode']:.2f}, "
+                f"std={s['std']:.2f}, P2.5={s['p2_5']:.2f}, P97.5={s['p97_5']:.2f}"
             )
 
-            fig, _ = plot_monte_carlo_histogram(
-                mc_results,
-                title=f"Monte Carlo: cumulative EUR BEV inflow through {model_end_year} under lifetime uncertainty",
-                xlabel="Cumulative BEV inflow [million vehicles]",
-            )
-            fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
-            fig_dir.mkdir(parents=True, exist_ok=True)
-            fig_path = fig_dir / "02_monte_carlo_bev_stock.png"
-            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-            print(f"Saved diagnostic plot: {fig_path}")
+        saved_mc = save_many(
+            mc_stage02_draws=draws_by_drv,       # raw per-draw CUMULATIVE arrays -- stage 03 consumes these
+            mc_stage02_summary=summary_by_drv,   # cumulative summary + per-year bands -- for inspection/plotting
+            root=PROJECT_ROOT,
+        )
+        print("Saved Monte Carlo artifacts:", saved_mc)
+
+        # -----------------------------------------------------------------------
+        # Plot 1: inflow/outflow OVER TIME, median + P2.5-P97.5 band, all drivetrains
+        # overlaid -- the DIRECT Monte Carlo counterpart of
+        # `02_flows_by_drivetrain_check.png` above (same two-panel inflow/outflow
+        # layout), so the deterministic and uncertainty views are actually comparable
+        # side by side, not an isolated, differently-shaped chart.
+        # -----------------------------------------------------------------------
+        fig, (ax_in, ax_out) = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
+        colors = plt.cm.tab10.colors
+        for i, drivetrain in enumerate(drivetrains_present):
+            color = colors[i % len(colors)]
+            inb = summary_by_drv[drivetrain]["inflow_by_year_band"]
+            oub = summary_by_drv[drivetrain]["out_survival_by_year_band"]
+            ax_in.plot(inb["years"], inb["median"], color=color, linewidth=1.6, label=drivetrain)
+            ax_in.fill_between(inb["years"], inb["p2_5"], inb["p97_5"], color=color, alpha=0.2)
+            ax_out.plot(oub["years"], oub["median"], color=color, linewidth=1.6, label=drivetrain)
+            ax_out.fill_between(oub["years"], oub["p2_5"], oub["p97_5"], color=color, alpha=0.2)
+
+        ax_in.axhline(0, color="black", linewidth=0.8)
+        ax_in.set_title(f"Monte Carlo: annual inflow, median + P2.5-P97.5 band (n={n_draws:,})", fontsize=12)
+        ax_in.set_ylabel("Inflow [million/year]")
+        ax_in.grid(True, linestyle="--", alpha=0.3)
+        ax_in.spines["top"].set_visible(False)
+        ax_in.spines["right"].set_visible(False)
+        ax_in.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+
+        ax_out.set_title("Monte Carlo: annual total outflow, median + P2.5-P97.5 band", fontsize=12)
+        ax_out.set_xlabel("Year")
+        ax_out.set_ylabel("Outflow [million/year]")
+        ax_out.grid(True, linestyle="--", alpha=0.3)
+        ax_out.spines["top"].set_visible(False)
+        ax_out.spines["right"].set_visible(False)
+        ax_out.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+
+        plt.tight_layout(rect=[0, 0, 0.85, 1])
+        fig_path = fig_dir / "02_monte_carlo_flows_over_time.png"
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+        print(f"Saved diagnostic plot: {fig_path}")
+
+        # -----------------------------------------------------------------------
+        # Plot 2: cumulative-by-2070 histograms, one per drivetrain -- "what's the
+        # total by the end of the horizon", complementing plot 1's "how does the
+        # uncertainty evolve year by year".
+        # -----------------------------------------------------------------------
+        fig, axes = plt.subplots(len(drivetrains_present), 1, figsize=(8, 3.2 * len(drivetrains_present)), squeeze=False)
+        for ax_row, drivetrain in zip(axes, drivetrains_present):
+            ax = ax_row[0]
+            summ = summary_by_drv[drivetrain]["cumulative_out_survival"]
+            edges = np.array(summ["bin_edges"])
+            freqs = np.array(summ["frequencies"])
+            ax.bar((edges[:-1] + edges[1:]) / 2, freqs, width=np.diff(edges), color="#4a7fb5", alpha=0.85)
+            ax.axvline(summ["mean"], color="black", linewidth=1.4, label=f"mean={summ['mean']:.1f}")
+            ax.axvline(summ["median"], color="#2b8a3e", linewidth=1.2, linestyle="-.", label=f"median={summ['median']:.1f}")
+            ax.axvline(summ["mode"], color="#e0793c", linewidth=1.2, linestyle=":", label=f"mode={summ['mode']:.1f}")
+            ax.axvline(summ["p2_5"], color="black", linestyle="--", linewidth=1.0, label=f"P2.5={summ['p2_5']:.1f}")
+            ax.axvline(summ["p97_5"], color="black", linestyle="--", linewidth=1.0, label=f"P97.5={summ['p97_5']:.1f}")
+            ax.set_title(f"{drivetrain}: cumulative out-survival through {model_end_year} (n={n_draws:,})")
+            ax.legend(frameon=False, fontsize=8)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+        plt.tight_layout()
+        fig_path = fig_dir / "02_monte_carlo_cumulative_out_survival.png"
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+        print(f"Saved diagnostic plot: {fig_path}")
 
     return saved
 

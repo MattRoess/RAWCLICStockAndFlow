@@ -132,6 +132,61 @@ class Normal(Distribution):
         return self.mean
 
 
+@dataclass(frozen=True)
+class Empirical(Distribution):
+    """
+    Histogram-based distribution: given bin edges and frequencies (e.g. a 50-bin
+    empirical histogram from a composition data source), sample by drawing a bin
+    proportional to its frequency, then interpolating UNIFORMLY within that bin's
+    range for a continuous value -- standard technique for sampling from a binned
+    empirical distribution without inventing a parametric shape for it.
+
+    `bin_edges`: length n+1 (n bin boundaries + 1), monotonically increasing.
+    `frequencies`: length n, non-negative (need not already sum to 1 -- normalized here).
+    """
+    bin_edges: tuple[float, ...]
+    frequencies: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.bin_edges) != len(self.frequencies) + 1:
+            raise ValueError(
+                f"Empirical: bin_edges must have exactly one more entry than "
+                f"frequencies (got {len(self.bin_edges)} edges, "
+                f"{len(self.frequencies)} frequencies)."
+            )
+        if any(f < 0 for f in self.frequencies):
+            raise ValueError("Empirical: frequencies must be non-negative.")
+        if sum(self.frequencies) <= 0:
+            raise ValueError("Empirical: frequencies must sum to a positive value.")
+        edges = np.asarray(self.bin_edges, dtype=float)
+        if np.any(np.diff(edges) <= 0):
+            raise ValueError("Empirical: bin_edges must be strictly increasing.")
+
+    def sample(self, rng: np.random.Generator, n: int = 1) -> np.ndarray:
+        edges = np.asarray(self.bin_edges, dtype=float)
+        freqs = np.asarray(self.frequencies, dtype=float)
+        probs = freqs / freqs.sum()
+        bin_idx = rng.choice(len(freqs), size=n, p=probs)
+        low = edges[bin_idx]
+        high = edges[bin_idx + 1]
+        return rng.uniform(low, high)
+
+    def point(self) -> float:
+        """Midpoint of the highest-frequency bin (the histogram's mode bin)."""
+        edges = np.asarray(self.bin_edges, dtype=float)
+        freqs = np.asarray(self.frequencies, dtype=float)
+        i = int(np.argmax(freqs))
+        return float((edges[i] + edges[i + 1]) / 2.0)
+
+    @classmethod
+    def from_values(cls, values: np.ndarray, bins: int = 50) -> "Empirical":
+        """Build an Empirical distribution FROM raw draws/observations by binning them
+        -- the inverse of `sample()`, used to turn one stage's raw output into the next
+        stage's input distribution."""
+        freqs, edges = np.histogram(np.asarray(values, dtype=float), bins=bins)
+        return cls(bin_edges=tuple(float(e) for e in edges), frequencies=tuple(float(f) for f in freqs))
+
+
 def as_distribution(x: float | Distribution) -> Distribution:
     """Wrap a plain float as a `Fixed` distribution; pass a real `Distribution` through
     unchanged. Lets calling code accept `float | Distribution` uniformly."""
@@ -230,10 +285,13 @@ def run_monte_carlo(
     that also varies between draws (e.g. don't close over mutable global state).
 
     This function has no EV/vehicle-specific logic -- it's a generic "sample N variants
-    of a params tree, run a function on each, collect results" loop. See
-    `02_stockdriven.py`'s Monte Carlo block for a concrete, EV-specific usage example
-    (varying `StockFlowParams.lifetime_by_drv["BEV"].scale_lambda` and collecting final
-    stock).
+    of a params tree, run a function on each, collect results" loop.
+
+    PERFORMANCE NOTE: this rebuilds a full `Params` tree (via `dataclasses.replace`)
+    on every draw. Fine for a few hundred/thousand draws. At high volume (tens of
+    thousands+), where you're only ever changing a handful of leaf scalars, see
+    `sample_scalars()` below instead -- it draws plain NumPy arrays up front with no
+    per-draw tree reconstruction, which is what actually matters at 200,000 draws.
     """
     rng = np.random.default_rng(seed)
     results: list[Any] = []
@@ -241,3 +299,161 @@ def run_monte_carlo(
         params_variant = sample_params(base_params, spec, rng)
         results.append(compute_fn(params_variant))
     return results
+
+
+def sample_scalars(
+    spec: dict[str, Distribution],
+    n_draws: int,
+    seed: int | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Draw `n_draws` values for EACH distribution in `spec` up front, as plain NumPy
+    arrays -- no `Params` tree involved at all. This is the performance-critical path
+    for high-volume Monte Carlo (tens of thousands of draws+): building and
+    `dataclasses.replace`-ing a full nested `Params` object per draw has real,
+    unnecessary overhead when you're only ever varying a handful of leaf scalars.
+
+    `spec`: {label -> Distribution}, where `label` is any string you choose to
+    identify that parameter later (e.g. "BEV_scale_lambda") -- unlike
+    `UncertaintySpec`'s tuple-of-path keys (which double as a literal path into a
+    `Params` tree), these labels are just names for your own bookkeeping; nothing
+    automatically writes them back into a `Params` object. Combine with
+    `sensitivity_correlations()` below using the same labels.
+
+    Returns {label -> array of shape (n_draws,)}. Same `seed` always reproduces the
+    same draws for the same spec (each distribution gets its own independently-seeded
+    sub-generator, so adding/removing a parameter from `spec` doesn't change the other
+    parameters' draws -- unlike drawing everything from one shared `rng` in a fixed
+    dict-iteration order, which WOULD shift downstream draws if `spec` ever changes
+    size mid-project).
+    """
+    root_rng = np.random.default_rng(seed)
+    # Give every named parameter its own independently-seeded generator (derived from
+    # the root seed via SeedSequence.spawn) so results are stable under adding/removing
+    # keys from `spec`, not just under reordering them.
+    seed_seq = np.random.SeedSequence(seed)
+    child_seeds = seed_seq.spawn(len(spec))
+    out: dict[str, np.ndarray] = {}
+    for (label, dist), child_seed in zip(spec.items(), child_seeds):
+        rng = np.random.default_rng(child_seed)
+        out[label] = as_distribution(dist).sample(rng, n=n_draws)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Summary statistics and histogram persistence
+# ---------------------------------------------------------------------------
+def summarize_distribution(values: np.ndarray, bins: int = 50) -> dict[str, Any]:
+    """
+    Standard summary of a Monte Carlo output distribution: mean, median, mode (the
+    center of the highest-frequency bin in a `bins`-bin histogram -- there's no single
+    universally-agreed "mode" for continuous data, this is the same binning-based
+    convention used for `Empirical.point()` above, kept consistent both directions),
+    the 95% interval (P2.5, P97.5), plus the histogram itself (`bin_edges`,
+    `frequencies`) for storage/reuse as the next stage's `Empirical` input distribution
+    (see `Empirical.from_values()`).
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[~np.isnan(values)]
+    if values.size == 0:
+        raise ValueError("summarize_distribution: no valid (non-NaN) values to summarize.")
+
+    freqs, edges = np.histogram(values, bins=bins)
+    mode_bin = int(np.argmax(freqs))
+    mode = float((edges[mode_bin] + edges[mode_bin + 1]) / 2.0)
+
+    return {
+        "n": int(values.size),
+        "mean": float(np.mean(values)),
+        "median": float(np.median(values)),
+        "mode": mode,
+        "std": float(np.std(values)),
+        "p2_5": float(np.percentile(values, 2.5)),
+        "p97_5": float(np.percentile(values, 97.5)),
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+        "bin_edges": edges.tolist(),
+        "frequencies": freqs.tolist(),
+    }
+
+
+def sensitivity_correlations(
+    input_draws: dict[str, np.ndarray],
+    output_values: np.ndarray,
+) -> "pd.DataFrame":
+    """
+    Spearman RANK correlation between each sampled input parameter and one output
+    metric, across all draws -- the data a tornado plot needs. Rank correlation (not
+    Pearson) because the relationship between an input like `scale_lambda` and an
+    output like cumulative inflow need not be linear, only monotonic, for rank
+    correlation to sensibly capture "this parameter matters."
+
+    Returns a DataFrame with columns [parameter, spearman_r, abs_r], sorted by
+    `abs_r` descending -- the most influential parameters first, ready to plot as a
+    tornado chart directly.
+    """
+    import pandas as pd
+    from scipy import stats
+
+    output_values = np.asarray(output_values, dtype=float)
+    rows = []
+    for label, draws in input_draws.items():
+        draws = np.asarray(draws, dtype=float)
+        r, _p = stats.spearmanr(draws, output_values)
+        rows.append({"parameter": label, "spearman_r": float(r), "abs_r": abs(float(r))})
+
+    return pd.DataFrame(rows).sort_values("abs_r", ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Generic diagnostic plots (no EV-specific logic -- caller saves the figure)
+# ---------------------------------------------------------------------------
+def plot_distribution(
+    values: np.ndarray,
+    title: str,
+    xlabel: str,
+    bins: int = 50,
+):
+    """Generic Monte Carlo output histogram with mean/P2.5/P97.5 markers. Returns
+    (fig, ax) -- caller saves it (`fig.savefig(...)`)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    values = np.asarray(values, dtype=float)
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.hist(values, bins=bins, color="#4a7fb5", alpha=0.85, edgecolor="white")
+    mean = values.mean()
+    p2_5, p97_5 = np.percentile(values, [2.5, 97.5])
+    ax.axvline(mean, color="black", linewidth=1.6, label=f"mean = {mean:.2f}")
+    ax.axvline(p2_5, color="black", linewidth=1.0, linestyle="--", label=f"P2.5 = {p2_5:.2f}")
+    ax.axvline(p97_5, color="black", linewidth=1.0, linestyle="--", label=f"P97.5 = {p97_5:.2f}")
+    ax.set_title(title, fontsize=12)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Draws")
+    ax.grid(True, linestyle="--", alpha=0.3, axis="y")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+    plt.tight_layout()
+    return fig, ax
+
+
+def plot_tornado(sensitivity_df, title: str, top_n: int = 20):
+    """Tornado chart from sensitivity_correlations()'s output. Returns (fig, ax)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    df = sensitivity_df.head(top_n).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(9, max(3, 0.35 * len(df))))
+    colors = ["#c0392b" if r < 0 else "#2b6cb0" for r in df["spearman_r"]]
+    ax.barh(df["parameter"], df["spearman_r"], color=colors)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_title(title, fontsize=12)
+    ax.set_xlabel("Spearman rank correlation with output")
+    ax.grid(True, linestyle="--", alpha=0.3, axis="x")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+    return fig, ax

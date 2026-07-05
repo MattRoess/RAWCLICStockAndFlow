@@ -81,6 +81,30 @@ ARTIFACT_FILES: dict[str, str] = {
     "bev_surv_outflow": "04_bev_surv_outflow.pkl",
     "mass_by_year_elem_dict": "04_mass_by_year_elem_dict.pkl",
     "combined": "04_combined.pkl",
+    "mc_stage02_draws": "02_mc_draws.pkl",
+    # [NEW] Raw per-drivetrain, per-draw Monte Carlo arrays from 02_stockdriven.py
+    # (cumulative_inflow, cumulative_out_survival, and the scale_lambda draws that
+    # produced them). Stage 03's own Monte Carlo block loads this and applies its OWN
+    # (unknown_whereabouts_share, export_share) uncertainty to these SAME per-draw
+    # values -- that's what makes this genuine propagation, not independent
+    # per-stage resampling. Raw arrays, not just a summary, because a summary alone
+    # would lose the draw-to-draw correspondence downstream stages need.
+    "mc_stage02_summary": "02_mc_summary.pkl",
+    # [NEW] mean/median/mode/P2.5/P97.5 + 50-bin histogram per drivetrain, per metric
+    # -- for direct inspection/plotting of stage 02's own Monte Carlo output.
+    "mc_stage03_summary": "03_mc_summary.pkl",
+    # [NEW] Same idea, for stage 03's own Monte Carlo extension: applies THIS stage's
+    # (unknown_whereabouts_share, export_share) uncertainty to stage 02's per-draw
+    # cumulative_out_survival (loaded from mc_stage02_draws), producing
+    # collected/export/unknown summaries per drivetrain and as an EU total.
+    # NOTE: stage-04's per-scenario outputs (11 scenarios x several output types across
+    # 04_01/04_03/04_04) are deliberately NOT individually registered here -- see
+    # `materials.py`'s `save_unregistered_scenario_outputs()` docstring for why (adding
+    # one entry per scenario-x-output combination doesn't scale, and would need to grow
+    # every time a scenario is added). They're saved via that shared helper instead,
+    # invisible to `artifact_status()` by design -- a real, deliberately-deferred option
+    # to register them (e.g. a wildcard/prefix-based registry) is flagged there, not
+    # implemented unasked.
     "ratio_df": "05_ratio_df.pkl",
     "stock_disagg_df": "05_stock_disagg_df.pkl",
     "synthetic_pre_2005_inflows": "03_synthetic_pre_2005_inflows.pkl",

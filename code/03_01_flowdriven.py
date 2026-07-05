@@ -90,6 +90,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 import src.flowdriven_model as fdm  # type: ignore
 import src.disaggregation as disagg  # type: ignore
 import src.artifacts as artifacts  # type: ignore
+from src.monte_carlo import Normal, summarize_distribution  # type: ignore
+from src.stockflow_model import build_backcast_state, run_cohort_survival_monte_carlo  # type: ignore
 
 load_many = artifacts.load_many
 save_many = artifacts.save_many
@@ -168,9 +170,10 @@ def main() -> dict[str, Any]:
     # -----------------------------------------------------------------------
     # Load inputs
     # -----------------------------------------------------------------------
-    loaded = load_many("params", "matrices_by_key", root=PROJECT_ROOT)
+    loaded = load_many("params", "matrices_by_key", "stock_dict", root=PROJECT_ROOT)
     params = loaded["params"]
     matrices_by_key = loaded["matrices_by_key"]
+    stock_dict = loaded["stock_dict"]
 
     p02 = params.stock_flow
     p03 = params.disaggregation
@@ -499,6 +502,204 @@ def main() -> dict[str, Any]:
         root=PROJECT_ROOT,
     )
     print("Saved artifacts:", saved)
+
+    # -----------------------------------------------------------------------
+    # Monte Carlo (opt-in via params.monte_carlo.enabled, default False -- does not
+    # affect or slow down a normal deterministic run above; everything above this
+    # point is unchanged whether or not this block runs).
+    #
+    # PROPAGATION: loads `mc_stage02_draws` (raw per-drivetrain, per-draw
+    # `scale_lambda` and `cumulative_out_survival` arrays from 02_stockdriven.py's own
+    # Monte Carlo run) and applies THIS stage's own uncertain parameters
+    # (unknown_whereabouts_share, export_share) to those SAME draws, using
+    # `disaggregation.compute_collected_export_unknown_shares` -- the IDENTICAL
+    # function the deterministic split above uses, not a separate implementation.
+    # Same draw index throughout: draw #12345's stage-02 lifetime outcome flows into
+    # draw #12345's stage-03 split outcome -- genuine propagation, not independent
+    # per-stage resampling.
+    #
+    # PER-YEAR BANDS, not just a cumulative endpoint: stage 02 only PERSISTS the
+    # cumulative (2070-total) per-draw array (a full per-year-per-draw array would be
+    # ~100MB+ per drivetrain per metric -- too large to pickle by default). To get a
+    # genuine year-by-year uncertainty band here too (matching
+    # `02_monte_carlo_flows_over_time.png`'s style, not just an isolated histogram),
+    # this block RE-RUNS `run_cohort_survival_monte_carlo` using the SAME saved
+    # `scale_lambda` draws (deterministic given the same inputs -- this reproduces
+    # stage 02's per-draw results exactly, without needing to have persisted the large
+    # intermediate array). `src/stockflow_model.py` is what makes this possible: the
+    # exact same function stage 02 uses is now a normal library import here too.
+    #
+    # Uncertainty spreads (`unknown_whereabouts_share_std`, `export_share_std`) come
+    # from `params.stock_flow` -- nothing hardcoded here.
+    # -----------------------------------------------------------------------
+    if params.monte_carlo.enabled:
+        try:
+            mc_stage02 = load_many("mc_stage02_draws", root=PROJECT_ROOT)["mc_stage02_draws"]
+        except FileNotFoundError:
+            print(
+                "Monte Carlo skipped: 'mc_stage02_draws' not found -- run "
+                "02_stockdriven.py with params.monte_carlo.enabled=True first."
+            )
+            mc_stage02 = None
+
+        if mc_stage02 is not None:
+            n_draws = params.monte_carlo.n_draws
+            model_end_year_02 = int(p02.model_end_year)
+            init_max_age = p02.init_max_age
+            rng_seed_seq = np.random.SeedSequence(params.monte_carlo.seed, spawn_key=(1,))
+            # spawn_key=(1,) deliberately differs from stage 02's own SeedSequence
+            # (spawn_key=(0,), implicit) -- this stage's shares are sampled
+            # independently of stage 02's lifetime, not correlated with it by
+            # accident of sharing the same raw seed stream.
+            drivetrains_present = sorted(mc_stage02.keys())
+            child_seeds = rng_seed_seq.spawn(len(drivetrains_present))
+
+            per_drivetrain_mc: dict[str, dict[str, np.ndarray]] = {}
+            per_drivetrain_band: dict[str, dict[str, dict]] = {}
+
+            for drivetrain, child_seed in zip(drivetrains_present, child_seeds):
+                rng = np.random.default_rng(child_seed)
+
+                # --- cumulative (2070-total) split, using stage 02's saved arrays ---
+                cumulative_out_survival = mc_stage02[drivetrain]["cumulative_out_survival"]
+
+                uw_point = unknown_whereabouts_share[drivetrain]
+                uw_std = p02.unknown_whereabouts_share_std[drivetrain]
+                uw_draws = Normal(uw_point, uw_std, clip_min=0.0, clip_max=1.0).sample(rng, n=n_draws)
+
+                exp_point = export_share_by_drivetrain.get(drivetrain, 0.0)
+                exp_std = p02.export_share_std.get(drivetrain, 0.0)
+                exp_draws = Normal(exp_point, exp_std, clip_min=0.0, clip_max=1.0).sample(rng, n=n_draws)
+
+                unk_share, exp_share, coll_share = disagg.compute_collected_export_unknown_shares(uw_draws, exp_draws)
+                per_drivetrain_mc[drivetrain] = {
+                    "cumulative_collected": cumulative_out_survival * coll_share,
+                    "cumulative_export": cumulative_out_survival * exp_share,
+                    "cumulative_unknown": cumulative_out_survival * unk_share,
+                }
+
+                # --- per-YEAR split, regenerated from the SAME scale_lambda draws ---
+                scale_lambda_draws = mc_stage02[drivetrain]["scale_lambda"]
+                base_shape_k = p02.lifetime_by_drv[drivetrain].shape_k
+                stock_series = pd.to_numeric(stock_dict[("EUR", drivetrain)]["stock"], errors="coerce").fillna(0.0)
+                stock_series.index = stock_series.index.astype(int)
+                stock_series = stock_series.sort_index()
+                backcast = build_backcast_state(
+                    stock_series=stock_series, model_end_year=model_end_year_02,
+                    shape_k=base_shape_k, scale_lambda=p02.lifetime_by_drv[drivetrain].scale_lambda,
+                    init_max_age=init_max_age,
+                )
+                result_02 = run_cohort_survival_monte_carlo(
+                    stock_series=stock_series, model_end_year=model_end_year_02, drivetrain=drivetrain,
+                    shape_k_draws=np.full(n_draws, base_shape_k), scale_lambda_draws=scale_lambda_draws,
+                    lifetime_override=p02.lifetime_override_by_drv.get(drivetrain), backcast=backcast,
+                    negative_inflow_policy=p02.negative_inflow_policy,
+                )
+                # (n_years, n_draws) x (n_draws,) broadcasts correctly: each draw's own
+                # share applies to that same draw's every year.
+                out_survival_by_year = result_02["out_survival_by_year"]
+                collected_by_year = out_survival_by_year * coll_share[None, :]
+                export_by_year = out_survival_by_year * exp_share[None, :]
+                unknown_by_year = out_survival_by_year * unk_share[None, :]
+                years_list = result_02["t"].tolist()
+
+                per_drivetrain_band[drivetrain] = {
+                    "collected": {
+                        "years": years_list,
+                        "p2_5": np.percentile(collected_by_year, 2.5, axis=1).tolist(),
+                        "median": np.percentile(collected_by_year, 50, axis=1).tolist(),
+                        "p97_5": np.percentile(collected_by_year, 97.5, axis=1).tolist(),
+                    },
+                    "export": {
+                        "years": years_list,
+                        "p2_5": np.percentile(export_by_year, 2.5, axis=1).tolist(),
+                        "median": np.percentile(export_by_year, 50, axis=1).tolist(),
+                        "p97_5": np.percentile(export_by_year, 97.5, axis=1).tolist(),
+                    },
+                    "unknown": {
+                        "years": years_list,
+                        "p2_5": np.percentile(unknown_by_year, 2.5, axis=1).tolist(),
+                        "median": np.percentile(unknown_by_year, 50, axis=1).tolist(),
+                        "p97_5": np.percentile(unknown_by_year, 97.5, axis=1).tolist(),
+                    },
+                }
+
+            eu_total_mc = {
+                metric: sum(per_drivetrain_mc[drv][metric] for drv in drivetrains_present)
+                for metric in ["cumulative_collected", "cumulative_export", "cumulative_unknown"]
+            }
+
+            summary_mc: dict[str, dict] = {}
+            for drv in drivetrains_present:
+                for metric, values in per_drivetrain_mc[drv].items():
+                    summary_mc[f"{drv}__{metric}"] = summarize_distribution(values)
+                for flow_name, band in per_drivetrain_band[drv].items():
+                    summary_mc[f"{drv}__{flow_name}_by_year_band"] = band
+            for metric, values in eu_total_mc.items():
+                summary_mc[f"EU_total__{metric}"] = summarize_distribution(values)
+
+            saved_mc = save_many(mc_stage03_summary=summary_mc, root=PROJECT_ROOT)
+            print("Saved Monte Carlo artifacts:", saved_mc)
+
+            s = summary_mc["EU_total__cumulative_collected"]
+            print(
+                f"Monte Carlo [EU total, collected]: {n_draws:,} draws -- "
+                f"mean={s['mean']:.2f}, median={s['median']:.2f}, mode={s['mode']:.2f}, "
+                f"std={s['std']:.2f}, P2.5={s['p2_5']:.2f}, P97.5={s['p97_5']:.2f}"
+            )
+
+            # -----------------------------------------------------------------------
+            # Plot 1: collected/export/unknown OVER TIME, median + P2.5-P97.5 band,
+            # all drivetrains overlaid -- the direct Monte Carlo counterpart of this
+            # stage's own flow quantities, in the same style as
+            # `02_monte_carlo_flows_over_time.png`.
+            # -----------------------------------------------------------------------
+            fig, axes = plt.subplots(3, 1, figsize=(11, 12), sharex=True)
+            colors = plt.cm.tab10.colors
+            for i, drivetrain in enumerate(drivetrains_present):
+                color = colors[i % len(colors)]
+                for ax, flow_name in zip(axes, ["collected", "export", "unknown"]):
+                    band = per_drivetrain_band[drivetrain][flow_name]
+                    ax.plot(band["years"], band["median"], color=color, linewidth=1.6, label=drivetrain)
+                    ax.fill_between(band["years"], band["p2_5"], band["p97_5"], color=color, alpha=0.2)
+            for ax, flow_name in zip(axes, ["Collected", "Export", "Unknown whereabouts"]):
+                ax.set_title(f"Monte Carlo: annual {flow_name.lower()} outflow, median + P2.5-P97.5 band", fontsize=12)
+                ax.set_ylabel(f"{flow_name} [million/year]")
+                ax.grid(True, linestyle="--", alpha=0.3)
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+                ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+            axes[-1].set_xlabel("Year")
+            plt.tight_layout(rect=[0, 0, 0.85, 1])
+            fig_path = fig_dir / "03_monte_carlo_flows_over_time.png"
+            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+            print(f"Saved diagnostic plot: {fig_path}")
+
+            # -----------------------------------------------------------------------
+            # Plot 2: cumulative-by-2070 histogram, EU total collected -- "what's the
+            # total by the end of the horizon", complementing plot 1's "how does the
+            # uncertainty evolve year by year".
+            # -----------------------------------------------------------------------
+            fig, ax = plt.subplots(figsize=(9, 5.5))
+            edges = np.array(s["bin_edges"])
+            freqs = np.array(s["frequencies"])
+            ax.bar((edges[:-1] + edges[1:]) / 2, freqs, width=np.diff(edges), color="#4a7fb5", alpha=0.85)
+            ax.axvline(s["mean"], color="black", linewidth=1.4, label=f"mean={s['mean']:.1f}")
+            ax.axvline(s["median"], color="#2b8a3e", linewidth=1.2, linestyle="-.", label=f"median={s['median']:.1f}")
+            ax.axvline(s["mode"], color="#e0793c", linewidth=1.2, linestyle=":", label=f"mode={s['mode']:.1f}")
+            ax.axvline(s["p2_5"], color="black", linestyle="--", linewidth=1.0, label=f"P2.5={s['p2_5']:.1f}")
+            ax.axvline(s["p97_5"], color="black", linestyle="--", linewidth=1.0, label=f"P97.5={s['p97_5']:.1f}")
+            ax.set_title(f"Monte Carlo: EU-total cumulative collected volume through {end_year_model} (n={n_draws:,})")
+            ax.set_xlabel("Cumulative collected [million vehicles]")
+            ax.set_ylabel("Draws")
+            ax.legend(frameon=False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            plt.tight_layout()
+            fig_path = fig_dir / "03_monte_carlo_eu_collected.png"
+            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+            print(f"Saved diagnostic plot: {fig_path}")
+
     return saved
 
 

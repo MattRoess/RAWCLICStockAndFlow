@@ -43,6 +43,51 @@ import numpy as np
 import pandas as pd
 
 
+def compute_collected_export_unknown_shares(unknown_whereabouts_share, export_share):
+    """
+    [NEW] The actual arithmetic of the collected/export/unknown split, extracted into
+    one place so both the deterministic per-year split below AND a Monte Carlo
+    per-draw split (see 03_01_flowdriven.py's Monte Carlo block) use the IDENTICAL
+    computation -- not two separate implementations of the same formula.
+
+    Works for EITHER a plain float (the normal, single-run case) OR a NumPy array
+    (Monte Carlo, one value per draw) -- `np.clip` and elementwise arithmetic behave
+    the same way for both, so no special-casing is needed for the arithmetic itself.
+
+    Returns (unknown_share, export_s, collected_share), same type/shape as the inputs.
+
+    ERROR HANDLING DIFFERS BETWEEN THE TWO CASES, deliberately:
+    - Scalar input: raises `ValueError` if unknown_share + export_s > 1 -- EXACT
+      original behavior, unchanged.
+    - Array input: rather than aborting an entire 200,000-draw Monte Carlo run over a
+      handful of draws where two independently-sampled shares happen to sum past 1
+      (an edge-of-distribution sampling artifact, not a data error), those draws'
+      `collected_share` is clipped to 0 instead, and a count is printed. Aborting a
+      long-running batch over a handful of extreme draws would be worse than slightly
+      under-representing the tail for those specific draws.
+    """
+    unknown_share = np.clip(unknown_whereabouts_share, 0.0, 1.0)
+    export_s = np.clip(export_share, 0.0, 1.0)
+    total_share = unknown_share + export_s
+
+    if isinstance(unknown_share, np.ndarray) or isinstance(export_s, np.ndarray):
+        over = total_share > 1.0
+        if np.any(over):
+            print(
+                f"NOTE: {int(np.sum(over))}/{np.size(total_share)} Monte Carlo draws had "
+                f"unknown_whereabouts_share + export_share > 1.0 (sampling artifact at "
+                f"the tails) -- collected_share clipped to 0 for those draws instead of "
+                f"raising, so the run isn't aborted over rare edge draws."
+            )
+        collected_share = np.clip(1.0 - total_share, 0.0, None)
+    else:
+        if total_share > 1.0:
+            raise ValueError(f"Shares exceed 1 for this drivetrain: unknown={unknown_share}, export={export_s}")
+        collected_share = 1.0 - total_share
+
+    return unknown_share, export_s, collected_share
+
+
 def split_outflows_collected_unknown_export(
     matrices_by_key: dict,
     unknown_whereabouts_share: dict[str, float],
@@ -58,16 +103,13 @@ def split_outflows_collected_unknown_export(
                 "Add it to unknown_whereabouts_share."
             )
 
-        unknown_share = float(np.clip(unknown_whereabouts_share[drivetrain], 0.0, 1.0))
-        export_s = float(np.clip(export_share.get(drivetrain, 0.0), 0.0, 1.0))
-
-        total_share = unknown_share + export_s
-        if total_share > 1.0:
-            raise ValueError(f"Shares exceed 1 for {drivetrain}")
+        unknown_share, export_s, collected_share = compute_collected_export_unknown_shares(
+            unknown_whereabouts_share[drivetrain], export_share.get(drivetrain, 0.0),
+        )
 
         unk_df = surv_df * unknown_share
         exp_df = surv_df * export_s
-        coll_df = surv_df * (1.0 - unknown_share - export_s)
+        coll_df = surv_df * collected_share
 
 
         matrices_by_key[key]["outflow_unk_df"] = unk_df

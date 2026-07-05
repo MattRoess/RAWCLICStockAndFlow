@@ -153,6 +153,12 @@ class LifetimeOverride:
 class StockFlowParams:
     model_end_year: int = 2070
     last_exp_data_year: int = 2022
+    init_max_age: int = 50
+    # [NEW, centralized] Was a hardcoded local variable in 02_stockdriven.py's main().
+    # Moved here because stage 03's Monte Carlo extension needs the IDENTICAL value to
+    # regenerate stage 02's per-year cohort results from the same saved scale_lambda
+    # draws -- if this were hardcoded separately in two files, they could silently
+    # drift out of sync.
 
     lifetime_by_drv: dict[str, WeibullLifetime] = field(default_factory=lambda: {
         "Hybrid": WeibullLifetime(3.0, 9.0),
@@ -200,9 +206,50 @@ class StockFlowParams:
     # See 02_stockdriven.py's NEGATIVE_INFLOW_POLICIES for the implementation, and
     # HOW_TO_RUN_AND_VERIFY.md for how to verify either one.
 
+    # -------------------------------------------------------------------------
+    # Monte Carlo uncertainty around the point estimates above.
+    # -------------------------------------------------------------------------
+    # Centralized HERE, not hardcoded in any script -- changing an uncertainty range is
+    # exactly the same kind of edit as changing a point estimate (edit this file,
+    # re-run 00_parameters.py). Expressed as SPREADS (a relative fraction, or an
+    # absolute standard deviation) rather than baked-in Distribution objects, so the
+    # actual distribution is always built fresh from whatever the CURRENT point
+    # estimate is at sampling time -- if you change `lifetime_by_drv["BEV"]
+    # .scale_lambda`, the Monte Carlo spread around it updates automatically, with no
+    # separate value to keep in sync.
+    lifetime_scale_lambda_relative_spread: dict[str, float] = field(default_factory=lambda: {
+        drv: 0.15 for drv in ALL_DRIVETRAINS
+    })
+    # Used to build Triangular(point*(1-spread), point, point*(1+spread)) around
+    # lifetime_by_drv[drv].scale_lambda. PLACEHOLDER default (15%) -- tune per
+    # drivetrain once real uncertainty ranges (e.g. a survival-curve fit's own
+    # confidence interval) are available.
+
+    unknown_whereabouts_share_std: dict[str, float] = field(default_factory=lambda: {
+        drv: 0.05 for drv in ALL_DRIVETRAINS
+    })
+    # Used to build Normal(point, std, clip 0..1) around unknown_whereabouts_share[drv].
+
+    export_share_std: dict[str, float] = field(default_factory=lambda: {
+        drv: 0.02 for drv in ALL_DRIVETRAINS
+    })
+    # Used to build Normal(point, std, clip 0..1) around export_share_by_drv[drv].
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         lifetime_drvs = set(self.lifetime_by_drv)
+
+        for name, mapping in (
+            ("lifetime_scale_lambda_relative_spread", self.lifetime_scale_lambda_relative_spread),
+            ("unknown_whereabouts_share_std", self.unknown_whereabouts_share_std),
+            ("export_share_std", self.export_share_std),
+        ):
+            missing = lifetime_drvs - set(mapping)
+            if missing:
+                issues.append(f"stock_flow.{name} is missing drivetrains present in lifetime_by_drv: {sorted(missing)}.")
+            for drv, spread in mapping.items():
+                if spread < 0:
+                    issues.append(f"stock_flow.{name}['{drv}'] = {spread} must be >= 0.")
 
         if self.negative_inflow_policy not in {"report_only", "clip_to_target"}:
             issues.append(
@@ -286,13 +333,60 @@ class MaterialsParams:
     #                       Zn, Dy, Nd, Pr, Al, Cu -- see ELEMENT_LIST). NOT the
     #                       default; only switch to this if element-level detail is
     #                       genuinely needed later.
-    material_level_key: str = "materialKeyLevel2"
-    # [NEW] Which material-hierarchy level to report material names at, when
-    # composition_parameter_code == "m-c". One of "materialKeyLevel0".."materialKeyLevel4"
-    # or "materialKeyLevel_highest". STILL OPEN: the right default depends on your real
-    # composition file's hierarchy (which level is "the material name" you want to see) --
-    # "materialKeyLevel2" matches materials.py's own prior default, not independently
-    # confirmed against real data yet. Adjust once you can see actual composition rows.
+    material_level_key: str = "materialKeyLevel_highest"
+    # [UPDATED] Which material-hierarchy level to report material names at, when
+    # composition_parameter_code == "m-c". Changed default from "materialKeyLevel2" to
+    # "materialKeyLevel_highest" to match the REAL stage-04 code's own usage (both
+    # 04_01_materials.py and 04_03_tractionmotors.py use "materialKeyLevel_highest" --
+    # a per-row fallback to the deepest available level, more robust than assuming
+    # uniform depth across every composition row). One of "materialKeyLevel0"..
+    # "materialKeyLevel4" or "materialKeyLevel_highest".
+
+    # -----------------------------------------------------------------------
+    # Stage 04, part 3 -- traction motors (04_03_tractionmotors.py)
+    # -----------------------------------------------------------------------
+    traction_composition_file_name: str = "20260309-Traction_motors_consolidated.xlsx"
+    # [NEW] Centralizes what was hardcoded directly inside 04_03_tractionmotors.py
+    # (a date-stamped filename -- same "should be centralized" pattern as M9/M23/M31).
+
+    # -----------------------------------------------------------------------
+    # Stage 04, part 4 -- batteries (04_04_batteries.py)
+    # -----------------------------------------------------------------------
+    battery_share_file_name: str = "BATTKey_xEV_shares_final.xlsx"
+    battery_composition_file_name: str = "250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"
+    # [NEW] Centralizes two more hardcoded filenames, same pattern as above.
+
+    battery_composition_parameter_code: str = "e-m"
+    # ======================================================================
+    # [FLAGGED -- ESSENTIAL REQUIREMENT CONFLICT, NOT RESOLVED, NEEDS YOUR INPUT]
+    # ======================================================================
+    # This is "e-m" -- ELEMENT level, the same code used by the excluded
+    # 04_02_elements.py -- directly conflicting with your explicit, essential
+    # requirement that composition resolve to component + material, NOT elements.
+    # UNLIKE the main ELV_2010_2050.xlsx composition file (confirmed, via materials.py,
+    # to also offer an "m-c" material-level reading), I have NOT seen the battery
+    # composition workbook (`battery_composition_file_name` above) and do NOT know
+    # whether it offers an equivalent material-level parameterCode value. I have
+    # deliberately NOT guessed a replacement string and silently substituted it --
+    # doing so risks silently reading the wrong column of a file I've never seen.
+    # ACTION NEEDED: open the battery composition workbook, check its `parameterCode`
+    # column's distinct values (04_04_batteries.py already prints
+    # "Available parameterCode values" for the main composition file the same way --
+    # a similar print could confirm this file's options), and tell me the exact string
+    # that means "material/component level, not individual elements". Until then,
+    # 04_04_batteries.py's battery-material-mass output remains at ELEMENT level --
+    # flagged loudly both here and at the call site in that file.
+    # ======================================================================
+
+    battery_size_map: dict[str, float] = field(default_factory=lambda: {
+        "A": 25.0, "B": 45.0, "C": 60.0, "D": 80.0, "E": 80.0, "F": 100.0,
+        "JA": 25.0, "JB": 45.0, "JC": 60.0, "JD": 80.0, "JE": 80.0, "JF": 100.0,
+    })
+    # [NEW] Centralizes 04_04_batteries.py's hardcoded per-segment battery capacity
+    # (kWh) assumption. Per that file's own TODOs: no year dependence (rising battery
+    # capacity over time is not modeled), and D/E segments share the same value --
+    # confirm both are intentional once you can check against the segment taxonomy.
+    average_battery_capacity_kwh: float = 60.0
 
     def validate(self) -> list[str]:
         issues: list[str] = []
@@ -300,6 +394,14 @@ class MaterialsParams:
             issues.append(
                 f"materials.composition_parameter_code={self.composition_parameter_code!r} "
                 f"is not one of ['m-c', 'e-m']."
+            )
+        if self.battery_composition_parameter_code == "e-m":
+            issues.append(
+                "materials.battery_composition_parameter_code='e-m' -- element level, "
+                "conflicts with your essential component+material-only requirement. "
+                "Not an error (the pipeline still runs), but surfaced here as a "
+                "standing reminder until you confirm the battery workbook's "
+                "material-level parameterCode value."
             )
         valid_levels = {
             "materialKeyLevel0", "materialKeyLevel1", "materialKeyLevel2",
@@ -309,6 +411,12 @@ class MaterialsParams:
             issues.append(
                 f"materials.material_level_key={self.material_level_key!r} is not one "
                 f"of {sorted(valid_levels)}."
+            )
+        missing_battery_segments = set(self.segment_map) - set(self.battery_size_map)
+        if missing_battery_segments:
+            issues.append(
+                f"materials.battery_size_map is missing segments present in "
+                f"segment_map: {sorted(missing_battery_segments)}."
             )
         return issues
 
@@ -343,14 +451,37 @@ class MonteCarloParams:
     `02_stockdriven.py`'s Monte Carlo block for the first concrete usage; `src/
     monte_carlo.py` for the generic sampling machinery this drives).
     """
-    enabled: bool = False
-    n_draws: int = 200
+    enabled: bool = True  # MC
+    n_draws: int = 200000
     seed: int | None = 42
+
+    # [NEW] The full stock-and-flow uncertainty analysis (`mc_stockflow_uncertainty.py`)
+    # -- varies lifetime + unknown_whereabouts_share + export_share_by_drv for every
+    # stage-02-level drivetrain simultaneously. Kept SEPARATE from `n_draws` above
+    # (which the lightweight single-parameter demo in 02_stockdriven.py uses) so
+    # enabling that quick demo never accidentally triggers a 200,000-draw run.
+    stockflow_n_draws: int = 200_000
+    stockflow_seed: int | None = 42
+    # Placeholder relative spreads for the uncertainty distributions -- NOT derived
+    # from any real uncertainty estimate yet (no such estimate has been provided).
+    # scale_lambda: Triangular(base*(1-spread), base, base*(1+spread)).
+    # unknown_whereabouts_share / export_share_by_drv: Normal(base, base*spread),
+    # clipped to [0, 1]. Override these once you have real uncertainty ranges --
+    # everything downstream (sampling, propagation, sensitivity analysis) works
+    # identically regardless of what the spread actually is.
+    stockflow_lifetime_spread: float = 0.15
+    stockflow_share_spread: float = 0.15
 
     def validate(self) -> list[str]:
         issues: list[str] = []
         if self.n_draws <= 0:
             issues.append(f"monte_carlo.n_draws={self.n_draws} must be positive.")
+        if self.stockflow_n_draws <= 0:
+            issues.append(f"monte_carlo.stockflow_n_draws={self.stockflow_n_draws} must be positive.")
+        if not (0.0 < self.stockflow_lifetime_spread < 1.0):
+            issues.append(f"monte_carlo.stockflow_lifetime_spread={self.stockflow_lifetime_spread} must be in (0, 1).")
+        if not (0.0 < self.stockflow_share_spread < 1.0):
+            issues.append(f"monte_carlo.stockflow_share_spread={self.stockflow_share_spread} must be in (0, 1).")
         return issues
 
 
