@@ -97,6 +97,22 @@ ARTIFACT_FILES: dict[str, str] = {
     # (unknown_whereabouts_share, export_share) uncertainty to stage 02's per-draw
     # cumulative_out_survival (loaded from mc_stage02_draws), producing
     # collected/export/unknown summaries per drivetrain and as an EU total.
+    "mc_stage03_02_summary": "03_02_mc_summary.pkl",
+    # [UPDATED] 03_02_adjustedflows.py's Monte Carlo extension: each of the 11
+    # scenarios now re-simulates its OWN lifetime AND share uncertainty per draw
+    # via a vectorized cohort-flow engine (`src/cohort_flow_mc.py`, wrapped by
+    # `src/flowdriven_model.py`'s `run_flow_driven_model_monte_carlo`) -- NOT a
+    # post-hoc re-split of a fixed deterministic total. `scale_lambda` is
+    # resampled per draw from a Triangular distribution
+    # (`stock_flow.lifetime_scale_lambda_relative_spread`, same convention as
+    # stage 02); `unknown_whereabouts_share`/`export_share` are resampled from a
+    # clipped Normal (`stock_flow.unknown_whereabouts_share_std`/
+    # `export_share_std`). A scenario's own `lifetime_change_by_drv` override
+    # (e.g. BEV_longer's scale_lambda=17 from 2027) and `stock_modifier_2027`
+    # are preserved in its Monte Carlo run, not just its deterministic one.
+    # Stores collected/export/unknown summaries per drivetrain and as an EU
+    # total, per scenario -- same output shape as before this update, only the
+    # simulation behind it changed.
     # NOTE: stage-04's per-scenario outputs (11 scenarios x several output types across
     # 04_01/04_03/04_04) are deliberately NOT individually registered here -- see
     # `materials.py`'s `save_unregistered_scenario_outputs()` docstring for why (adding

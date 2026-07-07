@@ -40,6 +40,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# NOTE: uses the same `src.xxx` import convention as pipeline stage scripts
+# (e.g. `03_02_adjustedflows.py`'s `import src.artifacts as artifacts`), not a
+# bare `import cohort_flow_mc` -- a bare import would only work if `src/`
+# itself (not just the project root) were on `sys.path`, which it isn't;
+# every stage script only appends PROJECT_ROOT.
+import src.cohort_flow_mc as _cohort_flow_mc
+
 
 def build_export_probability_lookup(
     export_prob_by_age_drv_mapped: pd.DataFrame,
@@ -1032,3 +1039,105 @@ def run_flow_driven_model_with_outflow_disaggregation(
         "outflow_unknown_df": pd.DataFrame(unknown_rows),
         "outflow_long_df": pd.DataFrame(outflow_long_rows),
     }
+
+
+# =============================================================================
+# MONTE CARLO -- thin, product-specific wrapper around the generic engine
+# =============================================================================
+# The actual recurrence, Weibull vectorization, draws-chunking, and
+# uncertainty-sampling conventions live ONCE in `cohort_flow_mc.py` (product-
+# agnostic, reusable by other pipelines/products). This function only resolves
+# this project's vehicle/drivetrain-specific parameter names into the generic
+# shape that engine expects, then calls it -- no separate math implementation.
+#
+# The scalar function above (`run_flow_driven_model_with_outflow_
+# disaggregation`) is UNCHANGED and remains the ground-truth reference this
+# wrapper (via the generic engine) is cross-validated against -- see
+# `test_regression_generic.py`. `03_01_flowdriven.py` continues to call the
+# scalar function directly; this wrapper is for Monte Carlo callers only
+# (currently `03_02_adjustedflows.py`).
+# =============================================================================
+
+
+def run_flow_driven_model_monte_carlo(
+    df: pd.DataFrame,
+    years: np.ndarray,
+    t_end: int,
+    *,
+    lifetime_by_drv: dict,
+    unknown_whereabouts_share: dict[str, float],
+    export_share_by_drivetrain: dict[str, float],
+    starting_stock_by_cohort_lookup: dict[tuple, dict[int, float]] | None = None,
+    n_draws: int = 1,
+    lifetime_scale_lambda_relative_spread: dict[str, float] | float | None = None,
+    unknown_whereabouts_share_std: dict[str, float] | None = None,
+    export_share_std: dict[str, float] | None = None,
+    year_col: str = "year",
+    inflow_col: str = "value",
+    group_cols: list[str] | None = None,
+    outflow_timing: str = "post_inflow",
+    lifetime_change_by_drv: dict[str, dict[str, float]] | None = None,
+    stock_modifier_2027: float = 1.0,
+    seed: int | np.random.SeedSequence | None = None,
+    chunk_size: int = 20_000,
+    collect_per_year: bool = False,
+    verbose: bool = True,
+    progress_label: str = "",
+) -> dict:
+    """
+    Vehicle-pipeline-specific Monte Carlo wrapper. See `cohort_flow_mc.
+    run_cohort_flow_monte_carlo` for the full model description and
+    uncertainty conventions -- this function just maps this project's
+    drivetrain-keyed parameter dicts onto that generic API
+    (`entity_key_col="Drive Train"`, `share_a="export"`, `share_b="unknown"`)
+    and translates `stock_modifier_2027` (a single hardcoded year) into the
+    engine's generic `period_inflow_multiplier` ({year: multiplier} for every
+    year >= 2027 in the horizon).
+
+    With `n_draws=1` and all spread parameters None/0, reproduces the scalar
+    function's `flows_df` numbers exactly (verified by regression test).
+
+    Returns the generic engine's result dict, with two vehicle-pipeline-
+    friendly aliases added at each group level and at the top level:
+    "cumulative_export"/"cumulative_unknown" (aliases of the generic engine's
+    "cumulative_a"/"cumulative_b"), and "eu_total" (alias of "total").
+    """
+    if group_cols is None:
+        group_cols = ["Region", "Drive Train", "Segment"]
+
+    period_inflow_multiplier = None
+    if stock_modifier_2027 != 1.0:
+        period_inflow_multiplier = {int(t): float(stock_modifier_2027) for t in years if t >= 2027}
+
+    result = _cohort_flow_mc.run_cohort_flow_monte_carlo(
+        df=df, years=years, t_end=t_end,
+        group_cols=group_cols, entity_key_col="Drive Train",
+        lifetime_by_entity=lifetime_by_drv,
+        share_a_by_entity=export_share_by_drivetrain,
+        share_b_by_entity=unknown_whereabouts_share,
+        share_a_name="export", share_b_name="unknown",
+        starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup,
+        n_draws=n_draws,
+        lifetime_scale_lambda_relative_spread_by_entity=lifetime_scale_lambda_relative_spread,
+        share_a_std_by_entity=export_share_std,
+        share_b_std_by_entity=unknown_whereabouts_share_std,
+        year_col=year_col, inflow_col=inflow_col,
+        outflow_timing=outflow_timing,
+        lifetime_change_by_entity=lifetime_change_by_drv,
+        period_inflow_multiplier=period_inflow_multiplier,
+        seed=seed, chunk_size=chunk_size, collect_per_year=collect_per_year,
+        verbose=verbose, progress_label=progress_label,
+    )
+
+    for g in result["by_group"].values():
+        g["cumulative_export"] = g["cumulative_a"]
+        g["cumulative_unknown"] = g["cumulative_b"]
+        if collect_per_year:
+            g["per_year_export"] = g["per_year_a"]
+            g["per_year_unknown"] = g["per_year_b"]
+
+    result["eu_total"] = dict(result["total"])
+    result["eu_total"]["cumulative_export"] = result["total"]["cumulative_a"]
+    result["eu_total"]["cumulative_unknown"] = result["total"]["cumulative_b"]
+
+    return result

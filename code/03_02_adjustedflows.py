@@ -8,6 +8,54 @@ drivetrain mixes, different BEV segment-size profiles), to explore sensitivity o
 downstream materials tracker to those assumptions.
 
 ======================================================================
+MONTE CARLO -- GENUINE lifetime + share uncertainty, fully vectorized. Same
+clean pattern as stages 02/03_01 (one shared function, params-driven, no
+duplicate implementation) -- and now also product-agnostic underneath.
+======================================================================
+`flowdriven_model.py`'s own recurrence is now vectorized across a `draws` axis
+(`run_flow_driven_model_monte_carlo`, cross-validated byte-for-byte against the
+scalar `run_flow_driven_model_with_outflow_disaggregation` function it wraps --
+see `test_regression.py`/`test_regression_generic.py`). The actual math lives
+in `cohort_flow_mc.py`, a product-agnostic vectorized cohort-flow engine (no
+vehicle/drivetrain terminology hardcoded there) that other pipelines/products
+can build their own thin wrappers around, the same way this one does.
+
+EACH of the 11 scenarios re-simulates its OWN lifetime and share assumptions
+per draw -- not a post-hoc re-split of a fixed deterministic total. This
+happens INSIDE `run_adjusted_scenario` itself (see its `monte_carlo_enabled`
+parameter): the exact same `inflow_df`, `lifetime_change_by_drv`,
+`stock_modifier_2027`, and share dicts used for that scenario's deterministic
+run are reused for its Monte Carlo run, just with `scale_lambda`,
+`unknown_whereabouts_share`, and `export_share` resampled per draw. This
+stage's final block only AGGREGATES the 11 already-computed per-scenario
+results into summary stats and the comparison plot.
+
+Uncertainty spreads come from `params.stock_flow` (`lifetime_scale_lambda_
+relative_spread`, `unknown_whereabouts_share_std`, `export_share_std`) --
+the SAME fields stage 02 already uses, nothing hardcoded here. `scale_lambda`
+is sampled from a TRIANGULAR distribution, `Triangular(point*(1-spread),
+point, point*(1+spread))` -- matching `params_schema.py`'s own documented
+convention for lifetime uncertainty (NOT Normal, unlike the two share
+parameters below). The SAME per-draw multiplier carries through a scenario's
+`lifetime_change_by_drv` override (e.g. BEV_longer's scale_lambda=17 from 2027
+onward), so a draw that samples "10% longer-lived" stays 10% longer-lived
+across that boundary rather than resampling independently -- see
+`cohort_flow_mc.py`'s module docstring for the full uncertainty convention.
+
+`lifetime_scale_lambda_relative_spread` can be passed as EITHER a single
+float (a "general" scenario -- the same uncertainty spread applied to every
+drivetrain, e.g. `params.monte_carlo.stockflow_lifetime_spread`'s 0.15) OR a
+dict keyed by drivetrain (a "specific" scenario -- e.g. "BEV's lifetime is
+far less certain than Diesel's"), so both kinds of scenario can be modeled
+without touching the engine. This stage defaults to the per-drivetrain dict
+(`p02.lifetime_scale_lambda_relative_spread`, already keyed by drivetrain in
+`params_schema.py`); pass a single float instead at the `run_adjusted_scenario`
+/ `main()` level if a "general uncertainty" run is wanted for some analysis.
+
+Saves `mc_stage03_02_summary` and a scenario-comparison box plot
+(`03_02_monte_carlo_scenario_comparison.png`).
+
+======================================================================
 C6 -- RESOLVED AND VERIFIED THIS ROUND (previously the single most consequential
 finding in the entire review).
 ======================================================================
@@ -81,6 +129,7 @@ notebooks' methodology.
 from __future__ import annotations
 
 import sys
+import time
 import math
 import importlib
 from pathlib import Path
@@ -112,85 +161,11 @@ import src.plotting as plotting  # type: ignore
 from src.disaggregation import (  # type: ignore
     build_tracker_from_disaggregated, add_keys_to_tracker_dict,
 )
+from src.monte_carlo import summarize_distribution  # type: ignore
 
 load_many = artifacts.load_many
 save_many = artifacts.save_many
 plot_flows_split_collected_unknown_all_trackers = plotting.plot_flows_split_collected_unknown_all_trackers
-
-
-# ---------------------------------------------------------------------------
-# Scenario "knobs" -- see CRITICAL FINDING above: several of these are currently no-ops
-# ---------------------------------------------------------------------------
-stock_modifier_2027 = 1  # BAU default: no-op multiplier. Overridden to 0.8 for the
-                          # "stock_lower" scenario at the call site below (C6 fix).
-
-# BAU (no-op) lifetime-change dict -- the default passed to `run_adjusted_scenario`
-# unless a scenario explicitly overrides it (see LIFETIME_CHANGE_BY_DRV_ICEV_SHORTER /
-# _BEV_LONGER below, and the C6 fix in the module docstring).
-#
-# SCHEMA NOTE (still open, needs flowdriven_model.py to resolve): this dict provides
-# only {"start_year", "shape_k", "scale_lambda"} -- no "end_year". Compare to
-# `00_parameters.py`'s `lifetime_override_by_drv` / `02_stockdriven.py`'s
-# `get_effective_lifetime_params`, which REQUIRE both start_year AND end_year for a
-# bounded override window. If `run_flow_driven_model_with_outflow_disaggregation`'s
-# `lifetime_change_by_drv` handling expects the same 4-key shape, this would be missing
-# a required key; if it instead treats a missing end_year as "open-ended from
-# start_year onward", that's a second, independent override-schema convention in the
-# codebase. Not verifiable without `flowdriven_model.py`'s source.
-LIFETIME_CHANGE_BY_DRV_BAU = {
-    "Diesel": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 13.0},
-    "Petrol": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 13.0},
-    "BEV": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 13.0},
-}
-
-# [NEW, resolves C6] "ICEV_shorter" scenario: Diesel/Petrol lifetime shortened to
-# scale_lambda=9.0 from 2027 onward, per the abandoned scaffold's own comment. BEV left
-# at the BAU value (this scenario is specifically about ICE vehicles, not BEV).
-LIFETIME_CHANGE_BY_DRV_ICEV_SHORTER = {
-    "Diesel": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 9.0},
-    "Petrol": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 9.0},
-    "BEV": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 13.0},
-}
-
-# [NEW, resolves C6] "BEV_longer" scenario: BEV lifetime extended to scale_lambda=17.0
-# from 2027 onward, per the abandoned scaffold's own comment. Diesel/Petrol unchanged.
-LIFETIME_CHANGE_BY_DRV_BEV_LONGER = {
-    "Diesel": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 13.0},
-    "Petrol": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 13.0},
-    "BEV": {"start_year": 2027, "shape_k": 3.0, "scale_lambda": 17.0},
-}
-
-# BEV segment-share profiles used for the segment-mix sensitivity scenarios below.
-# "BAU" = business as usual (identical to 03_01's single profile). The other four
-# represent alternative assumptions about which vehicle segments BEV adoption favors:
-# concentrated in conventional segments (A_F), concentrated in the "J"-prefixed
-# (presumably SUV/crossover) segments (JA_JF), skewed toward larger vehicles (Large), or
-# skewed toward smaller vehicles (Small). These do NOT sum-check against BAU by
-# construction -- they're independent hypotheses, each individually summing to ~1.0.
-BEV_SEGMENT_SHARES_BAU = {
-    "A": 0.11599, "B": 0.07235, "C": 0.17037, "D": 0.06288, "E": 0.04190, "F": 0.02945,
-    "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
-}
-BEV_SEGMENT_SHARES_A_F = {
-    "A": 0.11940, "B": 0.14733, "C": 0.42153, "D": 0.21450, "E": 0.06298, "F": 0.03426,
-    "JA": 0.0, "JB": 0.0, "JC": 0.0, "JD": 0.0, "JE": 0.0, "JF": 0.0,
-}
-BEV_SEGMENT_SHARES_JA_JF = {
-    "A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0, "E": 0.0, "F": 0.0,
-    "JA": 0.11940, "JB": 0.14733, "JC": 0.42153, "JD": 0.21450, "JE": 0.06298, "JF": 0.03426,
-}
-BEV_SEGMENT_SHARES_LARGE = {
-    "A": 0.02, "B": 0.05, "C": 0.12, "D": 0.16, "E": 0.12, "F": 0.06,
-    "JA": 0.04, "JB": 0.10, "JC": 0.16, "JD": 0.10, "JE": 0.05, "JF": 0.02,
-}
-BEV_SEGMENT_SHARES_SMALL = {
-    "A": 0.10, "B": 0.22, "C": 0.28, "D": 0.14, "E": 0.04, "F": 0.01,
-    "JA": 0.03, "JB": 0.07, "JC": 0.07, "JD": 0.03, "JE": 0.01, "JF": 0.00,
-}
-segment_shares_by_drv = {
-    "BEV": BEV_SEGMENT_SHARES_BAU, "A_F": BEV_SEGMENT_SHARES_A_F, "JA_JF": BEV_SEGMENT_SHARES_JA_JF,
-    "Large": BEV_SEGMENT_SHARES_LARGE, "Small": BEV_SEGMENT_SHARES_SMALL,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -443,8 +418,15 @@ def run_adjusted_scenario(
     flows_03: pd.DataFrame, p02: dict, unknown_whereabouts_share: dict[str, float], segment_map: dict,
     drv_prefix_map: dict, materials_region: str, materials_drivetrains: tuple[str, ...], base_year: int = 2005,
     segment_shares_by_drv: dict, allowed_export_segments: dict[str, list[str]] | None = None,
-    export_share_by_drivetrain: dict[str, float] = None, stock_modifier_2027: float = stock_modifier_2027,
+    export_share_by_drivetrain: dict[str, float] = None, stock_modifier_2027: float = 1.0,
     lifetime_change_by_drv: dict | None = None,
+    monte_carlo_enabled: bool = False,
+    n_draws: int = 0,
+    lifetime_scale_lambda_relative_spread: dict[str, float] | float | None = None,
+    unknown_whereabouts_share_std: dict[str, float] | None = None,
+    export_share_std: dict[str, float] | None = None,
+    mc_seed: int | np.random.SeedSequence | None = None,
+    mc_chunk_size: int = 20_000,
 ) -> dict[str, Any]:
     """
     Run one adjusted-inflow scenario end to end: rebuild the segment-level cohort
@@ -452,18 +434,38 @@ def run_adjusted_scenario(
     DIFFERENCES FROM 03_01" below), re-run the flow-driven model with `outflow_timing=
     "post_inflow"`, and build the resulting materials tracker.
 
-    [FIXED, resolves part of C6] `lifetime_change_by_drv` is now an explicit parameter
-    (defaults to `LIFETIME_CHANGE_BY_DRV_BAU`, the no-op baseline) instead of the
-    function silently closing over a module-level global of the same name. This is
-    what lets `ICEV_shorter` and `BEV_longer` pass their own override dict without a
-    shared mutable global being reassigned between scenario runs (which would have been
-    a real, order-dependent bug if attempted the original way).
+    [NO HARDCODED SCENARIO PARAMETERS]: `stock_modifier_2027` and `lifetime_change_by_
+    drv` are plain function parameters with no model-specific defaults baked in here
+    (`stock_modifier_2027=1.0` and `lifetime_change_by_drv=None` are generic "no
+    override" fallbacks, the same category of default as `outflow_timing="post_inflow"`
+    below -- not a scenario definition). Every REAL scenario value (BEV_longer's
+    scale_lambda=17, stock_lower's modifier=0.8, etc.) lives in `params_schema.py`'s
+    `AdjustedFlowsParams.scenarios` and is resolved by `main()` before calling this
+    function -- see `ScenarioSpec`'s docstring there. This is what lets `ICEV_shorter`
+    and `BEV_longer` each pass their own override dict without a shared mutable global
+    being reassigned between scenario runs (a real, order-dependent bug the pre-refactor
+    module-level-constant version would have had if attempted that way).
 
     `p02`: pass the DICT view (`params.to_nested_dict()["02_stock_flow"]`), not the
     `StockFlowParams` dataclass -- see module docstring for why.
+
+    [NEW] Monte Carlo, genuine lifetime + share uncertainty: when
+    `monte_carlo_enabled=True`, this ALSO calls `fdm.run_flow_driven_model_
+    monte_carlo` -- the vectorized engine -- using the EXACT SAME `inflow_df`,
+    `years`, `t_end`, `mapped_inputs["lifetime_by_drv"]`,
+    `starting_stock_by_cohort_lookup`, `lifetime_change_by_drv`,
+    `unknown_whereabouts_share`, `export_share_by_drivetrain`, and
+    `stock_modifier_2027` that the deterministic call directly above uses -- not
+    a re-derivation, not a post-hoc re-split of the deterministic total. This is
+    what makes the MC result a genuine re-simulation of THIS scenario's own
+    assumptions (including its lifetime overrides, e.g. BEV_longer's
+    scale_lambda=17), not shares-only uncertainty layered on top of a fixed
+    deterministic number. Returned under the `"mc"` key (`None` if disabled).
+    `mc_chunk_size` normally comes from `params.monte_carlo.chunk_size`, resolved by
+    `main()` -- the literal default here is only a fallback for direct/standalone calls.
     """
     if lifetime_change_by_drv is None:
-        lifetime_change_by_drv = LIFETIME_CHANGE_BY_DRV_BAU
+        lifetime_change_by_drv = {}
 
     stock_by_segment_base = fdm.build_stock_by_segment_at_base_year(
         matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv, region="EUR",
@@ -488,6 +490,8 @@ def run_adjusted_scenario(
     mapped_inputs = fdm.build_p02_mapped_inputs(p02, drivetrains=("BEV", "HEV", "PHEV", "Diesel", "Petrol"))
     years = np.arange(int(inflow_df["year"].min()), int(inflow_df["year"].max()) + 1, dtype=int)
 
+    print(f"[{scenario_name}] deterministic run: {len(years)} years ({years.min()}-{years.max()})...")
+    t_start_det = time.time()
     results = fdm.run_flow_driven_model_with_outflow_disaggregation(
         df=inflow_df, years=years, t_end=int(years.max()),
         lifetime_by_drv=mapped_inputs["lifetime_by_drv"], export_r_by_drv=mapped_inputs["export_r_by_drv"],
@@ -498,6 +502,31 @@ def run_adjusted_scenario(
         lifetime_change_by_drv=lifetime_change_by_drv, segment_shares_by_drv=segment_shares_by_drv,
         export_share_by_drivetrain=export_share_by_drivetrain, stock_modifier_2027=stock_modifier_2027,
     )
+    print(f"[{scenario_name}] deterministic run done in {time.time() - t_start_det:.1f}s")
+
+    mc_result = None
+    if monte_carlo_enabled:
+        print(f"[{scenario_name}] Monte Carlo run: {n_draws:,} draws...")
+        t_start_mc = time.time()
+        # Same inputs as the deterministic call directly above -- genuine
+        # re-simulation of THIS scenario's own lifetime/share assumptions, not a
+        # post-hoc re-split of the deterministic total. See docstring.
+        mc_result = fdm.run_flow_driven_model_monte_carlo(
+            df=inflow_df, years=years, t_end=int(years.max()),
+            lifetime_by_drv=mapped_inputs["lifetime_by_drv"],
+            unknown_whereabouts_share=unknown_whereabouts_share,
+            export_share_by_drivetrain=export_share_by_drivetrain,
+            starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup,
+            n_draws=n_draws,
+            lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
+            unknown_whereabouts_share_std=unknown_whereabouts_share_std,
+            export_share_std=export_share_std,
+            group_cols=["Region", "Drive Train", "Segment"], outflow_timing="post_inflow",
+            lifetime_change_by_drv=lifetime_change_by_drv, stock_modifier_2027=stock_modifier_2027,
+            seed=mc_seed, chunk_size=mc_chunk_size, collect_per_year=False,
+            verbose=True, progress_label=scenario_name,
+        )
+        print(f"[{scenario_name}] Monte Carlo run done in {time.time() - t_start_mc:.1f}s")
 
     flows_new = results["flows_df"].copy()
     outflow_surv_new = results["outflow_surv_df"].copy()
@@ -520,6 +549,7 @@ def run_adjusted_scenario(
     return {
         "scenario_name": scenario_name, "inflow_df": inflow_df, "flows_df": flows_new,
         "tracker": tracker_new, "tracker_keyed": tracker_keyed_new, "missing_keys": missing_new,
+        "mc": mc_result,
     }
 
 
@@ -536,27 +566,49 @@ def main() -> dict[str, Any]:
     seg_share_by_drv = loaded["seg_share_by_drv"]
 
     p02 = params.stock_flow
-    p03 = params.disaggregation
+    p03_02 = params.adjusted_flows
     p04 = params.materials
 
     # [IMPORTANT] dict view for fdm.py calls -- see module docstring for why (fdm.py's
     # internals are unverified; the ORIGINAL code passed a raw dict here).
     p02_dict = params.to_nested_dict()["02_stock_flow"]
 
-    export_share_by_drivetrain = dict(p02.export_share_by_drv)
-    unknown_whereabouts_share = dict(p02.unknown_whereabouts_share)
+    export_share_by_drivetrain_base = dict(p02.export_share_by_drv)
+    unknown_whereabouts_share_base = dict(p02.unknown_whereabouts_share)
     # NOTE: unlike 03_01 (which pulls `unknown_whereabouts_share` from
     # `fdm.build_p02_mapped_inputs(...)["unknown_whereabouts_share"]`), this notebook
     # reads it DIRECTLY off `p02` with no mapping step. If `build_p02_mapped_inputs`
     # applies any transformation (e.g. filling in defaults for missing drivetrains,
     # renaming), these two could differ subtly -- not verifiable without `fdm.py`.
-    # `dict(...)` copies here (not just a rename) since the `losses_zero`/`losses_high`
-    # C6 scenarios below need their OWN modified copies without mutating the shared
-    # baseline dict other scenarios also read.
     segment_map = p04.segment_map
     drv_prefix_map = p04.drv_prefix_map
     materials_region = p04.region
     materials_drivetrains = tuple(p04.drivetrains)
+
+    # -----------------------------------------------------------------------
+    # [NEW] Monte Carlo setup -- genuine lifetime + share uncertainty, re-simulated
+    # per scenario via the vectorized engine (see `run_adjusted_scenario`'s
+    # `monte_carlo_enabled` docstring). Uncertainty spreads come from
+    # `p02.lifetime_scale_lambda_relative_spread` / `p02.unknown_whereabouts_
+    # share_std` / `p02.export_share_std` -- same `params_schema.py` fields
+    # stage 02 already uses, nothing hardcoded here.
+    # -----------------------------------------------------------------------
+    monte_carlo_enabled = params.monte_carlo.enabled
+    n_draws_mc = params.monte_carlo.n_draws if monte_carlo_enabled else 0
+    lifetime_scale_lambda_relative_spread = dict(p02.lifetime_scale_lambda_relative_spread)
+    unknown_whereabouts_share_std_mc = dict(p02.unknown_whereabouts_share_std)
+    export_share_std_mc = dict(p02.export_share_std)
+    mc_chunk_size = params.monte_carlo.chunk_size
+
+    # Independent seed stream per scenario, spawn_key=(2,) -- matches this stage's
+    # existing convention (differs from stage 02's implicit 0 and 03_01's (1,), so
+    # this stage's draws aren't correlated with either by accident of sharing a
+    # raw seed stream). Scenario NAMES themselves now come from `p03_02.scenarios`
+    # (params-driven) rather than a hardcoded list -- adding a 12th scenario in
+    # `AdjustedFlowsParams` is picked up here automatically.
+    scenario_names_all = list(p03_02.scenarios.keys())
+    mc_seed_seq = np.random.SeedSequence(params.monte_carlo.seed, spawn_key=(2,))
+    mc_scenario_seeds = dict(zip(scenario_names_all, mc_seed_seq.spawn(len(scenario_names_all))))
 
     # -----------------------------------------------------------------------
     # Take 03_01's baseline inflow (by DRIVETRAIN + SEGMENT) as this notebook's starting point
@@ -567,153 +619,105 @@ def main() -> dict[str, Any]:
         .sort_values(["Region", "Drive Train", "Segment", "year"]).reset_index(drop=True)
     )
 
-    # -----------------------------------------------------------------------
-    # Build 6 alternative inflow-composition scenarios (BAU + 5 genuine tweaks)
-    # -----------------------------------------------------------------------
-    inflow_segments_scenario_BAU = tweak_inflow_segment_shares_within_drivetrain(
-        inflow_df=inflow_segments_scenario, region="EUR", drivetrain="BEV",
-        scenario_start_year=2026, ramp_end_year=2026, target_segment_shares_final=BEV_SEGMENT_SHARES_BAU,
-    )
-    inflow_segments_scenario_BEV_only = tweak_inflow_drivetrain_shares(
-        inflow_df=inflow_segments_scenario, region="EUR", scenario_start_year=2026, ramp_end_year=2026,
-        target_shares_final={"BEV": 1, "HEV": 0, "PHEV": 0, "Diesel": 0, "Petrol": 0},
-    )
-    inflow_segments_scenario_BEV_A_F = tweak_inflow_segment_shares_within_drivetrain(
-        inflow_df=inflow_segments_scenario, region="EUR", drivetrain="BEV",
-        scenario_start_year=2026, ramp_end_year=2026, target_segment_shares_final=BEV_SEGMENT_SHARES_A_F,
-    )
-    inflow_segments_scenario_BEV_JA_JF = tweak_inflow_segment_shares_within_drivetrain(
-        inflow_df=inflow_segments_scenario, region="EUR", drivetrain="BEV",
-        scenario_start_year=2026, ramp_end_year=2026, target_segment_shares_final=BEV_SEGMENT_SHARES_JA_JF,
-    )
-    inflow_segments_scenario_BEV_large = tweak_inflow_segment_shares_within_drivetrain(
-        inflow_df=inflow_segments_scenario, region="EUR", drivetrain="BEV",
-        scenario_start_year=2026, ramp_end_year=2026, target_segment_shares_final=BEV_SEGMENT_SHARES_LARGE,
-    )
-    inflow_segments_scenario_BEV_small = tweak_inflow_segment_shares_within_drivetrain(
-        inflow_df=inflow_segments_scenario, region="EUR", drivetrain="BEV",
-        scenario_start_year=2026, ramp_end_year=2026, target_segment_shares_final=BEV_SEGMENT_SHARES_SMALL,
-    )
+    # =========================================================================
+    # Resolve each scenario's inflow, share overrides, and lifetime override from
+    # its `ScenarioSpec` (see params_schema.py), then run it. ONE loop for all 11
+    # scenarios -- adding a 12th means adding one `ScenarioSpec` entry in
+    # `AdjustedFlowsParams.scenarios`, not a new block of code here.
+    #
+    # Scenarios with their own inflow transform (`inflow_drivetrain_shares_final` or
+    # `inflow_segment_shares_final` set -- BAU's own segment-mix baseline, BEV_only,
+    # and the four BEV segment-profile scenarios) get it applied to the raw stage-03
+    # inflow. Scenarios with neither set (BEV_longer, ICEV_shorter, stock_lower,
+    # losses_zero, losses_high) reuse BAU's ALREADY-RESOLVED inflow -- BAU must
+    # therefore be processed first, which `AdjustedFlowsParams.scenarios` guarantees
+    # by construction (BAU is always its first entry; `validate()` requires it exist).
+    # =========================================================================
+    inflow_by_scenario: dict[str, pd.DataFrame] = {}
+    for name, spec in p03_02.scenarios.items():
+        if spec.inflow_drivetrain_shares_final is not None:
+            inflow_by_scenario[name] = tweak_inflow_drivetrain_shares(
+                inflow_df=inflow_segments_scenario, region="EUR",
+                scenario_start_year=p03_02.scenario_start_year, ramp_end_year=p03_02.scenario_ramp_end_year,
+                target_shares_final=spec.inflow_drivetrain_shares_final,
+            )
+        elif spec.inflow_segment_shares_final is not None:
+            inflow_by_scenario[name] = tweak_inflow_segment_shares_within_drivetrain(
+                inflow_df=inflow_segments_scenario, region="EUR", drivetrain=spec.inflow_segment_shares_drivetrain,
+                scenario_start_year=p03_02.scenario_start_year, ramp_end_year=p03_02.scenario_ramp_end_year,
+                target_segment_shares_final=spec.inflow_segment_shares_final,
+            )
+        else:
+            inflow_by_scenario[name] = inflow_by_scenario["BAU"]
 
-    scenario_inflows1 = {
-        "BAU": inflow_segments_scenario_BAU, "BEV_only": inflow_segments_scenario_BEV_only,
-        "BEV_A_F": inflow_segments_scenario_BEV_A_F, "BEV_JA_JF": inflow_segments_scenario_BEV_JA_JF,
-        "BEV_large": inflow_segments_scenario_BEV_large, "BEV_small": inflow_segments_scenario_BEV_small,
-    }
-
-    scenario_results = {
-        name: run_adjusted_scenario(
-            scenario_name=name, inflow_df=df, matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
-            flows_03=flows_03, p02=p02_dict, unknown_whereabouts_share=unknown_whereabouts_share,
-            segment_map=segment_map, drv_prefix_map=drv_prefix_map, materials_region=materials_region,
-            materials_drivetrains=materials_drivetrains, base_year=2005, segment_shares_by_drv=segment_shares_by_drv,
-            export_share_by_drivetrain=export_share_by_drivetrain,
+    scenario_results_all: dict[str, dict[str, Any]] = {}
+    n_scenarios = len(p03_02.scenarios)
+    t_start_all_scenarios = time.time()
+    for scenario_idx, (name, spec) in enumerate(p03_02.scenarios.items(), start=1):
+        elapsed = time.time() - t_start_all_scenarios
+        eta_str = ""
+        if scenario_idx > 1:
+            avg_per_scenario = elapsed / (scenario_idx - 1)
+            eta = avg_per_scenario * (n_scenarios - scenario_idx + 1)
+            eta_str = f", ~{eta / 60:.1f} min remaining (est.)"
+        print(
+            f"\n=== Scenario {scenario_idx}/{n_scenarios}: '{name}' "
+            f"(elapsed {elapsed / 60:.1f} min{eta_str}) ==="
         )
-        for name, df in scenario_inflows1.items()
-    }
 
-    tracker_keyed_BAU = scenario_results["BAU"]["tracker_keyed"]
-    tracker_keyed_BEV_only = scenario_results["BEV_only"]["tracker_keyed"]
-    tracker_keyed_BEV_A_F = scenario_results["BEV_A_F"]["tracker_keyed"]
-    tracker_keyed_BEV_JA_JF = scenario_results["BEV_JA_JF"]["tracker_keyed"]
-    tracker_keyed_BEV_large = scenario_results["BEV_large"]["tracker_keyed"]
-    tracker_keyed_BEV_small = scenario_results["BEV_small"]["tracker_keyed"]
+        export_share_scn = {**export_share_by_drivetrain_base, **spec.export_share_overrides}
+        unknown_whereabouts_scn = {**unknown_whereabouts_share_base, **spec.unknown_whereabouts_share_overrides}
+        lifetime_change_scn = {
+            drv: {"start_year": c.start_year, "shape_k": c.shape_k, "scale_lambda": c.scale_lambda}
+            for drv, c in spec.lifetime_change_by_drv.items()
+        } or None
 
-    # =========================================================================
-    # === C6 FIX -- see module docstring for the full explanation and the caveat
-    # that this is UNTESTED without flowdriven_model.py. ===
-    # Each of these five scenarios now runs `run_adjusted_scenario` with a genuine
-    # override, using the exact target values the abandoned scaffold's own comments
-    # specified. `inflow_segments_scenario_BAU` (the same baseline inflow used for the
-    # "BAU" tracker above) is reused as the inflow basis for all five -- these
-    # scenarios vary lifetime/export/unknown-whereabouts/stock_modifier, NOT the
-    # inflow composition itself (that's what the BEV_* scenarios above already cover).
-    # =========================================================================
-    icev_shorter_result = run_adjusted_scenario(
-        scenario_name="ICEV_shorter", inflow_df=inflow_segments_scenario_BAU,
-        matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
-        flows_03=flows_03, p02=p02_dict, unknown_whereabouts_share=unknown_whereabouts_share,
-        segment_map=segment_map, drv_prefix_map=drv_prefix_map, materials_region=materials_region,
-        materials_drivetrains=materials_drivetrains, base_year=2005, segment_shares_by_drv=segment_shares_by_drv,
-        export_share_by_drivetrain=export_share_by_drivetrain,
-        lifetime_change_by_drv=LIFETIME_CHANGE_BY_DRV_ICEV_SHORTER,
+        scenario_results_all[name] = run_adjusted_scenario(
+            scenario_name=name, inflow_df=inflow_by_scenario[name],
+            matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
+            flows_03=flows_03, p02=p02_dict, unknown_whereabouts_share=unknown_whereabouts_scn,
+            segment_map=segment_map, drv_prefix_map=drv_prefix_map, materials_region=materials_region,
+            materials_drivetrains=materials_drivetrains, base_year=2005,
+            # `segment_shares_by_drv`: confirmed DEAD inside `flowdriven_model.py`
+            # itself (finding C10 -- accepted but never read), kept only because the
+            # scalar function's signature requires the argument. Nothing to source
+            # from params here since it has no numerical effect.
+            segment_shares_by_drv={},
+            export_share_by_drivetrain=export_share_scn,
+            stock_modifier_2027=spec.stock_modifier,
+            lifetime_change_by_drv=lifetime_change_scn,
+            monte_carlo_enabled=monte_carlo_enabled, n_draws=n_draws_mc,
+            lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
+            unknown_whereabouts_share_std=unknown_whereabouts_share_std_mc,
+            export_share_std=export_share_std_mc, mc_seed=mc_scenario_seeds[name],
+            mc_chunk_size=mc_chunk_size,
+        )
+
+    print(
+        f"\n=== All {n_scenarios} scenarios done in "
+        f"{(time.time() - t_start_all_scenarios) / 60:.1f} min total ===\n"
     )
-    tracker_keyed_ICEV_shorter = icev_shorter_result["tracker_keyed"]
 
-    bev_longer_result = run_adjusted_scenario(
-        scenario_name="BEV_longer", inflow_df=inflow_segments_scenario_BAU,
-        matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
-        flows_03=flows_03, p02=p02_dict, unknown_whereabouts_share=unknown_whereabouts_share,
-        segment_map=segment_map, drv_prefix_map=drv_prefix_map, materials_region=materials_region,
-        materials_drivetrains=materials_drivetrains, base_year=2005, segment_shares_by_drv=segment_shares_by_drv,
-        export_share_by_drivetrain=export_share_by_drivetrain,
-        lifetime_change_by_drv=LIFETIME_CHANGE_BY_DRV_BEV_LONGER,
-    )
-    tracker_keyed_BEV_longer = bev_longer_result["tracker_keyed"]
-
-    stock_lower_result = run_adjusted_scenario(
-        scenario_name="stock_lower", inflow_df=inflow_segments_scenario_BAU,
-        matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
-        flows_03=flows_03, p02=p02_dict, unknown_whereabouts_share=unknown_whereabouts_share,
-        segment_map=segment_map, drv_prefix_map=drv_prefix_map, materials_region=materials_region,
-        materials_drivetrains=materials_drivetrains, base_year=2005, segment_shares_by_drv=segment_shares_by_drv,
-        export_share_by_drivetrain=export_share_by_drivetrain,
-        stock_modifier_2027=0.8,  # was the module default of 1 (no-op) -- per the scaffold's own comment
-    )
-    tracker_keyed_stock_lower = stock_lower_result["tracker_keyed"]
-
-    # losses_zero / losses_high both modify ONLY the BEV entry of export_share_by_drivetrain
-    # / unknown_whereabouts_share -- fresh copies each, so the two scenarios (and the
-    # scenarios computed above, which share the unmodified baseline dicts) don't
-    # accidentally share or mutate each other's dicts.
-    export_share_losses_zero = dict(export_share_by_drivetrain)
-    export_share_losses_zero["BEV"] = 0.0
-    unknown_whereabouts_losses_zero = dict(unknown_whereabouts_share)
-    unknown_whereabouts_losses_zero["BEV"] = 0.0
-    losses_zero_result = run_adjusted_scenario(
-        scenario_name="losses_zero", inflow_df=inflow_segments_scenario_BAU,
-        matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
-        flows_03=flows_03, p02=p02_dict, unknown_whereabouts_share=unknown_whereabouts_losses_zero,
-        segment_map=segment_map, drv_prefix_map=drv_prefix_map, materials_region=materials_region,
-        materials_drivetrains=materials_drivetrains, base_year=2005, segment_shares_by_drv=segment_shares_by_drv,
-        export_share_by_drivetrain=export_share_losses_zero,
-    )
-    tracker_keyed_losses_zero = losses_zero_result["tracker_keyed"]
-
-    export_share_losses_high = dict(export_share_by_drivetrain)
-    export_share_losses_high["BEV"] = 0.08  # "like ICEV" -- matches every other non-BEV drivetrain
-    unknown_whereabouts_losses_high = dict(unknown_whereabouts_share)
-    unknown_whereabouts_losses_high["BEV"] = 0.43  # "like ICEV"
-    losses_high_result = run_adjusted_scenario(
-        scenario_name="losses_high", inflow_df=inflow_segments_scenario_BAU,
-        matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
-        flows_03=flows_03, p02=p02_dict, unknown_whereabouts_share=unknown_whereabouts_losses_high,
-        segment_map=segment_map, drv_prefix_map=drv_prefix_map, materials_region=materials_region,
-        materials_drivetrains=materials_drivetrains, base_year=2005, segment_shares_by_drv=segment_shares_by_drv,
-        export_share_by_drivetrain=export_share_losses_high,
-    )
-    tracker_keyed_losses_high = losses_high_result["tracker_keyed"]
-
-    tracker_keyed_by_scenario = {
-        "BAU": tracker_keyed_BAU, "BEV_only": tracker_keyed_BEV_only, "BEV_A_F": tracker_keyed_BEV_A_F,
-        "BEV_JA_JF": tracker_keyed_BEV_JA_JF, "BEV_large": tracker_keyed_BEV_large, "BEV_small": tracker_keyed_BEV_small,
-        "BEV_longer": tracker_keyed_BEV_longer, "ICEV_shorter": tracker_keyed_ICEV_shorter,
-        "stock_lower": tracker_keyed_stock_lower, "losses_zero": tracker_keyed_losses_zero, "losses_high": tracker_keyed_losses_high,
-    }
+    tracker_keyed_by_scenario = {name: r["tracker_keyed"] for name, r in scenario_results_all.items()}
 
     # -----------------------------------------------------------------------
-    # Persist -- all 11 scenarios are now genuine (see C6 fix above)
+    # Persist -- same two artifact groups as before (matches `artifacts.py`'s
+    # existing `ARTIFACT_FILES` naming), now derived from each scenario's OWN
+    # `ScenarioSpec` (has an inflow transform, or doesn't) instead of two
+    # hardcoded name lists.
     # -----------------------------------------------------------------------
+    inflow_mix_names = [
+        name for name, spec in p03_02.scenarios.items()
+        if spec.inflow_drivetrain_shares_final is not None or spec.inflow_segment_shares_final is not None
+    ]
+    other_names = [name for name in scenario_names_all if name not in inflow_mix_names]
+
     saved_inflow_mix_scenarios = save_many(
-        tracker_keyed_BAU=tracker_keyed_BAU, tracker_keyed_BEV_only=tracker_keyed_BEV_only,
-        tracker_keyed_BEV_A_F=tracker_keyed_BEV_A_F, tracker_keyed_BEV_JA_JF=tracker_keyed_BEV_JA_JF,
-        tracker_keyed_BEV_large=tracker_keyed_BEV_large, tracker_keyed_BEV_small=tracker_keyed_BEV_small,
+        **{f"tracker_keyed_{name}": tracker_keyed_by_scenario[name] for name in inflow_mix_names},
         root=PROJECT_ROOT,
     )
     saved_other_scenarios = save_many(
-        tracker_keyed_BEV_longer=tracker_keyed_BEV_longer, tracker_keyed_ICEV_shorter=tracker_keyed_ICEV_shorter,
-        tracker_keyed_stock_lower=tracker_keyed_stock_lower, tracker_keyed_losses_zero=tracker_keyed_losses_zero,
-        tracker_keyed_losses_high=tracker_keyed_losses_high,
+        **{f"tracker_keyed_{name}": tracker_keyed_by_scenario[name] for name in other_names},
         root=PROJECT_ROOT,
     )
     print("Saved inflow-mix scenario artifacts:", saved_inflow_mix_scenarios)
@@ -736,6 +740,85 @@ def main() -> dict[str, Any]:
         save_path=fig_path,
     )
     print(f"Saved diagnostic plot: {fig_path}")
+
+    # -----------------------------------------------------------------------
+    # Monte Carlo (opt-in via params.monte_carlo.enabled, default False -- does not
+    # affect or slow down a normal deterministic run above; everything above this
+    # point is unchanged whether or not this block runs).
+    #
+    # [REPLACES the old share-only post-hoc MC] Each scenario's Monte Carlo result
+    # was already computed inside `run_adjusted_scenario` itself (see its
+    # `monte_carlo_enabled` docstring) via `fdm.run_flow_driven_model_monte_carlo`
+    # -- the vectorized engine, itself a thin wrapper around the product-agnostic
+    # `cohort_flow_mc.run_cohort_flow_monte_carlo` -- using THIS scenario's own
+    # `inflow_df`, `lifetime_change_by_drv`, `stock_modifier_2027`, and share
+    # dicts. This block only AGGREGATES those already-computed per-scenario
+    # results (`scenario_results_all[name]["mc"]`) into summary stats and the
+    # comparison plot; it performs no simulation of its own.
+    #
+    # GENUINE LIFETIME UNCERTAINTY, not just shares: `scale_lambda` itself is
+    # resampled per draw (relative spread from `p02.lifetime_scale_lambda_
+    # relative_spread`) and the SAME per-draw multiplier is carried through a
+    # scenario's `lifetime_change_by_drv` override (e.g. BEV_longer's
+    # scale_lambda=17 from 2027) -- see `cohort_flow_mc`'s "UNCERTAINTY
+    # CONVENTION" docstring. This is what makes BEV_longer's uncertainty band
+    # reflect genuine "how much longer, exactly, do these vehicles last"
+    # uncertainty, not just downstream share noise on a fixed deterministic total.
+    # -----------------------------------------------------------------------
+    if monte_carlo_enabled:
+        n_draws = n_draws_mc
+        eu_total_cumulative_collected_by_scenario: dict[str, np.ndarray] = {}
+        summary_mc: dict[str, dict] = {}
+
+        for scenario_name in scenario_names_all:
+            mc = scenario_results_all[scenario_name]["mc"]
+            if mc is None:
+                continue  # should not happen when monte_carlo_enabled, but fail soft
+
+            eu_total_cumulative_collected_by_scenario[scenario_name] = mc["eu_total"]["cumulative_collected"]
+
+            drivetrains_present = sorted({group_key[1] for group_key in mc["by_group"].keys()})
+            for drivetrain in drivetrains_present:
+                per_drv_groups = [g for gk, g in mc["by_group"].items() if gk[1] == drivetrain]
+                for metric in ["cumulative_collected", "cumulative_export", "cumulative_unknown"]:
+                    values = sum(g[metric] for g in per_drv_groups)
+                    summary_mc[f"{scenario_name}__{drivetrain}__{metric}"] = summarize_distribution(values)
+
+            for metric in ["cumulative_collected", "cumulative_export", "cumulative_unknown"]:
+                summary_mc[f"{scenario_name}__EU_total__{metric}"] = summarize_distribution(mc["eu_total"][metric])
+
+        saved_mc = save_many(mc_stage03_02_summary=summary_mc, root=PROJECT_ROOT)
+        print("Saved Monte Carlo artifacts:", saved_mc)
+
+        for scenario_name in scenario_names_all:
+            s = summary_mc[f"{scenario_name}__EU_total__cumulative_collected"]
+            print(
+                f"Monte Carlo [{scenario_name}, EU total collected]: {n_draws:,} draws -- "
+                f"mean={s['mean']:.2f}, median={s['median']:.2f}, P2.5={s['p2_5']:.2f}, P97.5={s['p97_5']:.2f}"
+            )
+
+        # -----------------------------------------------------------------------
+        # Comparison figure: EU-total cumulative collected volume, ALL 11 scenarios
+        # side by side -- the direct "how does uncertainty differ across scenarios"
+        # visual, extending the existing all-scenarios flows chart above with an
+        # uncertainty view of the same comparison.
+        # -----------------------------------------------------------------------
+        fig, ax = plt.subplots(figsize=(11, 6))
+        box_data = [eu_total_cumulative_collected_by_scenario[name] for name in scenario_names_all]
+        bp = ax.boxplot(box_data, tick_labels=scenario_names_all, showfliers=False, patch_artist=True)
+        for patch in bp["boxes"]:
+            patch.set_facecolor("#4a7fb5")
+            patch.set_alpha(0.6)
+        ax.set_title(f"Monte Carlo: EU-total cumulative collected volume by scenario (n={n_draws:,} draws each)", fontsize=12)
+        ax.set_ylabel("Cumulative collected [million vehicles]")
+        ax.grid(True, linestyle="--", alpha=0.3, axis="y")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+        plt.tight_layout()
+        fig_path_mc = fig_dir / "03_02_monte_carlo_scenario_comparison.png"
+        fig.savefig(fig_path_mc, dpi=150, bbox_inches="tight")
+        print(f"Saved diagnostic plot: {fig_path_mc}")
 
     return {**saved_inflow_mix_scenarios, **saved_other_scenarios}
 

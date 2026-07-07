@@ -150,6 +150,38 @@ class LifetimeOverride:
 
 
 @dataclass(frozen=True)
+class AsymmetricSpread:
+    """
+    Asymmetric relative spread around a point estimate: the true value could be
+    `lower` fraction SMALLER or `upper` fraction LARGER than the point estimate,
+    not assumed equal. Used to build
+    `Triangular(point*(1-lower), point, point*(1+upper))`.
+
+    A plain float is still accepted everywhere `lifetime_scale_lambda_relative_
+    spread` is used (meaning symmetric: `lower = upper = that float`) -- this
+    type exists for when that symmetry assumption doesn't hold, e.g. "10%
+    shorter-lived is plausible, but up to 20% longer-lived is also plausible"
+    (`AsymmetricSpread(lower=0.1, upper=0.2)`), which a flat +/-15% would
+    misrepresent either way.
+
+    NOTE: an asymmetric Triangular's MEAN is `(low + mode + high) / 3`, not
+    `point` -- it shifts toward whichever side has the wider spread. This is
+    correct distribution behavior: if the belief is "more likely to run longer
+    than shorter", the sampled mean SHOULD sit above `point`.
+    """
+    lower: float
+    upper: float
+
+    def validate(self, *, field_name: str) -> list[str]:
+        issues: list[str] = []
+        if self.lower < 0:
+            issues.append(f"{field_name}.lower={self.lower} must be >= 0.")
+        if self.upper < 0:
+            issues.append(f"{field_name}.upper={self.upper} must be >= 0.")
+        return issues
+
+
+@dataclass(frozen=True)
 class StockFlowParams:
     model_end_year: int = 2070
     last_exp_data_year: int = 2022
@@ -217,13 +249,19 @@ class StockFlowParams:
     # estimate is at sampling time -- if you change `lifetime_by_drv["BEV"]
     # .scale_lambda`, the Monte Carlo spread around it updates automatically, with no
     # separate value to keep in sync.
-    lifetime_scale_lambda_relative_spread: dict[str, float] = field(default_factory=lambda: {
+    lifetime_scale_lambda_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
         drv: 0.15 for drv in ALL_DRIVETRAINS
     })
-    # Used to build Triangular(point*(1-spread), point, point*(1+spread)) around
-    # lifetime_by_drv[drv].scale_lambda. PLACEHOLDER default (15%) -- tune per
-    # drivetrain once real uncertainty ranges (e.g. a survival-curve fit's own
-    # confidence interval) are available.
+    # Used to build Triangular(point*(1-lower), point, point*(1+upper)) around
+    # lifetime_by_drv[drv].scale_lambda -- `lower=upper=<the float>` when a plain float
+    # is given (symmetric, the default here), or genuinely different lower/upper via
+    # `AsymmetricSpread(lower=..., upper=...)` for a drivetrain whose uncertainty isn't
+    # symmetric, e.g.:
+    #     "BEV": AsymmetricSpread(lower=0.10, upper=0.20)  # 10% shorter-lived is
+    #                                                        # plausible, up to 20%
+    #                                                        # longer-lived also is
+    # PLACEHOLDER default (15%, symmetric) -- tune per drivetrain once real uncertainty
+    # ranges (e.g. a survival-curve fit's own confidence interval) are available.
 
     unknown_whereabouts_share_std: dict[str, float] = field(default_factory=lambda: {
         drv: 0.05 for drv in ALL_DRIVETRAINS
@@ -239,8 +277,19 @@ class StockFlowParams:
         issues: list[str] = []
         lifetime_drvs = set(self.lifetime_by_drv)
 
+        missing = lifetime_drvs - set(self.lifetime_scale_lambda_relative_spread)
+        if missing:
+            issues.append(
+                f"stock_flow.lifetime_scale_lambda_relative_spread is missing "
+                f"drivetrains present in lifetime_by_drv: {sorted(missing)}."
+            )
+        for drv, spread in self.lifetime_scale_lambda_relative_spread.items():
+            if isinstance(spread, AsymmetricSpread):
+                issues += spread.validate(field_name=f"stock_flow.lifetime_scale_lambda_relative_spread['{drv}']")
+            elif spread < 0:
+                issues.append(f"stock_flow.lifetime_scale_lambda_relative_spread['{drv}'] = {spread} must be >= 0.")
+
         for name, mapping in (
-            ("lifetime_scale_lambda_relative_spread", self.lifetime_scale_lambda_relative_spread),
             ("unknown_whereabouts_share_std", self.unknown_whereabouts_share_std),
             ("export_share_std", self.export_share_std),
         ):
@@ -274,6 +323,251 @@ class StockFlowParams:
                 f"stock_flow.lifetime_override_by_drv is missing drivetrains present in "
                 f"lifetime_by_drv: {sorted(missing_override)}."
             )
+        return issues
+
+
+# ---------------------------------------------------------------------------
+# Stage 03, part 2 -- Adjusted flows (03_02_adjustedflows.py) sensitivity scenarios
+# ---------------------------------------------------------------------------
+# Per explicit instruction: NO parameter for this stage may be hardcoded in the script
+# itself. Previously `03_02_adjustedflows.py` had its 11 scenarios' definitions spread
+# across five separate module-level constants (`stock_modifier_2027`,
+# `LIFETIME_CHANGE_BY_DRV_{BAU,ICEV_SHORTER,BEV_LONGER}`, five
+# `BEV_SEGMENT_SHARES_*` dicts, and two inline `losses_zero`/`losses_high` share
+# overrides) -- adding a 12th scenario meant editing several of these in several
+# places. `ScenarioSpec` bundles everything ONE scenario needs into ONE object, so
+# adding a scenario is one new entry in `AdjustedFlowsParams.scenarios`, not edits
+# scattered across the file.
+@dataclass(frozen=True)
+class OpenEndedLifetimeChange:
+    """
+    A lifetime override with NO end_year -- the convention `flowdriven_model.py`'s
+    `run_flow_driven_model_with_outflow_disaggregation` actually implements (confirmed
+    via source: `if t >= lifetime_change_by_drv[drv]["start_year"]`, no `end_year` ever
+    read). Deliberately a SEPARATE type from `LifetimeOverride` above (which requires
+    both `start_year` AND `end_year`, for stage 02's windowed
+    `get_effective_lifetime_params`) -- these are two genuinely different, coexisting
+    override conventions in this codebase, not a naming inconsistency for the same
+    thing (see the consolidated review, finding H4).
+    """
+    start_year: int
+    shape_k: float
+    scale_lambda: float
+
+
+@dataclass(frozen=True)
+class ScenarioSpec:
+    """
+    One complete, self-contained definition of a `03_02_adjustedflows.py` sensitivity
+    scenario. Every override field is SPARSE and ADDITIVE over this stage's base
+    `StockFlowParams` values: a missing drivetrain entry means "use the base value for
+    that drivetrain", not "zero it out" -- this mirrors how
+    `run_flow_driven_model_with_outflow_disaggregation` itself already treats a missing
+    `lifetime_change_by_drv[drv]` entry (falls back to `lifetime_by_drv[drv]`). This is
+    what lets e.g. `ICEV_shorter` specify ONLY Diesel/Petrol's changed lifetime, without
+    having to also restate BEV's unchanged one (the pre-refactor `LIFETIME_CHANGE_BY_
+    DRV_*` dicts redundantly restated every drivetrain, changed or not).
+
+    Exactly one of `inflow_drivetrain_shares_final` / `inflow_segment_shares_final`
+    should be set for a scenario that changes the inflow composition; neither set means
+    "reuse the BAU scenario's resolved inflow unchanged" (what all five lifetime/loss/
+    stock scenarios do).
+    """
+    name: str
+
+    # Inflow-composition transform (at most one of the two pairs below should be set):
+    #   - `inflow_drivetrain_shares_final`: changes the DRIVETRAIN mix of inflow
+    #     (maps onto `tweak_inflow_drivetrain_shares` in 03_02_adjustedflows.py) --
+    #     used by BEV_only.
+    #   - `inflow_segment_shares_drivetrain` + `inflow_segment_shares_final`: changes
+    #     ONE drivetrain's INTERNAL segment mix, holding the overall drivetrain mix
+    #     fixed (maps onto `tweak_inflow_segment_shares_within_drivetrain`) -- used by
+    #     BAU (its own segment-mix baseline) and the four BEV segment-profile
+    #     scenarios (A_F, JA_JF, Large, Small).
+    inflow_drivetrain_shares_final: dict[str, float] | None = None
+    inflow_segment_shares_drivetrain: str | None = None
+    inflow_segment_shares_final: dict[str, float] | None = None
+
+    # Sparse lifetime override: only drivetrains that actually change need an entry.
+    lifetime_change_by_drv: dict[str, OpenEndedLifetimeChange] = field(default_factory=dict)
+
+    # Sparse share overrides: only drivetrains that actually change need an entry.
+    export_share_overrides: dict[str, float] = field(default_factory=dict)
+    unknown_whereabouts_share_overrides: dict[str, float] = field(default_factory=dict)
+
+    # Flat inflow multiplier from `AdjustedFlowsParams.lifetime_change_start_year`
+    # onward (the vehicle pipeline's `stock_modifier_2027`, expressed generically here
+    # since the year itself is also a parameter, not hardcoded to literally "2027").
+    stock_modifier: float = 1.0
+
+    def validate(self, *, valid_segments: set[str]) -> list[str]:
+        issues: list[str] = []
+        if self.inflow_drivetrain_shares_final is not None and self.inflow_segment_shares_final is not None:
+            issues.append(
+                f"adjusted_flows.scenarios['{self.name}']: both inflow_drivetrain_shares_final "
+                f"and inflow_segment_shares_final are set -- at most one should be."
+            )
+        if self.inflow_drivetrain_shares_final is not None:
+            total = sum(self.inflow_drivetrain_shares_final.values())
+            if not (0.999 <= total <= 1.001):
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_drivetrain_shares_final "
+                    f"sums to {total:.6f}, expected 1.0."
+                )
+        if self.inflow_segment_shares_final is not None:
+            if self.inflow_segment_shares_drivetrain is None:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_shares_final is "
+                    f"set but inflow_segment_shares_drivetrain is None."
+                )
+            missing_segs = set(self.inflow_segment_shares_final) - valid_segments
+            if missing_segs:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final has "
+                    f"unrecognized segments: {sorted(missing_segs)}."
+                )
+            total = sum(self.inflow_segment_shares_final.values())
+            if not (0.999 <= total <= 1.001):
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final sums "
+                    f"to {total:.6f}, expected 1.0."
+                )
+        for drv, change in self.lifetime_change_by_drv.items():
+            if change.scale_lambda <= 0 or change.shape_k <= 0:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].lifetime_change_by_drv['{drv}'] "
+                    f"has non-positive shape_k/scale_lambda."
+                )
+        for name_, mapping in (
+            ("export_share_overrides", self.export_share_overrides),
+            ("unknown_whereabouts_share_overrides", self.unknown_whereabouts_share_overrides),
+        ):
+            for drv, share in mapping.items():
+                if not (0.0 <= share <= 1.0):
+                    issues.append(
+                        f"adjusted_flows.scenarios['{self.name}'].{name_}['{drv}'] = {share} "
+                        f"is outside [0, 1]."
+                    )
+        if self.stock_modifier <= 0:
+            issues.append(f"adjusted_flows.scenarios['{self.name}'].stock_modifier must be positive.")
+        return issues
+
+
+# The 12 vehicle segments (A-F, JA-JF) -- matches `MaterialsParams.segment_map`'s keys.
+_ADJUSTED_FLOWS_SEGMENTS: tuple[str, ...] = ("A", "B", "C", "D", "E", "F", "JA", "JB", "JC", "JD", "JE", "JF")
+
+
+@dataclass(frozen=True)
+class AdjustedFlowsParams:
+    """
+    Everything `03_02_adjustedflows.py` needs that isn't already in `StockFlowParams`:
+    the shared inflow-tweak timing window, the shared lifetime-change start year, and
+    all 11 scenario definitions. See `ScenarioSpec`'s docstring for the sparse-override
+    convention every scenario below relies on.
+    """
+    # Shared by every inflow-composition-tweaking scenario (BAU's own segment-mix
+    # baseline, BEV_only, and the four BEV segment-profile scenarios): the transform
+    # ramps from the baseline share at `scenario_start_year` to its target share by
+    # `scenario_ramp_end_year`. Currently both years coincide (an immediate switch, no
+    # ramp) -- kept as two separate parameters since nothing about the transform
+    # requires them to be equal, and a future scenario may want a genuine multi-year ramp.
+    scenario_start_year: int = 2026
+    scenario_ramp_end_year: int = 2026
+
+    # Shared by every scenario with a `lifetime_change_by_drv` entry (BEV_longer,
+    # ICEV_shorter): the year that override takes effect. Centralized here rather than
+    # repeated inside each `OpenEndedLifetimeChange` so all lifetime-change scenarios
+    # stay synchronized to one edit if this ever needs to move.
+    lifetime_change_start_year: int = 2027
+
+    scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
+        "BAU": ScenarioSpec(
+            name="BAU",
+            inflow_segment_shares_drivetrain="BEV",
+            inflow_segment_shares_final={
+                "A": 0.11599, "B": 0.07235, "C": 0.17037, "D": 0.06288, "E": 0.04190, "F": 0.02945,
+                "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
+            },
+        ),
+        "BEV_only": ScenarioSpec(
+            name="BEV_only",
+            inflow_drivetrain_shares_final={"BEV": 1.0, "HEV": 0.0, "PHEV": 0.0, "Diesel": 0.0, "Petrol": 0.0},
+        ),
+        "BEV_A_F": ScenarioSpec(
+            name="BEV_A_F",
+            inflow_segment_shares_drivetrain="BEV",
+            inflow_segment_shares_final={
+                "A": 0.11940, "B": 0.14733, "C": 0.42153, "D": 0.21450, "E": 0.06298, "F": 0.03426,
+                "JA": 0.0, "JB": 0.0, "JC": 0.0, "JD": 0.0, "JE": 0.0, "JF": 0.0,
+            },
+        ),
+        "BEV_JA_JF": ScenarioSpec(
+            name="BEV_JA_JF",
+            inflow_segment_shares_drivetrain="BEV",
+            inflow_segment_shares_final={
+                "A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0, "E": 0.0, "F": 0.0,
+                "JA": 0.11940, "JB": 0.14733, "JC": 0.42153, "JD": 0.21450, "JE": 0.06298, "JF": 0.03426,
+            },
+        ),
+        "BEV_large": ScenarioSpec(
+            name="BEV_large",
+            inflow_segment_shares_drivetrain="BEV",
+            inflow_segment_shares_final={
+                "A": 0.02, "B": 0.05, "C": 0.12, "D": 0.16, "E": 0.12, "F": 0.06,
+                "JA": 0.04, "JB": 0.10, "JC": 0.16, "JD": 0.10, "JE": 0.05, "JF": 0.02,
+            },
+        ),
+        "BEV_small": ScenarioSpec(
+            name="BEV_small",
+            inflow_segment_shares_drivetrain="BEV",
+            inflow_segment_shares_final={
+                "A": 0.10, "B": 0.22, "C": 0.28, "D": 0.14, "E": 0.04, "F": 0.01,
+                "JA": 0.03, "JB": 0.07, "JC": 0.07, "JD": 0.03, "JE": 0.01, "JF": 0.00,
+            },
+        ),
+        "BEV_longer": ScenarioSpec(
+            name="BEV_longer",
+            lifetime_change_by_drv={
+                "BEV": OpenEndedLifetimeChange(start_year=2027, shape_k=3.0, scale_lambda=17.0),
+            },
+        ),
+        "ICEV_shorter": ScenarioSpec(
+            name="ICEV_shorter",
+            lifetime_change_by_drv={
+                "Diesel": OpenEndedLifetimeChange(start_year=2027, shape_k=3.0, scale_lambda=9.0),
+                "Petrol": OpenEndedLifetimeChange(start_year=2027, shape_k=3.0, scale_lambda=9.0),
+            },
+        ),
+        "stock_lower": ScenarioSpec(name="stock_lower", stock_modifier=0.8),
+        "losses_zero": ScenarioSpec(
+            name="losses_zero",
+            export_share_overrides={"BEV": 0.0},
+            unknown_whereabouts_share_overrides={"BEV": 0.0},
+        ),
+        "losses_high": ScenarioSpec(
+            name="losses_high",
+            export_share_overrides={"BEV": 0.08},  # "like ICEV" -- matches every other non-BEV drivetrain
+            unknown_whereabouts_share_overrides={"BEV": 0.43},  # "like ICEV"
+        ),
+    })
+
+    def validate(self) -> list[str]:
+        issues: list[str] = []
+        if "BAU" not in self.scenarios:
+            issues.append("adjusted_flows.scenarios must include a 'BAU' entry (used as the base inflow for scenarios with no inflow transform of their own).")
+        for spec in self.scenarios.values():
+            issues += spec.validate(valid_segments=set(_ADJUSTED_FLOWS_SEGMENTS))
+        for name_, change_start in [("lifetime_change_start_year", self.lifetime_change_start_year)]:
+            for scen_name, spec in self.scenarios.items():
+                for drv, change in spec.lifetime_change_by_drv.items():
+                    if change.start_year != change_start:
+                        issues.append(
+                            f"adjusted_flows.scenarios['{scen_name}'].lifetime_change_by_drv['{drv}']"
+                            f".start_year={change.start_year} != adjusted_flows.{name_}={change_start} "
+                            f"-- expected every lifetime-change scenario to share the same start year."
+                        )
+        if self.scenario_start_year > self.scenario_ramp_end_year:
+            issues.append("adjusted_flows.scenario_start_year must not be after scenario_ramp_end_year.")
         return issues
 
 
@@ -472,6 +766,13 @@ class MonteCarloParams:
     stockflow_lifetime_spread: float = 0.15
     stockflow_share_spread: float = 0.15
 
+    # [NEW] Memory-chunking for vectorized Monte Carlo engines (e.g.
+    # `cohort_flow_mc.py`): draws are processed in batches of this size so peak memory
+    # is bounded by `chunk_size x n_cohorts`, not `n_draws x n_cohorts`. A generic,
+    # cross-stage performance knob (not a model assumption), centralized here rather
+    # than hardcoded as a function default in any one engine.
+    chunk_size: int = 20_000
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         if self.n_draws <= 0:
@@ -482,6 +783,8 @@ class MonteCarloParams:
             issues.append(f"monte_carlo.stockflow_lifetime_spread={self.stockflow_lifetime_spread} must be in (0, 1).")
         if not (0.0 < self.stockflow_share_spread < 1.0):
             issues.append(f"monte_carlo.stockflow_share_spread={self.stockflow_share_spread} must be in (0, 1).")
+        if self.chunk_size <= 0:
+            issues.append(f"monte_carlo.chunk_size={self.chunk_size} must be positive.")
         return issues
 
 
@@ -492,6 +795,7 @@ class MonteCarloParams:
 class Params:
     data_prep: DataPrepParams = field(default_factory=DataPrepParams)
     stock_flow: StockFlowParams = field(default_factory=StockFlowParams)
+    adjusted_flows: AdjustedFlowsParams = field(default_factory=AdjustedFlowsParams)
     disaggregation: DisaggregationParams = field(default_factory=DisaggregationParams)
     materials: MaterialsParams = field(default_factory=MaterialsParams)
     visualization: VisualizationParams = field(default_factory=VisualizationParams)
@@ -501,6 +805,7 @@ class Params:
         issues: list[str] = []
         issues += self.data_prep.validate()
         issues += self.stock_flow.validate()
+        issues += self.adjusted_flows.validate()
         issues += self.disaggregation.validate()
         issues += self.materials.validate()
         issues += self.visualization.validate()
@@ -525,6 +830,7 @@ class Params:
         return {
             "01_data_prep": asdict(self.data_prep),
             "02_stock_flow": asdict(self.stock_flow),
+            "03_02_adjusted_flows": asdict(self.adjusted_flows),
             "03_disaggregation": asdict(self.disaggregation),
             "04_materials": asdict(self.materials),
             "06_visualization": asdict(self.visualization),
