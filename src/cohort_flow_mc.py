@@ -307,6 +307,7 @@ def run_cohort_flow_monte_carlo(
     outflow_timing: str = "post_inflow",
     lifetime_change_by_entity: dict[str, dict[str, float]] | None = None,
     period_inflow_multiplier: dict[int, float] | None = None,
+    output_periods: list[tuple[int, int]] | None = None,
     seed: int | np.random.SeedSequence | None = None,
     chunk_size: int = 20_000,
     collect_per_year: bool = False,
@@ -329,15 +330,61 @@ def run_cohort_flow_monte_carlo(
     `period_inflow_multiplier`: optional {year: multiplier} dict applied
     flatly to that year's inflow for every entity/group (e.g. the vehicle
     pipeline's `stock_modifier_2027`, expressed generically as
-    `{2027: 0.8, 2028: 0.8, ...}` rather than a single hardcoded year).
+    `{2027: 0.8, 2028: 0.8, ...}` rather than a single hardcoded year). NOTE:
+    this is a SINGLE-YEAR-keyed dict (an existing, unrelated parameter) --
+    not to be confused with `output_periods` below, which is a list of
+    (start, end) YEAR RANGES.
+
+    `output_periods`: list of `(start_year, end_year)` INCLUSIVE ranges to
+    report results for (e.g. `[(2030, 2030), (2030, 2040), (2005, 2070)]` --
+    a single year is just a range where start == end). Specified UP FRONT
+    (before running), not queryable after the fact -- this is what keeps
+    memory bounded at real scale: results for each requested range are
+    accumulated DURING the one simulation pass, so nothing resembling a full
+    `(n_draws, n_cohorts, n_years)` history is ever materialized. Defaults to
+    a single implicit period covering the whole `years` range (`years.min()`
+    to `years.max()`) -- this reproduces the pre-`output_periods` behavior
+    exactly, including the flat `"cumulative_survival"`/etc. keys described
+    below (only present when the whole-horizon period is among the requested
+    ones, which it is by default).
+
+    For EACH requested period, four flow metrics (survival/export/unknown/
+    collected -- all summed over years in that period) AND three stock
+    metrics are reported:
+      - `"stock_end_of_period"`: stock at the period's LAST year (a snapshot;
+        for a single-year period this is just that year's stock).
+      - `"stock_sum_over_period"`: SUM of stock across every year in the
+        period ("stock-years", e.g. total vehicle-years in service).
+      - `"stock_per_year"`: `{year: array}` for every year in the period --
+        the full per-year series, not just start/end.
+    `"cumulative_inflow"` is also reported per period -- inflow is currently
+    DETERMINISTIC (not resampled per draw), so this is a `(n_draws,)` array
+    of an IDENTICAL value repeated -- kept as a full array (not a bare float)
+    so `monte_carlo.summarize_distribution()` can be applied uniformly to
+    every metric without special-casing (it will report `std=0`, a
+    degenerate-but-correct histogram, etc., for this one).
 
     Returns:
         {
           "by_group": {group_key: {
+              # Present only if the whole-horizon (years.min(), years.max())
+              # period is among `output_periods` (true by default):
               "cumulative_survival":  np.ndarray (n_draws,),
-              "cumulative_a":         np.ndarray (n_draws,),   # share_a_name's flow
-              "cumulative_b":         np.ndarray (n_draws,),   # share_b_name's flow
-              "cumulative_collected": np.ndarray (n_draws,),   # residual flow
+              "cumulative_a":         np.ndarray (n_draws,),
+              "cumulative_b":         np.ndarray (n_draws,),
+              "cumulative_collected": np.ndarray (n_draws,),
+              "periods": {
+                  (start_year, end_year): {
+                      "cumulative_survival":    np.ndarray (n_draws,),
+                      "cumulative_a":           np.ndarray (n_draws,),
+                      "cumulative_b":           np.ndarray (n_draws,),
+                      "cumulative_collected":   np.ndarray (n_draws,),
+                      "cumulative_inflow":      np.ndarray (n_draws,),  # deterministic, see above
+                      "stock_end_of_period":    np.ndarray (n_draws,),
+                      "stock_sum_over_period":  np.ndarray (n_draws,),
+                      "stock_per_year": {year: np.ndarray (n_draws,), ...},
+                  }, ...
+              },
               # only if collect_per_year=True (small n_draws -- validation/plotting):
               "years": np.ndarray (n_years,),
               "per_year_survival":  np.ndarray (n_draws, n_years),
@@ -345,9 +392,19 @@ def run_cohort_flow_monte_carlo(
               "per_year_b":         np.ndarray (n_draws, n_years),
               "per_year_collected": np.ndarray (n_draws, n_years),
           }, ...},
-          "eu_total" / "total": {  # summed across all group keys
-              "cumulative_survival": np.ndarray (n_draws,), ... (same 4 keys)
+          "total": {  # summed across all group keys, same shape as one group's result
+              "cumulative_survival": np.ndarray (n_draws,), ...,
+              "periods": {(start, end): {...}, ...},
           },
+          "entity_draws": {entity: {  # the sampled INPUT draws themselves, for
+                                       # sensitivity analysis (see monte_carlo.
+                                       # sensitivity_correlations) -- one entry per
+                                       # entity (not per group; groups sharing an
+                                       # entity share these same draws)
+              "scale_lambda": np.ndarray (n_draws,),
+              "share_a": np.ndarray (n_draws,),
+              "share_b": np.ndarray (n_draws,),
+          }, ...},
         }
     """
     if entity_key_col not in group_cols:
@@ -363,6 +420,18 @@ def run_cohort_flow_monte_carlo(
         period_inflow_multiplier = {}
 
     entity_idx_in_group = group_cols.index(entity_key_col)
+
+    whole_horizon_period = (int(years.min()), int(years.max()))
+    if output_periods is None:
+        output_periods = [whole_horizon_period]
+    output_periods = [(int(s), int(e)) for s, e in output_periods]
+    for s, e in output_periods:
+        if s > e:
+            raise ValueError(f"output_periods entry ({s}, {e}) has start > end.")
+    # De-duplicate while preserving order (a caller might list the same period twice,
+    # e.g. once explicitly and once as the implicit default).
+    seen = set()
+    output_periods = [p for p in output_periods if not (p in seen or seen.add(p))]
 
     ss = seed if isinstance(seed, np.random.SeedSequence) else np.random.SeedSequence(seed)
     n_years = len(years)
@@ -457,19 +526,50 @@ def run_cohort_flow_monte_carlo(
         override = ec["override"]
 
         year_inflow_map = dict(zip(sub[year_col], sub[inflow_col]))
-        cohort_years = years.copy()
+        cohort_stock_map = starting_stock_by_cohort_lookup.get(lookup_key, {})
+
+        # [FIXED, resolves M33 -- same fix as, and cross-validated against,
+        # flowdriven_model.py's scalar function; see that fix's comment for the full
+        # explanation] `cohort_years` now includes any vintage in `cohort_stock_map`
+        # older than `years.min()`, instead of silently dropping that starting stock.
+        extra_vintages = sorted(
+            int(tau) for tau in cohort_stock_map if int(tau) < int(years.min())
+        )
+        if extra_vintages:
+            cohort_years = np.concatenate([np.array(extra_vintages, dtype=int), years.copy()])
+        else:
+            cohort_years = years.copy()
         max_age_group = int(t_end - int(cohort_years.min()))
 
-        cohort_stock_map = starting_stock_by_cohort_lookup.get(lookup_key, {})
         stock_prev_point = np.array(
             [float(cohort_stock_map.get(int(tau), 0.0)) for tau in cohort_years],
             dtype=float,
         )
 
-        cum_survival = np.zeros(n_draws, dtype=float)
-        cum_a = np.zeros(n_draws, dtype=float)
-        cum_b = np.zeros(n_draws, dtype=float)
-        cum_collected = np.zeros(n_draws, dtype=float)
+        # Deterministic per-period inflow -- inflow doesn't vary by draw (only the
+        # lifetime/share DRAWS do), so this is computed once per group, outside the
+        # draws loop entirely, from plain Python arithmetic over `year_inflow_map`.
+        cumulative_inflow_by_period: dict[tuple, float] = {}
+        for start, end in output_periods:
+            total_inflow = 0.0
+            for t in years:
+                if start <= t <= end:
+                    inflow_t = float(year_inflow_map.get(t, 0.0))
+                    if t in period_inflow_multiplier:
+                        inflow_t *= float(period_inflow_multiplier[t])
+                    total_inflow += inflow_t
+            cumulative_inflow_by_period[(start, end)] = total_inflow
+
+        cum_survival_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
+        cum_a_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
+        cum_b_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
+        cum_collected_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
+        stock_end_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
+        stock_sum_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
+        stock_per_year_by_period = {
+            p: {t: np.zeros(n_draws, dtype=float) for t in years if p[0] <= t <= p[1]}
+            for p in output_periods
+        }
 
         if collect_per_year:
             per_year_survival = np.zeros((n_draws, n_years), dtype=float)
@@ -548,11 +648,20 @@ def run_cohort_flow_monte_carlo(
                 out_a_sum = out_a.sum(axis=1)
                 out_b_sum = out_b.sum(axis=1)
                 out_collected_sum = out_collected.sum(axis=1)
+                stock_sum_this_year = stock_end.sum(axis=1)
 
-                cum_survival[chunk_start:chunk_end] += out_surv_sum
-                cum_a[chunk_start:chunk_end] += out_a_sum
-                cum_b[chunk_start:chunk_end] += out_b_sum
-                cum_collected[chunk_start:chunk_end] += out_collected_sum
+                for p in output_periods:
+                    start, end = p
+                    if not (start <= t <= end):
+                        continue
+                    cum_survival_by_period[p][chunk_start:chunk_end] += out_surv_sum
+                    cum_a_by_period[p][chunk_start:chunk_end] += out_a_sum
+                    cum_b_by_period[p][chunk_start:chunk_end] += out_b_sum
+                    cum_collected_by_period[p][chunk_start:chunk_end] += out_collected_sum
+                    stock_sum_by_period[p][chunk_start:chunk_end] += stock_sum_this_year
+                    stock_per_year_by_period[p][t][chunk_start:chunk_end] = stock_sum_this_year
+                    if t == end:
+                        stock_end_by_period[p][chunk_start:chunk_end] = stock_sum_this_year
 
                 if collect_per_year:
                     per_year_survival[chunk_start:chunk_end, yi] = out_surv_sum
@@ -563,11 +672,27 @@ def run_cohort_flow_monte_carlo(
                 stock_prev = stock_end
 
         group_result = {
-            "cumulative_survival": cum_survival,
-            "cumulative_a": cum_a,
-            "cumulative_b": cum_b,
-            "cumulative_collected": cum_collected,
+            "periods": {
+                p: {
+                    "cumulative_survival": cum_survival_by_period[p],
+                    "cumulative_a": cum_a_by_period[p],
+                    "cumulative_b": cum_b_by_period[p],
+                    "cumulative_collected": cum_collected_by_period[p],
+                    "cumulative_inflow": np.full(n_draws, cumulative_inflow_by_period[p], dtype=float),
+                    "stock_end_of_period": stock_end_by_period[p],
+                    "stock_sum_over_period": stock_sum_by_period[p],
+                    "stock_per_year": stock_per_year_by_period[p],
+                }
+                for p in output_periods
+            }
         }
+        if whole_horizon_period in group_result["periods"]:
+            whp = group_result["periods"][whole_horizon_period]
+            group_result["cumulative_survival"] = whp["cumulative_survival"]
+            group_result["cumulative_a"] = whp["cumulative_a"]
+            group_result["cumulative_b"] = whp["cumulative_b"]
+            group_result["cumulative_collected"] = whp["cumulative_collected"]
+
         if collect_per_year:
             group_result.update(
                 {
@@ -588,17 +713,52 @@ def run_cohort_flow_monte_carlo(
                 f"{dt_group:.1f}s (elapsed {dt_elapsed:.1f}s total)"
             )
 
-    total = {
-        metric: sum(g[metric] for g in by_group.values())
-        for metric in ["cumulative_survival", "cumulative_a", "cumulative_b", "cumulative_collected"]
-    }
+    per_period_metrics = [
+        "cumulative_survival", "cumulative_a", "cumulative_b", "cumulative_collected",
+        "cumulative_inflow", "stock_end_of_period", "stock_sum_over_period",
+    ]
+    total: dict = {"periods": {}}
+    for p in output_periods:
+        total["periods"][p] = {
+            metric: sum(g["periods"][p][metric] for g in by_group.values())
+            for metric in per_period_metrics
+        }
+        # stock_per_year: sum across groups, per year in this period.
+        years_in_period = list(next(iter(by_group.values()))["periods"][p]["stock_per_year"].keys()) if by_group else []
+        total["periods"][p]["stock_per_year"] = {
+            t: sum(g["periods"][p]["stock_per_year"][t] for g in by_group.values())
+            for t in years_in_period
+        }
+    if whole_horizon_period in total["periods"]:
+        whp = total["periods"][whole_horizon_period]
+        total["cumulative_survival"] = whp["cumulative_survival"]
+        total["cumulative_a"] = whp["cumulative_a"]
+        total["cumulative_b"] = whp["cumulative_b"]
+        total["cumulative_collected"] = whp["cumulative_collected"]
 
     if verbose:
         print(f"{label_prefix}cohort_flow_mc: all {n_groups} group(s) done in {time.time() - t_start_all:.1f}s")
+
+    # [NEW] Expose the per-entity sampled INPUT draws (scale_lambda, share_a,
+    # share_b) -- previously computed internally (cached in `entity_draw_cache`,
+    # keyed by entity so groups sharing an entity share draws) but never returned.
+    # Needed for sensitivity analysis (correlating each input's draws against an
+    # output metric's draws, e.g. via `monte_carlo.sensitivity_correlations()`) --
+    # without this, there was no way to ask "which entity's lifetime uncertainty
+    # actually drives the output uncertainty" from outside this function.
+    entity_draws = {
+        entity: {
+            "scale_lambda": ec["scale_lambda_draws_full"],
+            "share_a": ec["a_draws_full"],
+            "share_b": ec["b_draws_full"],
+        }
+        for entity, ec in entity_draw_cache.items()
+    }
 
     return {
         "by_group": by_group,
         "total": total,
         "share_a_name": share_a_name,
         "share_b_name": share_b_name,
+        "entity_draws": entity_draws,
     }

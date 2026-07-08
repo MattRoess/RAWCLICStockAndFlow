@@ -92,11 +92,37 @@ ARTIFACT_FILES: dict[str, str] = {
     "mc_stage02_summary": "02_mc_summary.pkl",
     # [NEW] mean/median/mode/P2.5/P97.5 + 50-bin histogram per drivetrain, per metric
     # -- for direct inspection/plotting of stage 02's own Monte Carlo output.
+    "mc_stage02_period_summary": "02_mc_period_summary.pkl",
+    # [NEW] Same content as mc_stage02_summary's cumulative numbers, but for EVERY
+    # requested (start_year, end_year) window in `params.monte_carlo.output_periods`
+    # (single year: start==end), not just the whole-horizon total -- cumulative_inflow,
+    # cumulative_out_survival, and stock (end_of_period/sum_over_period/per_year, all
+    # deterministic here since stage 02's stock is pinned to the REMIND target
+    # regardless of lifetime draws), per drivetrain and as an EU total. Shape:
+    # {"by_drivetrain": {drv: {(start,end): {...}}}, "eu_total": {(start,end): {...}}}.
+    "mc_stage02_sensitivity": "02_mc_sensitivity.pkl",
+    # [NEW] Spearman rank correlation between each drivetrain's scale_lambda draws
+    # and EU-total cumulative_out_survival (the widest requested output_periods
+    # entry), via `monte_carlo.sensitivity_correlations()` -- "which drivetrain's
+    # lifetime uncertainty actually drives the EU-total uncertainty." A pandas
+    # DataFrame with columns [parameter, spearman_r, abs_r], sorted by abs_r
+    # descending. Only one uncertain input per drivetrain exists at this stage
+    # (shape_k is never made uncertain), so this is a between-drivetrain
+    # comparison, not a within-drivetrain one.
     "mc_stage03_summary": "03_mc_summary.pkl",
-    # [NEW] Same idea, for stage 03's own Monte Carlo extension: applies THIS stage's
+    # Same idea, for stage 03_01's own Monte Carlo extension: applies THIS stage's
     # (unknown_whereabouts_share, export_share) uncertainty to stage 02's per-draw
     # cumulative_out_survival (loaded from mc_stage02_draws), producing
     # collected/export/unknown summaries per drivetrain and as an EU total.
+    "mc_stage03_01_period_summary": "03_01_mc_period_summary.pkl",
+    # [NEW] Same idea as mc_stage02_period_summary, for stage 03_01: cumulative_inflow,
+    # cumulative_collected/export/unknown (NOT cumulative_out_survival -- 03_01 splits
+    # it), and stock, for every requested period, per drivetrain and as an EU total.
+    "mc_stage03_01_sensitivity": "03_01_mc_sensitivity.pkl",
+    # [NEW] Same idea as mc_stage02_sensitivity, for stage 03_01: THREE uncertain
+    # inputs per drivetrain now (scale_lambda inherited from stage 02, plus this
+    # stage's own unknown_whereabouts_share and export_share), correlated against
+    # EU-total cumulative_collected for the widest requested output_periods entry.
     "mc_stage03_02_summary": "03_02_mc_summary.pkl",
     # [UPDATED] 03_02_adjustedflows.py's Monte Carlo extension: each of the 11
     # scenarios now re-simulates its OWN lifetime AND share uncertainty per draw
@@ -113,6 +139,13 @@ ARTIFACT_FILES: dict[str, str] = {
     # Stores collected/export/unknown summaries per drivetrain and as an EU
     # total, per scenario -- same output shape as before this update, only the
     # simulation behind it changed.
+    "mc_stage03_02_sensitivity": "03_02_mc_sensitivity.pkl",
+    # [NEW] Same idea as mc_stage02/03_01_sensitivity, PER SCENARIO: for each of the
+    # 11 scenarios, Spearman rank correlation between every entity's (drivetrain's)
+    # scale_lambda/export_share/unknown_share draws (exposed via `cohort_flow_mc.py`'s
+    # `entity_draws`, previously computed internally but never returned) and that
+    # scenario's own EU-total cumulative_collected, for the widest requested
+    # output_periods entry. Shape: {scenario_name: pandas.DataFrame}.
     # NOTE: stage-04's per-scenario outputs (11 scenarios x several output types across
     # 04_01/04_03/04_04) are deliberately NOT individually registered here -- see
     # `materials.py`'s `save_unregistered_scenario_outputs()` docstring for why (adding

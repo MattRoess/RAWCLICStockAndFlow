@@ -480,6 +480,25 @@ class AdjustedFlowsParams:
     # stay synchronized to one edit if this ever needs to move.
     lifetime_change_start_year: int = 2027
 
+    # [NEW, was a hardcoded literal in flowdriven_model.py until this fix] The year
+    # `stock_modifier` (any scenario's flat inflow multiplier, e.g. `stock_lower`'s 0.8)
+    # starts applying. Independent from `lifetime_change_start_year` above -- they
+    # happen to share the same default value today, but a scenario changing "how many
+    # vehicles enter the fleet" and one changing "how long vehicles last" are
+    # conceptually unrelated knobs that don't need to move together.
+    stock_modifier_start_year: int = 2027
+
+    # [NEW, was a hardcoded literal (`base_year=2005`) at every `run_adjusted_scenario`
+    # call site in `03_02_adjustedflows.py`'s `main()` until this fix] The stock-flow
+    # cohort base year: `run_adjusted_scenario` rebuilds each scenario's starting
+    # cohort stock from stage 02's matrix AT this year (see `fdm.build_stock_by_
+    # segment_at_base_year`) -- not a fresh 1975 backcast. Matches stage 02's own base
+    # year; if that ever changes, this must move with it (not verified against
+    # `StockFlowParams` automatically, since stage 02 doesn't currently expose its own
+    # base year as a named field either -- flagged here rather than silently assumed
+    # in sync).
+    base_year: int = 2005
+
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
         "BAU": ScenarioSpec(
             name="BAU",
@@ -568,6 +587,11 @@ class AdjustedFlowsParams:
                         )
         if self.scenario_start_year > self.scenario_ramp_end_year:
             issues.append("adjusted_flows.scenario_start_year must not be after scenario_ramp_end_year.")
+        if self.base_year > self.scenario_start_year:
+            issues.append(
+                f"adjusted_flows.base_year={self.base_year} is after scenario_start_year="
+                f"{self.scenario_start_year} -- the cohort base year should precede any scenario transform."
+            )
         return issues
 
 
@@ -746,7 +770,7 @@ class MonteCarloParams:
     monte_carlo.py` for the generic sampling machinery this drives).
     """
     enabled: bool = True  # MC
-    n_draws: int = 200000
+    n_draws: int = 2000
     seed: int | None = 42
 
     # [NEW] The full stock-and-flow uncertainty analysis (`mc_stockflow_uncertainty.py`)
@@ -773,6 +797,32 @@ class MonteCarloParams:
     # than hardcoded as a function default in any one engine.
     chunk_size: int = 20_000
 
+    # [NEW, moved here from being 03_02-only] Which (start_year, end_year) INCLUSIVE
+    # year-ranges to report Monte Carlo results for -- cumulative flows, cumulative
+    # inflow, and stock (end-of-period snapshot, per-year series, and sum-over-period
+    # "stock-years"), broken down as finely as each stage's own model supports (stage
+    # 02/03_01: per drivetrain only, no segment concept yet; stage 03_02: per
+    # drivetrain AND per segment). A single year is just a range where start == end
+    # (e.g. `(2030, 2030)`). SHARED across stages 02, 03_01, and 03_02 -- specifying it
+    # once here keeps all three consistent by construction, rather than three
+    # independently-edited copies of the same list. Specified UP FRONT (not queryable
+    # after a run completes): stage 03_02's vectorized engine (`cohort_flow_mc.py`)
+    # accumulates exactly these windows during its one simulation pass to keep memory
+    # bounded at 200,000 draws; stages 02/03_01 already track full per-year (not
+    # per-cohort) arrays cheaply and sum over these windows post-hoc
+    # (`monte_carlo.sum_by_period`) -- same requested periods either way, different
+    # (cheaper) implementation because those two stages' per-year arrays were already
+    # affordable to keep in full. Every entry gets a full distribution summary
+    # (mean/median/mode/std/P2.5/P97.5 + 50-bin histogram, via `monte_carlo.
+    # summarize_distribution`). Defaults to just the whole horizon (matching the
+    # pre-this-feature behavior) -- add entries for finer-grained queries, e.g.:
+    #     output_periods: list[tuple[int, int]] = field(default_factory=lambda: [
+    #         (1975, 2070),   # whole horizon (kept for 03_02's flat top-level aliases)
+    #         (2030, 2030),   # single year
+    #         (2030, 2040),   # a decade
+    #     ])
+    output_periods: list[tuple[int, int]] = field(default_factory=lambda: [(1975, 2070)])
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         if self.n_draws <= 0:
@@ -785,6 +835,11 @@ class MonteCarloParams:
             issues.append(f"monte_carlo.stockflow_share_spread={self.stockflow_share_spread} must be in (0, 1).")
         if self.chunk_size <= 0:
             issues.append(f"monte_carlo.chunk_size={self.chunk_size} must be positive.")
+        if not self.output_periods:
+            issues.append("monte_carlo.output_periods must have at least one (start, end) entry.")
+        for start, end in self.output_periods:
+            if start > end:
+                issues.append(f"monte_carlo.output_periods entry ({start}, {end}) has start > end.")
         return issues
 
 

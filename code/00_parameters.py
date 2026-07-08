@@ -126,9 +126,11 @@ def _flatten_params(params: Params) -> list[list[Any]]:
     for section_name, section_obj in (
         ("01_data_prep", params.data_prep),
         ("02_stock_flow", params.stock_flow),
+        ("03_02_adjusted_flows", params.adjusted_flows),
         ("03_disaggregation", params.disaggregation),
         ("04_materials", params.materials),
         ("06_visualization", params.visualization),
+        ("07_monte_carlo", params.monte_carlo),
     ):
         for f in fields(section_obj):
             _flatten_value(f.name, getattr(section_obj, f.name), section_name, f"{section_name}.{f.name}", rows)

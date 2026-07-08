@@ -750,6 +750,7 @@ def run_flow_driven_model_with_outflow_disaggregation(
     segment_shares_by_drv: dict[str, dict[str, float]],
     allowed_export_segments: dict[str, list[str]] | None = None,
     stock_modifier_2027: float = 1.0,
+    stock_modifier_start_year: int = 2027,
 ) -> dict:
     """
     Flow-driven model with cohort stock tracking.
@@ -797,10 +798,12 @@ def run_flow_driven_model_with_outflow_disaggregation(
        confirmed in `disaggregation.py`'s versions of "out_total" -- this function's
        own "out_total" is correct).
 
-    4. **`stock_modifier_2027`**: for `t >= 2027` (hardcoded year, not a parameter),
-       `inflow_t *= stock_modifier_2027` -- a flat multiplier applied to EVERY
-       drivetrain/segment's inflow uniformly from 2027 onward. Currently `1.0` (no-op)
-       everywhere it's called.
+    4. **`stock_modifier_2027`**: for `t >= stock_modifier_start_year` (a real parameter
+       now, default `2027` -- was a hardcoded literal until this fix; flagged in an
+       earlier round of this docstring as "hardcoded year, not a parameter" but not
+       actually fixed until now), `inflow_t *= stock_modifier_2027` -- a flat multiplier
+       applied to EVERY drivetrain/segment's inflow uniformly from that year onward.
+       Currently `1.0` (no-op) everywhere it's called.
 
     CONFIRMED DEAD PARAMETERS (accepted in the signature, never read in the function
     body below): `export_r_by_drv`, `age_bins`, `export_rate`, `export_total_by_year`,
@@ -843,28 +846,45 @@ def run_flow_driven_model_with_outflow_disaggregation(
         export_r = np.asarray(export_r_by_drv[drivetrain], dtype=float)  # computed, then NEVER used again below -- confirms export_r_by_drv is dead (see docstring)
         inflow_map = dict(zip(sub[year_col], sub[inflow_col]))
 
-        cohort_years = years.copy()
+        cohort_stock_map = starting_stock_by_cohort_lookup.get(lookup_key, {})
+
+        # [FIXED, resolves M33] `cohort_years` now includes any vintage present in
+        # `starting_stock_by_cohort_lookup` that's OLDER than `years.min()`, not just
+        # `years` itself. Previously (`cohort_years = years.copy()`), any such older
+        # cohort's starting stock was silently dropped -- `starting_stock_by_cohort_
+        # lookup.get(...)` values for vintages outside `cohort_years` were never read at
+        # all, since the loop building `stock_prev` only iterated over `cohort_years`.
+        # This was flagged as numerically negligible under the lifetime parameters in
+        # use at the time (Weibull survival ~0 by age 30-40), but is a genuine silent
+        # data-loss bug in general -- e.g. under a longer-lifetime Monte Carlo draw
+        # (`scale_lambda` can now range well above the historical point estimate via
+        # `AsymmetricSpread`'s `upper`), survival at age 30-50+ is no longer negligible,
+        # and stock mass from real, older cohorts would have been dropped without any
+        # warning. `03_02_adjustedflows.py`'s `starting_stock_by_cohort_lookup` (from
+        # stage 02's cohort matrix, vintages back to ~1955) vs. `years` (starting at
+        # 1975, from `03_01_flowdriven.py`'s `BACKCAST_START_YEAR`) is exactly the case
+        # this was written for.
+        #
+        # Extending `cohort_years` this way is a strict generalization, not a behavior
+        # change, when `starting_stock_by_cohort_lookup` has no vintage older than
+        # `years.min()` (the case every existing regression test covers) -- confirmed by
+        # `test_flowdriven_mc_regression.py` continuing to match the pre-fix numbers
+        # exactly. `max_age_group` (computed from `cohort_years.min()`, below) grows
+        # automatically to cover the oldest now-included cohort's true maximum age, so
+        # the Weibull hazard lookup table is correctly sized too -- no separate change
+        # needed there.
+        extra_vintages = sorted(
+            int(tau) for tau in cohort_stock_map if int(tau) < int(years.min())
+        )
+        if extra_vintages:
+            cohort_years = np.concatenate([np.array(extra_vintages, dtype=int), years.copy()])
+        else:
+            cohort_years = years.copy()
         n_cohorts = len(cohort_years)
-        # CONFIRMED RISK (real, currently low-impact given actual lifetime parameters):
-        # `cohort_years` is exactly `years` -- the simulated year range passed in, NOT
-        # necessarily the full range of vintages present in `starting_stock_by_cohort_lookup`.
-        # In `03_02_adjustedflows.py`, `starting_stock_by_cohort_lookup` is built from
-        # stage 02's cohort matrix, whose vintage axis extends back ~50 years before t0
-        # (to ~1955, per `prepare_backcasting_state`'s `init_max_age=50`) -- but the
-        # `years` array passed into THIS function there starts at 1975 (inherited from
-        # `03_01_flowdriven.py`'s `BACKCAST_START_YEAR`). Any cohort in the lookup older
-        # than `years.min()` is silently dropped a few lines below (`stock_prev[j] =
-        # cohort_stock_map.get(int(tau), 0.0)` only iterates over `cohort_years`, i.e.
-        # 1975+). Numerically negligible today because Weibull survival with the current
-        # shape_k=3 parameters is already ~0 by age 30-40 for every drivetrain in use --
-        # but this would silently lose real stock if a longer-lifetime scenario (e.g. the
-        # still-unimplemented "BEV_longer", scale_lambda=17) were ever activated, since
-        # survival at age 30-50 is meaningfully larger at longer lambda.
 
         max_age_group = int(t_end - int(cohort_years.min()))
 
         stock_prev = np.zeros(n_cohorts, dtype=float)
-        cohort_stock_map = starting_stock_by_cohort_lookup.get(lookup_key, {})
 
         for j, tau in enumerate(cohort_years):
             stock_prev[j] = float(cohort_stock_map.get(int(tau), 0.0))
@@ -900,7 +920,7 @@ def run_flow_driven_model_with_outflow_disaggregation(
 
             inflow_t = float(inflow_map.get(t, 0.0))
 
-            if t >= 2027:
+            if t >= stock_modifier_start_year:
                 inflow_t *= stock_modifier_2027
 
             if outflow_timing == "post_inflow":
@@ -1078,6 +1098,8 @@ def run_flow_driven_model_monte_carlo(
     outflow_timing: str = "post_inflow",
     lifetime_change_by_drv: dict[str, dict[str, float]] | None = None,
     stock_modifier_2027: float = 1.0,
+    stock_modifier_start_year: int = 2027,
+    output_periods: list[tuple[int, int]] | None = None,
     seed: int | np.random.SeedSequence | None = None,
     chunk_size: int = 20_000,
     collect_per_year: bool = False,
@@ -1090,24 +1112,40 @@ def run_flow_driven_model_monte_carlo(
     uncertainty conventions -- this function just maps this project's
     drivetrain-keyed parameter dicts onto that generic API
     (`entity_key_col="Drive Train"`, `share_a="export"`, `share_b="unknown"`)
-    and translates `stock_modifier_2027` (a single hardcoded year) into the
-    engine's generic `period_inflow_multiplier` ({year: multiplier} for every
-    year >= 2027 in the horizon).
+    and translates `stock_modifier_2027` into the engine's generic
+    `period_inflow_multiplier` ({year: multiplier} for every year >=
+    `stock_modifier_start_year`, a real parameter, default 2027 -- not a
+    hardcoded literal, matching the fix applied to the scalar function).
+
+    `output_periods`: list of `(start_year, end_year)` inclusive ranges to
+    report cumulative flows/inflow/stock for -- see `cohort_flow_mc.
+    run_cohort_flow_monte_carlo`'s docstring for the full description
+    (single-year query: `(2030, 2030)`; multi-year: `(2030, 2040)`). Defaults
+    to the whole horizon (`years.min()` to `years.max()`), matching the
+    pre-`output_periods` behavior exactly.
 
     With `n_draws=1` and all spread parameters None/0, reproduces the scalar
     function's `flows_df` numbers exactly (verified by regression test).
 
-    Returns the generic engine's result dict, with two vehicle-pipeline-
-    friendly aliases added at each group level and at the top level:
-    "cumulative_export"/"cumulative_unknown" (aliases of the generic engine's
-    "cumulative_a"/"cumulative_b"), and "eu_total" (alias of "total").
+    Returns the generic engine's result dict, with vehicle-pipeline-friendly
+    aliases added: "cumulative_export"/"cumulative_unknown" (aliases of the
+    generic engine's "cumulative_a"/"cumulative_b") at each group level, at
+    the top level (only when the whole-horizon period is among
+    `output_periods`, same condition the generic engine itself uses), AND
+    within EACH requested period's own sub-dict
+    (`result["by_group"][key]["periods"][(start,end)]["cumulative_export"]`
+    etc.). "eu_total" is an alias of "total" (top level only, for backward
+    compatibility -- use `result["total"]["periods"][...]` for per-period
+    EU-total access, same structure as any group's).
     """
     if group_cols is None:
         group_cols = ["Region", "Drive Train", "Segment"]
 
     period_inflow_multiplier = None
     if stock_modifier_2027 != 1.0:
-        period_inflow_multiplier = {int(t): float(stock_modifier_2027) for t in years if t >= 2027}
+        period_inflow_multiplier = {
+            int(t): float(stock_modifier_2027) for t in years if t >= stock_modifier_start_year
+        }
 
     result = _cohort_flow_mc.run_cohort_flow_monte_carlo(
         df=df, years=years, t_end=t_end,
@@ -1125,19 +1163,39 @@ def run_flow_driven_model_monte_carlo(
         outflow_timing=outflow_timing,
         lifetime_change_by_entity=lifetime_change_by_drv,
         period_inflow_multiplier=period_inflow_multiplier,
+        output_periods=output_periods,
         seed=seed, chunk_size=chunk_size, collect_per_year=collect_per_year,
         verbose=verbose, progress_label=progress_label,
     )
 
+    def _add_aliases(d: dict) -> None:
+        """Add cumulative_export/cumulative_unknown aliases to a dict that has
+        cumulative_a/cumulative_b -- used for the top level, each group, each
+        group's each period, and the total's each period."""
+        if "cumulative_a" in d:
+            d["cumulative_export"] = d["cumulative_a"]
+        if "cumulative_b" in d:
+            d["cumulative_unknown"] = d["cumulative_b"]
+
     for g in result["by_group"].values():
-        g["cumulative_export"] = g["cumulative_a"]
-        g["cumulative_unknown"] = g["cumulative_b"]
+        _add_aliases(g)
+        for period_result in g.get("periods", {}).values():
+            _add_aliases(period_result)
         if collect_per_year:
             g["per_year_export"] = g["per_year_a"]
             g["per_year_unknown"] = g["per_year_b"]
 
+    _add_aliases(result["total"])
+    for period_result in result["total"].get("periods", {}).values():
+        _add_aliases(period_result)
+
+    # entity_draws are keyed by drivetrain already (entity_key_col="Drive Train" in
+    # the call above) -- add the same export/unknown aliases for consistency with
+    # every other share_a/share_b -> export/unknown alias in this wrapper.
+    for drv_draws in result.get("entity_draws", {}).values():
+        drv_draws["export"] = drv_draws["share_a"]
+        drv_draws["unknown"] = drv_draws["share_b"]
+
     result["eu_total"] = dict(result["total"])
-    result["eu_total"]["cumulative_export"] = result["total"]["cumulative_a"]
-    result["eu_total"]["cumulative_unknown"] = result["total"]["cumulative_b"]
 
     return result

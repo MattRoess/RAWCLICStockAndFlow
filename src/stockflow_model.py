@@ -265,10 +265,19 @@ def _run_cohort_recurrence(
         "t": t,
         "inflow_by_year": inflow_by_year,
         "out_survival_by_year": out_survival_by_year,
+        # [FIXED] `stock_t` (the prescribed target -- deterministic, identical for
+        # every draw regardless of lifetime uncertainty; see module docstring in
+        # `02_stockdriven.py`: "modeled stock is FORCED to exactly equal the
+        # REMIND-prescribed target every year") used to only be included when
+        # `keep_full_history=True`, so `run_cohort_survival_monte_carlo` (which always
+        # calls with `keep_full_history=False`) had no way to report "cumulative
+        # stock" for a period at all. Cheap to always include -- it's a `(n_t,)`
+        # array, not per-draw.
+        "stock_t": stock_t,
     }
     if keep_full_history:
         result.update({
-            "tau_back": tau_back, "stock_t": stock_t,
+            "tau_back": tau_back,
             "stock_t_tau": stock_t_tau, "outflow_surv_t_tau": outflow_surv_t_tau,
             "inflow_t": inflow_t, "outflow_surv_t": outflow_surv_t,
             "outflow_excess_t": outflow_excess_t, "outflow_total_t": outflow_total_t,
@@ -375,7 +384,12 @@ def run_cohort_survival_monte_carlo(
     This is a documented simplification, not an oversight: it only affects the small
     initial stock at `t0`, not the forward-simulated majority of the horizon.
 
-    Returns {"cumulative_inflow": (n_draws,), "cumulative_out_survival": (n_draws,)}.
+    Returns {"cumulative_inflow": (n_draws,), "cumulative_out_survival": (n_draws,),
+    "t": (n_years,), "inflow_by_year": (n_years, n_draws), "out_survival_by_year":
+    (n_years, n_draws), "stock_t": (n_years,) -- the prescribed target, deterministic,
+    identical regardless of draw}. See `monte_carlo.sum_by_period()` for turning
+    "inflow_by_year"/"out_survival_by_year" into cumulative sums over an arbitrary
+    (start_year, end_year) window without needing a full per-cohort history.
     """
     return _run_cohort_recurrence(
         stock_series=stock_series, model_end_year=model_end_year, drivetrain=drivetrain,

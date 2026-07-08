@@ -352,13 +352,47 @@ def summarize_distribution(values: np.ndarray, bins: int = 50) -> dict[str, Any]
     the 95% interval (P2.5, P97.5), plus the histogram itself (`bin_edges`,
     `frequencies`) for storage/reuse as the next stage's `Empirical` input distribution
     (see `Empirical.from_values()`).
+
+    [FIXED, real crash reproduced and traced to numpy itself] `np.histogram` can raise
+    `ValueError: Too many bins for data range. Cannot create N finite-sized bins.` --
+    NOT specific to this project's data, this is a float64 precision limit in how
+    numpy computes `bins+1` bin edges (see `numpy.lib._histograms_impl._get_bin_
+    edges`): it happens whenever the values' MAGNITUDE is large enough (empirically,
+    around 1e15 and up) that adding numpy's own zero-range padding doesn't change the
+    floating-point value at all, so consecutive bin edges round to the exact same
+    float and linspace can't produce `bins+1` strictly-increasing edges. Reproduces
+    even for a perfectly constant array at that magnitude -- it is NOT a sign the
+    array has "bad" or "wrong" values by itself, just that they're numerically huge.
+    In this project's "million vehicles" units, a real value anywhere near 1e15 would
+    itself be a strong sign of an upstream unit/aggregation bug -- so rather than
+    silently swallowing this, we fall back to a single degenerate bin AND print a
+    warning with the actual range/magnitude, so an unexpectedly huge value doesn't
+    just vanish into "well the histogram still rendered."
     """
     values = np.asarray(values, dtype=float)
-    values = values[~np.isnan(values)]
+    values = values[np.isfinite(values)]  # was np.isnan only -- inf triggers a related,
+                                            # differently-worded numpy crash; both are
+                                            # "not a real value to histogram," filtered the same way
     if values.size == 0:
-        raise ValueError("summarize_distribution: no valid (non-NaN) values to summarize.")
+        raise ValueError("summarize_distribution: no valid (finite, non-NaN) values to summarize.")
 
-    freqs, edges = np.histogram(values, bins=bins)
+    try:
+        freqs, edges = np.histogram(values, bins=bins)
+    except ValueError as e:
+        vmin, vmax = float(np.min(values)), float(np.max(values))
+        magnitude = max(abs(vmin), abs(vmax), 1.0)
+        print(
+            f"summarize_distribution: WARNING -- np.histogram could not build {bins} bins "
+            f"({e}). Value range=[{vmin:.6g}, {vmax:.6g}] (magnitude ~{magnitude:.3g}). "
+            f"Falling back to a single degenerate bin covering the full range. If this "
+            f"metric is supposed to be in the range of a few thousand at most (this "
+            f"project's 'million vehicles' units), a magnitude this large is a strong "
+            f"signal of an upstream bug -- worth checking where this value came from."
+        )
+        pad = magnitude * 1e-9 if vmax > vmin else max(magnitude * 1e-9, 1e-9)
+        edges = np.array([vmin - pad, vmax + pad])
+        freqs = np.array([values.size])
+
     mode_bin = int(np.argmax(freqs))
     mode = float((edges[mode_bin] + edges[mode_bin + 1]) / 2.0)
 
@@ -375,6 +409,44 @@ def summarize_distribution(values: np.ndarray, bins: int = 50) -> dict[str, Any]
         "bin_edges": edges.tolist(),
         "frequencies": freqs.tolist(),
     }
+
+
+def sum_by_period(
+    per_year_array: np.ndarray, years: np.ndarray, periods: list[tuple[int, int]],
+) -> dict[tuple[int, int], np.ndarray]:
+    """
+    Sum a `(n_years, n_draws)` per-year Monte Carlo array over each requested
+    `(start_year, end_year)` INCLUSIVE period, returning `{period: (n_draws,) array}`.
+
+    This is the shared building block behind "cumulative output between year X and
+    year Y" (a single year is just `start == end`) wherever a model already tracks
+    per-year, per-draw totals cheaply (shape `(n_years, n_draws)`, NOT a full
+    per-cohort history) -- `stockflow_model.py`'s `inflow_by_year`/
+    `out_survival_by_year` are exactly this shape, for instance. Combine with
+    `summarize_distribution()` on each returned array to get the full mean/median/
+    mode/std/P2.5/P97.5/histogram summary for that period.
+
+    For a quantity that's actually DETERMINISTIC (identical across every draw --
+    e.g. stock in a stock-driven model, where stock is pinned to a prescribed target
+    regardless of lifetime uncertainty; or inflow in a flow-driven model with no
+    inflow uncertainty), pass a `per_year_array` where every draw's column is
+    identical (broadcast a `(n_years,)` array to `(n_years, n_draws)` via
+    `np.tile(x[:, None], (1, n_draws))` or similar) -- `summarize_distribution()`
+    will then correctly report `std=0` and a degenerate single-bin-mass histogram,
+    rather than silently mixing a bare scalar into code paths that expect an array.
+
+    `years` may be shorter than the range implied by `periods` (e.g. a synthetic test
+    with a narrower simulated horizon than a period request) -- years outside
+    `[years.min(), years.max()]` are simply not summed over (no error), so the
+    returned sum reflects whatever years were actually simulated within the
+    requested window.
+    """
+    years = np.asarray(years)
+    out: dict[tuple[int, int], np.ndarray] = {}
+    for start, end in periods:
+        mask = (years >= start) & (years <= end)
+        out[(int(start), int(end))] = per_year_array[mask, :].sum(axis=0)
+    return out
 
 
 def sensitivity_correlations(
