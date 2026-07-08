@@ -381,14 +381,35 @@ def summarize_distribution(values: np.ndarray, bins: int = 50) -> dict[str, Any]
     except ValueError as e:
         vmin, vmax = float(np.min(values)), float(np.max(values))
         magnitude = max(abs(vmin), abs(vmax), 1.0)
-        print(
-            f"summarize_distribution: WARNING -- np.histogram could not build {bins} bins "
-            f"({e}). Value range=[{vmin:.6g}, {vmax:.6g}] (magnitude ~{magnitude:.3g}). "
-            f"Falling back to a single degenerate bin covering the full range. If this "
-            f"metric is supposed to be in the range of a few thousand at most (this "
-            f"project's 'million vehicles' units), a magnitude this large is a strong "
-            f"signal of an upstream bug -- worth checking where this value came from."
-        )
+        value_range = vmax - vmin
+        # Two GENUINELY DIFFERENT causes hit this same numpy error, and they mean
+        # opposite things -- conflating them into one message was itself a bug
+        # (found after a real run flooded the console with a scary-sounding warning
+        # for the harmless case):
+        #   (a) HUGE absolute magnitude (empirically >~1e15) -- numpy's own zero-range
+        #       padding can't change the float at that scale. Worth investigating in
+        #       this project's "million vehicles" units, where nothing should
+        #       plausibly approach that.
+        #   (b) TINY range relative to a perfectly normal magnitude (e.g. a value
+        #       around 500 differing by ~1e-12 across draws) -- this means the
+        #       quantity has essentially NO real uncertainty for this particular
+        #       period/scope/metric (e.g. the very first simulated year, before much
+        #       attrition has occurred, or a segment with near-zero inflow): the true
+        #       answer is the same regardless of the draw, and what little "range"
+        #       exists is floating-point noise from running the real per-draw
+        #       calculation, not a sign anything is wrong. Silent -- printing a loud
+        #       warning for what is actually an unremarkable, expected result would
+        #       bury the genuinely-worth-investigating case (a) in noise.
+        is_implausibly_large = magnitude > 1e6  # generous vs. this project's actual scale
+        if is_implausibly_large:
+            print(
+                f"summarize_distribution: WARNING -- np.histogram could not build {bins} bins "
+                f"({e}). Value range=[{vmin:.6g}, {vmax:.6g}] (magnitude ~{magnitude:.3g}). "
+                f"Falling back to a single degenerate bin covering the full range. This "
+                f"project's values are in 'million vehicles' units -- a magnitude this large "
+                f"is a strong signal of an upstream bug (unit mismatch, runaway accumulation, "
+                f"etc.), worth checking where this value came from."
+            )
         pad = magnitude * 1e-9 if vmax > vmin else max(magnitude * 1e-9, 1e-9)
         edges = np.array([vmin - pad, vmax + pad])
         freqs = np.array([values.size])
