@@ -599,12 +599,35 @@ def main() -> dict[str, Any]:
     materials_drivetrains = tuple(p04.drivetrains)
 
     # -----------------------------------------------------------------------
-    # [NEW] Monte Carlo setup -- genuine lifetime + share uncertainty, re-simulated
-    # per scenario via the vectorized engine (see `run_adjusted_scenario`'s
+    # [NEW] Scenario selection -- run a subset of the 11 instead of always all of
+    # them, for focused research runs. Controlled by `p03_02.scenarios_to_run`
+    # (`AdjustedFlowsParams` in `params_schema.py`; defaults to `("BAU",)` there, so
+    # a run is fast unless you deliberately widen it, e.g. to `None` for the full
+    # sweep). Resolved via `active_scenario_names()` -- see that method's docstring
+    # for the exact None-vs-tuple semantics; not re-implemented here so there is
+    # exactly one place this logic lives. Already validated against `p03_02.scenarios`
+    # in `AdjustedFlowsParams.validate()`, so an unknown scenario name fails at
+    # `00_parameters.py` time, not partway through this run.
+    #
+    # NOTE: BAU's INFLOW is always resolved further down regardless of selection
+    # (scenarios with no inflow transform of their own reuse it), but BAU itself is
+    # only actually SIMULATED (deterministic + Monte Carlo run) if "BAU" ends up in
+    # `active_scenario_names` -- deselecting it is safe and saves time if you don't
+    # need its own output.
+    # -----------------------------------------------------------------------
+    active_scenario_names = list(p03_02.active_scenario_names())
+    print(f"Running {len(active_scenario_names)}/{len(p03_02.scenarios)} scenario(s): {active_scenario_names}")
+
+    # -----------------------------------------------------------------------
+    # Monte Carlo setup -- genuine lifetime + share uncertainty, re-simulated per
+    # scenario via the vectorized engine (see `run_adjusted_scenario`'s
     # `monte_carlo_enabled` docstring). Uncertainty spreads come from
     # `p02.lifetime_scale_lambda_relative_spread` / `p02.unknown_whereabouts_
     # share_std` / `p02.export_share_std` -- same `params_schema.py` fields
-    # stage 02 already uses, nothing hardcoded here.
+    # stage 02 already uses, nothing hardcoded here. `params.monte_carlo.enabled` is
+    # shared across stages 02/03_01/03_02 by design -- narrow a run with
+    # `scenarios_to_run` above rather than toggling MC off here, so 02/03_01 keep
+    # running Monte Carlo as usual.
     # -----------------------------------------------------------------------
     monte_carlo_enabled = params.monte_carlo.enabled
     n_draws_mc = params.monte_carlo.n_draws if monte_carlo_enabled else 0
@@ -616,10 +639,10 @@ def main() -> dict[str, Any]:
     # Independent seed stream per scenario, spawn_key=(2,) -- matches this stage's
     # existing convention (differs from stage 02's implicit 0 and 03_01's (1,), so
     # this stage's draws aren't correlated with either by accident of sharing a
-    # raw seed stream). Scenario NAMES themselves now come from `p03_02.scenarios`
-    # (params-driven) rather than a hardcoded list -- adding a 12th scenario in
-    # `AdjustedFlowsParams` is picked up here automatically.
-    scenario_names_all = list(p03_02.scenarios.keys())
+    # raw seed stream). Scenario NAMES now come from the (possibly filtered)
+    # `active_scenario_names` rather than a hardcoded list -- adding a 12th
+    # scenario in `AdjustedFlowsParams` is still picked up here automatically.
+    scenario_names_all = active_scenario_names
     mc_seed_seq = np.random.SeedSequence(params.monte_carlo.seed, spawn_key=(2,))
     mc_scenario_seeds = dict(zip(scenario_names_all, mc_seed_seq.spawn(len(scenario_names_all))))
 
@@ -664,9 +687,10 @@ def main() -> dict[str, Any]:
             inflow_by_scenario[name] = inflow_by_scenario["BAU"]
 
     scenario_results_all: dict[str, dict[str, Any]] = {}
-    n_scenarios = len(p03_02.scenarios)
+    n_scenarios = len(active_scenario_names)
     t_start_all_scenarios = time.time()
-    for scenario_idx, (name, spec) in enumerate(p03_02.scenarios.items(), start=1):
+    for scenario_idx, name in enumerate(active_scenario_names, start=1):
+        spec = p03_02.scenarios[name]
         elapsed = time.time() - t_start_all_scenarios
         eta_str = ""
         if scenario_idx > 1:
@@ -721,8 +745,9 @@ def main() -> dict[str, Any]:
     # hardcoded name lists.
     # -----------------------------------------------------------------------
     inflow_mix_names = [
-        name for name, spec in p03_02.scenarios.items()
-        if spec.inflow_drivetrain_shares_final is not None or spec.inflow_segment_shares_final is not None
+        name for name in active_scenario_names
+        if p03_02.scenarios[name].inflow_drivetrain_shares_final is not None
+        or p03_02.scenarios[name].inflow_segment_shares_final is not None
     ]
     other_names = [name for name in scenario_names_all if name not in inflow_mix_names]
 

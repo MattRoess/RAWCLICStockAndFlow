@@ -499,6 +499,23 @@ class AdjustedFlowsParams:
     # in sync).
     base_year: int = 2005
 
+    # [NEW] Which scenario(s) `03_02_adjustedflows.py` actually simulates -- for
+    # focused research runs instead of always paying for the full 11-scenario x
+    # Monte-Carlo sweep. `None` means "run every scenario in `scenarios` below" (the
+    # full sweep); a tuple of names restricts the run to just those.
+    #   Default is ("BAU",) -- a fast, minimal run out of the box. Widen it
+    #   deliberately, e.g. scenarios_to_run=("BAU", "stock_lower", "losses_high"), or
+    #   set it to None to reproduce the full 11-scenario sweep.
+    # Names are validated against `scenarios` below in `validate()`, so a typo'd
+    # scenario name fails fast at parameter-build time (00_parameters.py) rather than
+    # partway through a multi-hour run. NOTE: regardless of this selection, BAU's own
+    # resolved INFLOW is always computed by `03_02_adjustedflows.py` (every scenario
+    # without its own inflow transform reuses it) -- but BAU is only actually
+    # SIMULATED (and its tracker/Monte Carlo output produced) if "BAU" is itself
+    # included here. Use `active_scenario_names()` below to resolve this field --
+    # don't re-implement the None-vs-tuple logic at the call site.
+    scenarios_to_run: tuple[str, ...] | None = ("BAU",)
+
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
         "BAU": ScenarioSpec(
             name="BAU",
@@ -570,10 +587,37 @@ class AdjustedFlowsParams:
         ),
     })
 
+    def active_scenario_names(self) -> tuple[str, ...]:
+        """
+        Resolve `scenarios_to_run` into the actual list of scenario names
+        `03_02_adjustedflows.py` should simulate: every name in `scenarios` if
+        `scenarios_to_run` is None (the full sweep), otherwise just the requested
+        subset -- always in `scenarios`' own dict order (BAU first), which is the
+        order `03_02_adjustedflows.py`'s inflow-resolution step relies on. Centralized
+        here, not duplicated in `03_02_adjustedflows.py`'s `main()`, so there is one
+        place that defines what "select which scenarios run" means.
+        """
+        if self.scenarios_to_run is None:
+            return tuple(self.scenarios.keys())
+        requested = set(self.scenarios_to_run)
+        return tuple(name for name in self.scenarios if name in requested)
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         if "BAU" not in self.scenarios:
             issues.append("adjusted_flows.scenarios must include a 'BAU' entry (used as the base inflow for scenarios with no inflow transform of their own).")
+        if self.scenarios_to_run is not None:
+            if not self.scenarios_to_run:
+                issues.append(
+                    "adjusted_flows.scenarios_to_run is an empty tuple -- set it to None "
+                    "to run every scenario, or list at least one scenario name."
+                )
+            unknown = set(self.scenarios_to_run) - set(self.scenarios)
+            if unknown:
+                issues.append(
+                    f"adjusted_flows.scenarios_to_run has unknown scenario name(s) "
+                    f"{sorted(unknown)} -- available: {sorted(self.scenarios)}."
+                )
         for spec in self.scenarios.values():
             issues += spec.validate(valid_segments=set(_ADJUSTED_FLOWS_SEGMENTS))
         for name_, change_start in [("lifetime_change_start_year", self.lifetime_change_start_year)]:
@@ -770,7 +814,7 @@ class MonteCarloParams:
     monte_carlo.py` for the generic sampling machinery this drives).
     """
     enabled: bool = True  # MC
-    n_draws: int = 2000
+    n_draws: int = 200000
     seed: int | None = 42
 
     # [NEW] The full stock-and-flow uncertainty analysis (`mc_stockflow_uncertainty.py`)
