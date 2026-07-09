@@ -413,6 +413,122 @@ def tweak_inflow_segment_shares_within_drivetrain(
             .sort_values([region_col, drivetrain_col, segment_col, year_col]).reset_index(drop=True))
 
 
+def _as_lower_upper_spread(value) -> tuple[float, float]:
+    """
+    Duck-typed (lower, upper) resolution -- same convention as `cohort_flow_mc.py`'s
+    `_as_spread_pair` (not imported from there to avoid this stage-script depending on
+    the engine's private helpers): accepts an object with `.lower`/`.upper` attributes
+    (e.g. `params_schema.AsymmetricSpread`, without importing that class itself -- this
+    file doesn't otherwise import `params_schema`), or a single float/int (symmetric).
+    """
+    if hasattr(value, "lower") and hasattr(value, "upper"):
+        return (float(value.lower), float(value.upper))
+    return (float(value), float(value))
+
+
+def sample_future_segment_share_inflow_draws(
+    inflow_df: pd.DataFrame, *, region: str = "EUR", drivetrain: str,
+    scenario_start_year: int, ramp_end_year: int,
+    target_segment_shares_final: dict[str, float],
+    inflow_segment_share_spread,
+    n_draws: int, rng: np.random.Generator, years: np.ndarray,
+    region_col: str = "Region", drivetrain_col: str = "Drive Train", segment_col: str = "Segment",
+    year_col: str = "year", value_col: str = "value",
+) -> dict[tuple, dict[int, np.ndarray]]:
+    """
+    The Monte Carlo counterpart of `tweak_inflow_segment_shares_within_drivetrain`'s
+    deterministic ramp: instead of a single point-estimate `target_segment_shares_final`,
+    sample a `(n_draws, n_segments)` matrix of FUTURE (year >= scenario_start_year)
+    segment-mix draws, ramped exactly the same way, and return them shaped for
+    `cohort_flow_mc.run_cohort_flow_monte_carlo`'s `inflow_draws_by_group` parameter.
+    Years before `scenario_start_year` are NOT included in the returned dict at all --
+    real historic segment-mix data stays fully deterministic (see
+    `ScenarioSpec.inflow_segment_share_spread`'s docstring in `params_schema.py`).
+
+    THE SAMPLING: for each segment (independently), draw
+    `Triangular(mode*(1-lower), mode, mode*(1+upper))` -- `mode` = that segment's
+    `target_segment_shares_final` value, `(lower, upper)` from
+    `inflow_segment_share_spread` (a plain float means symmetric). ONE draw per Monte
+    Carlo trial, giving a `(n_draws, n_segments)` matrix. Each ROW (one trial's whole
+    segment-mix vector) is then renormalized by dividing by its own sum, so it sums to
+    exactly 1 -- every segment moves proportionally on every draw, not one fixed segment
+    absorbing the gap. `mode == 0` (a segment with literally zero target share) is left
+    at exactly 0 for every draw (a degenerate Triangular would otherwise be
+    ill-defined) -- consistent with "this segment gets none of this drivetrain's future
+    inflow" being a hard constraint of the scenario, not an uncertain quantity.
+
+    THE RAMP (identical math to `tweak_inflow_segment_shares_within_drivetrain`, just
+    with the sampled/renormalized matrix in place of the single point `target_final`):
+    for `scenario_start_year <= y < ramp_end_year`,
+        share_draws[y, seg] = (1 - alpha(y)) * base_start_share[seg] + alpha(y) * final_target_draws[:, seg]
+    where `base_start_share` is the REAL, deterministic baseline segment mix at
+    `scenario_start_year` (read directly from `inflow_df`, held fixed through the ramp
+    -- exactly what the deterministic function's own `base_start` is); for
+    `y >= ramp_end_year`, `share_draws[y, seg] = final_target_draws[:, seg]` directly.
+    Each year's absolute inflow is that year's DETERMINISTIC drivetrain total (read
+    from `inflow_df`, unaffected by this -- only how it's split across segments is
+    uncertain) times `share_draws[y, seg]`.
+    """
+    df = inflow_df.copy()
+    df[year_col] = pd.to_numeric(df[year_col], errors="coerce").astype(int)
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce").fillna(0.0)
+    mask = df[region_col].eq(region) & df[drivetrain_col].eq(drivetrain)
+    df_drv = df.loc[mask].copy()
+    if df_drv.empty:
+        raise ValueError(f"No rows found for region={region!r}, drivetrain={drivetrain!r}.")
+    df_drv = df_drv.groupby([segment_col, year_col], as_index=False)[value_col].sum()
+
+    segments = sorted(target_segment_shares_final.keys())
+    n_segments = len(segments)
+
+    drv_total_by_year = df_drv.groupby(year_col)[value_col].sum()
+
+    baseline_at_start = df_drv[df_drv[year_col] == scenario_start_year].set_index(segment_col)[value_col]
+    baseline_total_at_start = float(baseline_at_start.sum())
+    if baseline_total_at_start <= 0:
+        raise ValueError(
+            f"No inflow found for drivetrain={drivetrain!r} at scenario_start_year="
+            f"{scenario_start_year} -- cannot resolve the ramp's baseline segment mix."
+        )
+    base_start_share = np.array(
+        [float(baseline_at_start.get(seg, 0.0)) / baseline_total_at_start for seg in segments]
+    )
+
+    lower, upper = _as_lower_upper_spread(inflow_segment_share_spread)
+
+    final_target_draws = np.zeros((n_draws, n_segments), dtype=float)
+    for j, seg in enumerate(segments):
+        mode = float(target_segment_shares_final[seg])
+        low = mode * (1.0 - lower)
+        high = mode * (1.0 + upper)
+        if mode <= 0.0 or low >= high:
+            final_target_draws[:, j] = mode
+        else:
+            final_target_draws[:, j] = rng.triangular(low, mode, high, size=n_draws)
+    row_sums = final_target_draws.sum(axis=1, keepdims=True)
+    final_target_draws = np.divide(
+        final_target_draws, row_sums, out=np.zeros_like(final_target_draws), where=row_sums > 0
+    )
+
+    inflow_draws_by_group: dict[tuple, dict[int, np.ndarray]] = {
+        (region, drivetrain, seg): {} for seg in segments
+    }
+    for y in years:
+        y = int(y)
+        if y < scenario_start_year:
+            continue
+        drv_total_y = float(drv_total_by_year.get(y, 0.0))
+        if y >= ramp_end_year:
+            share_draws_y = final_target_draws  # (n_draws, n_segments)
+        else:
+            alpha = (y - scenario_start_year) / (ramp_end_year - scenario_start_year)
+            share_draws_y = (1.0 - alpha) * base_start_share[None, :] + alpha * final_target_draws
+        for j, seg in enumerate(segments):
+            inflow_draws_by_group[(region, drivetrain, seg)][y] = drv_total_y * share_draws_y[:, j]
+
+    return inflow_draws_by_group
+
+
 def run_adjusted_scenario(
     *, scenario_name: str, inflow_df: pd.DataFrame, matrices_by_key: dict, seg_share_by_drv: dict,
     flows_03: pd.DataFrame, p02: dict, unknown_whereabouts_share: dict[str, float], segment_map: dict,
@@ -429,6 +545,15 @@ def run_adjusted_scenario(
     mc_seed: int | np.random.SeedSequence | None = None,
     mc_chunk_size: int = 20_000,
     output_periods: list[tuple[int, int]] | None = None,
+    # [NEW] Precomputed per-draw future segment-share inflow overrides for this
+    # scenario, if any -- built by `main()` via `sample_future_segment_share_inflow_
+    # draws` (only when `ScenarioSpec.inflow_segment_share_spread` is set, e.g. BAU)
+    # and threaded straight through to `fdm.run_flow_driven_model_monte_carlo` /
+    # `cohort_flow_mc.run_cohort_flow_monte_carlo`'s `inflow_draws_by_group`. `None`
+    # (default, every other scenario) means fully deterministic inflow during MC,
+    # unchanged from before this parameter existed. Same "resolved by main(), not
+    # hardcoded here" convention as every other scenario-specific value above.
+    inflow_draws_by_group: dict[tuple, dict[int, np.ndarray]] | None = None,
 ) -> dict[str, Any]:
     """
     Run one adjusted-inflow scenario end to end: rebuild the segment-level cohort
@@ -474,6 +599,13 @@ def run_adjusted_scenario(
     deterministic number. Returned under the `"mc"` key (`None` if disabled).
     `mc_chunk_size` normally comes from `params.monte_carlo.chunk_size`, resolved by
     `main()` -- the literal default here is only a fallback for direct/standalone calls.
+
+    [NEW] `inflow_draws_by_group`, when supplied (e.g. for BAU), additionally makes
+    this scenario's FUTURE (year >= scenario_start_year) inflow segment-mix genuinely
+    uncertain per Monte Carlo draw -- not just resampled lifetime/shares layered on a
+    deterministic inflow. See `sample_future_segment_share_inflow_draws`'s docstring
+    for exactly how it's built, and `cohort_flow_mc.py`'s "PER-DRAW INFLOW OVERRIDE"
+    module docstring section for how the engine consumes it.
     """
     if lifetime_change_by_drv is None:
         lifetime_change_by_drv = {}
@@ -536,6 +668,7 @@ def run_adjusted_scenario(
             group_cols=["Region", "Drive Train", "Segment"], outflow_timing="post_inflow",
             lifetime_change_by_drv=lifetime_change_by_drv, stock_modifier_2027=stock_modifier_2027,
             stock_modifier_start_year=stock_modifier_start_year, output_periods=output_periods,
+            inflow_draws_by_group=inflow_draws_by_group,
             seed=mc_seed, chunk_size=mc_chunk_size, collect_per_year=False,
             verbose=True, progress_label=scenario_name,
         )
@@ -564,6 +697,105 @@ def run_adjusted_scenario(
         "tracker": tracker_new, "tracker_keyed": tracker_keyed_new, "missing_keys": missing_new,
         "mc": mc_result,
     }
+
+
+# ---------------------------------------------------------------------------
+# [NEW] Within-scenario detail figures: drivetrain comparison, and segment
+# comparison within one drivetrain -- boxplot AND smoothed density-curve views
+# of the same raw Monte Carlo draws (the 11-scenario `03_02_monte_carlo_scenario_
+# comparison_*.png` figure further down only compares EU-total collected ACROSS
+# scenarios; these compare WITHIN one scenario, one level of detail down).
+# ---------------------------------------------------------------------------
+def _gaussian_kde_curve(
+    values: np.ndarray, *, n_grid: int = 200, bandwidth: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Manual Gaussian-KERNEL density estimate (numpy only -- no scipy/seaborn
+    dependency). NONPARAMETRIC: this sums one small Gaussian kernel per observed
+    draw and does NOT fit a single symmetric Normal curve to the data -- the
+    resulting density curve can be (and, for a metric derived from an asymmetric
+    Triangular -- e.g. BAU's future segment-share draws, or any lifetime draw with
+    an `AsymmetricSpread` -- typically IS) skewed or multi-modal, faithfully
+    following whatever shape the actual Monte Carlo draws have. The kernel itself
+    is symmetric; the ESTIMATE it produces is not forced to be.
+
+    `bandwidth` defaults to Silverman's rule of thumb
+    (`0.9 * min(std, IQR/1.34) * n**(-1/5)`) -- the standard, well-established KDE
+    bandwidth heuristic; pass an explicit value to override it if this under/over-
+    smooths a particular metric's distribution.
+
+    Returns `(grid, density)`, both length `n_grid`, evaluated over
+    `[min(values) - 3*bandwidth, max(values) + 3*bandwidth]`. `density` integrates
+    to ~1 over that grid (verified by regression test), i.e. this is a genuine
+    density, not an arbitrarily-scaled curve.
+    """
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    if bandwidth is None:
+        std = float(values.std(ddof=1)) if n > 1 else 1.0
+        q75, q25 = np.percentile(values, [75, 25])
+        iqr = float(q75 - q25)
+        spread = min(std, iqr / 1.34) if iqr > 0 else std
+        spread = spread if spread > 0 else (std if std > 0 else 1.0)
+        bandwidth = 0.9 * spread * n ** (-1.0 / 5.0)
+        bandwidth = bandwidth if bandwidth > 0 else 1.0
+    grid = np.linspace(values.min() - 3 * bandwidth, values.max() + 3 * bandwidth, n_grid)
+    diffs = (grid[:, None] - values[None, :]) / bandwidth
+    kernel = np.exp(-0.5 * diffs ** 2) / np.sqrt(2 * np.pi)
+    density = kernel.sum(axis=1) / (n * bandwidth)
+    return grid, density
+
+
+def plot_group_comparison_boxplot_and_pdf(
+    values_by_label: dict[str, np.ndarray], *, title: str, xlabel: str, ylabel: str,
+    fig_path_boxplot: Path, fig_path_pdf: Path,
+) -> None:
+    """
+    Save TWO comparison figures for a `{label: (n_draws,) array}` dict -- a boxplot
+    (median/IQR/whisker view, quick to read, but collapses distribution SHAPE) and a
+    Gaussian-KDE density-curve overlay (shows the actual distribution shape --
+    skew, multi-modality -- that a boxplot can't; see `_gaussian_kde_curve`). Shared
+    helper for both the drivetrain-comparison and segment-comparison figures below --
+    same two-views-of-one-comparison pattern, just a different label set each time.
+    Styling matches the existing `03_02_monte_carlo_scenario_comparison_*.png`
+    boxplot (`#4a7fb5`, dashed gridlines, hidden top/right spines) for visual
+    consistency across all of this stage's Monte Carlo figures.
+    """
+    labels = list(values_by_label.keys())
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    box_data = [values_by_label[label] for label in labels]
+    bp = ax.boxplot(box_data, tick_labels=labels, showfliers=False, patch_artist=True)
+    for patch in bp["boxes"]:
+        patch.set_facecolor("#4a7fb5")
+        patch.set_alpha(0.6)
+    ax.set_title(title, fontsize=12)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, linestyle="--", alpha=0.3, axis="y")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+    plt.tight_layout()
+    fig.savefig(fig_path_boxplot, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    cmap = plt.get_cmap("tab20")
+    for i, label in enumerate(labels):
+        grid, density = _gaussian_kde_curve(values_by_label[label])
+        color = cmap(i % 20)
+        ax.plot(grid, density, label=label, color=color, linewidth=1.8)
+        ax.fill_between(grid, density, alpha=0.08, color=color)
+    ax.set_title(title, fontsize=12)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Density")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False, fontsize=8, ncol=2)
+    plt.tight_layout()
+    fig.savefig(fig_path_pdf, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main() -> dict[str, Any]:
@@ -709,6 +941,50 @@ def main() -> dict[str, Any]:
             for drv, c in spec.lifetime_change_by_drv.items()
         } or None
 
+        # -----------------------------------------------------------------------
+        # [NEW] Future inflow segment-share Monte Carlo uncertainty (pilot: BAU only,
+        # via `ScenarioSpec.inflow_segment_share_spread` -- None for every other
+        # scenario today). Sampled here in `main()`, not inside `run_adjusted_scenario`
+        # -- same "resolved by main(), not hardcoded in the scenario runner" convention
+        # every other scenario-specific value on this call already follows.
+        #
+        # Seed: spawned from this scenario's OWN seed (`mc_scenario_seeds[name]`)
+        # BEFORE that same SeedSequence object is handed to `run_adjusted_scenario` as
+        # `mc_seed` below. `SeedSequence.spawn()` is stateful (advances an internal
+        # spawn counter) -- spawning once here first means the engine's own later
+        # internal per-entity spawns (inside `cohort_flow_mc.run_cohort_flow_monte_
+        # carlo`) start from the NEXT child onward, so this segment-share sampling
+        # stream and the engine's lifetime/share entity-draw streams are independently
+        # seeded and never overlap, same multi-level spawn-hierarchy convention this
+        # stage already uses everywhere else (scenario -> group -> entity).
+        #
+        # `years` recomputed identically to how `run_adjusted_scenario` derives it
+        # internally from the same `inflow_by_scenario[name]` -- so the year keys in
+        # the returned draws dict line up exactly with what the engine iterates over.
+        # -----------------------------------------------------------------------
+        inflow_draws_for_scenario = None
+        if (
+            monte_carlo_enabled
+            and spec.inflow_segment_share_spread is not None
+            and spec.inflow_segment_shares_final is not None
+        ):
+            segment_share_seed = mc_scenario_seeds[name].spawn(1)[0]
+            segment_share_rng = np.random.default_rng(segment_share_seed)
+            scenario_inflow_years = np.arange(
+                int(inflow_by_scenario[name]["year"].min()),
+                int(inflow_by_scenario[name]["year"].max()) + 1,
+                dtype=int,
+            )
+            inflow_draws_for_scenario = sample_future_segment_share_inflow_draws(
+                inflow_df=inflow_segments_scenario, region="EUR",
+                drivetrain=spec.inflow_segment_shares_drivetrain,
+                scenario_start_year=p03_02.scenario_start_year,
+                ramp_end_year=p03_02.scenario_ramp_end_year,
+                target_segment_shares_final=spec.inflow_segment_shares_final,
+                inflow_segment_share_spread=spec.inflow_segment_share_spread,
+                n_draws=n_draws_mc, rng=segment_share_rng, years=scenario_inflow_years,
+            )
+
         scenario_results_all[name] = run_adjusted_scenario(
             scenario_name=name, inflow_df=inflow_by_scenario[name],
             matrices_by_key=matrices_by_key, seg_share_by_drv=seg_share_by_drv,
@@ -729,6 +1005,7 @@ def main() -> dict[str, Any]:
             unknown_whereabouts_share_std=unknown_whereabouts_share_std_mc,
             export_share_std=export_share_std_mc, mc_seed=mc_scenario_seeds[name],
             mc_chunk_size=mc_chunk_size, output_periods=params.monte_carlo.output_periods,
+            inflow_draws_by_group=inflow_draws_for_scenario,
         )
 
     print(
@@ -895,6 +1172,14 @@ def main() -> dict[str, Any]:
                     eu_period_result, f"{scenario_name}__{period_label}__EU_total", summary_mc
                 )
 
+                # [NEW] Accumulate raw draws (not just summarize_distribution's binned
+                # histogram) for this period, so the within-scenario detail figures
+                # below can build boxplots/KDE curves from the actual draws -- reusing
+                # exactly the same `drv_period_result`/`g["periods"][period]` values
+                # `_summarize_period_result` already computes on, not a re-derivation.
+                collected_by_drivetrain: dict[str, np.ndarray] = {}
+                collected_by_segment_within_drivetrain: dict[str, dict[str, np.ndarray]] = {}
+
                 for drivetrain in drivetrains_present:
                     per_drv_groups = [g for gk, g in mc["by_group"].items() if gk[1] == drivetrain]
                     drv_period_result = _sum_period_results(
@@ -903,8 +1188,10 @@ def main() -> dict[str, Any]:
                     _summarize_period_result(
                         drv_period_result, f"{scenario_name}__{period_label}__{drivetrain}", summary_mc
                     )
+                    collected_by_drivetrain[drivetrain] = drv_period_result["cumulative_collected"]
 
                     # Segment level: individual (drivetrain, segment) groups, no further summing.
+                    segment_values: dict[str, np.ndarray] = {}
                     for group_key, g in mc["by_group"].items():
                         if group_key[1] != drivetrain:
                             continue
@@ -916,6 +1203,47 @@ def main() -> dict[str, Any]:
                             f"{scenario_name}__{period_label}__{drivetrain}__{segment}",
                             summary_mc,
                         )
+                        segment_values[segment] = g["periods"][period]["cumulative_collected"]
+                    collected_by_segment_within_drivetrain[drivetrain] = segment_values
+
+                # -----------------------------------------------------------------------
+                # [NEW] Within-scenario detail figures for THIS (scenario, period) --
+                # generated for every scenario actually run (`scenario_names_all`, i.e.
+                # `AdjustedFlowsParams.scenarios_to_run`'s resolution -- no separate
+                # config knob needed: narrow scenarios_to_run and you narrow which
+                # scenarios get these figures too). Two figures per comparison
+                # (boxplot + KDE density curve, see `plot_group_comparison_boxplot_
+                # and_pdf`'s docstring) -- boxplot for a quick median/spread read,
+                # density curve for actual distribution SHAPE (skew, multi-modality),
+                # which a boxplot collapses away.
+                # -----------------------------------------------------------------------
+                if len(collected_by_drivetrain) > 1:
+                    plot_group_comparison_boxplot_and_pdf(
+                        collected_by_drivetrain,
+                        title=f"{scenario_name}: cumulative collected by drivetrain, {period_label}",
+                        xlabel="Cumulative collected [million vehicles]",
+                        ylabel="Cumulative collected [million vehicles]",
+                        fig_path_boxplot=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_boxplot.png",
+                        fig_path_pdf=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_pdf.png",
+                    )
+
+                for drivetrain, segment_values in collected_by_segment_within_drivetrain.items():
+                    if len(segment_values) <= 1:
+                        continue
+                    # Conventional A..F, then JA..JF ordering (matches segment_map's
+                    # own key order in params_schema.py) rather than plain alphabetical
+                    # (which would put "A" before "B" but "JA" before "A" is wrong too).
+                    ordered_segments = sorted(segment_values.keys(), key=lambda s: (s.startswith("J"), s))
+                    plot_group_comparison_boxplot_and_pdf(
+                        {seg: segment_values[seg] for seg in ordered_segments},
+                        title=f"{scenario_name} / {drivetrain}: cumulative collected by segment, {period_label}",
+                        xlabel="Cumulative collected [million vehicles]",
+                        ylabel="Cumulative collected [million vehicles]",
+                        fig_path_boxplot=fig_dir / f"03_02_monte_carlo_segment_comparison_{scenario_name}_{drivetrain}_{period_label}_boxplot.png",
+                        fig_path_pdf=fig_dir / f"03_02_monte_carlo_segment_comparison_{scenario_name}_{drivetrain}_{period_label}_pdf.png",
+                    )
+
+                print(f"Saved within-scenario detail figures: {scenario_name}, {period_label}")
 
         saved_mc = save_many(
             mc_stage03_02_summary=summary_mc, mc_stage03_02_sensitivity=sensitivity_by_scenario, root=PROJECT_ROOT,

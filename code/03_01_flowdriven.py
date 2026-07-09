@@ -177,6 +177,7 @@ def main() -> dict[str, Any]:
     matrices_by_key = loaded["matrices_by_key"]
     stock_dict = loaded["stock_dict"]
 
+    p01 = params.data_prep
     p02 = params.stock_flow
     p03 = params.disaggregation
     p04 = params.materials
@@ -263,8 +264,18 @@ def main() -> dict[str, Any]:
             seed=42,
         )
 
+    # [NEW] "EU plus 4" project convention: EU27 + Norway + Iceland (the two of the four
+    # EFTA/EEA countries actually present in EEA_final_data.csv -- CH and LI are simply
+    # absent from the source, nothing to explicitly exclude there). GB is explicitly
+    # DROPPED (14.0% of total registration volume in the raw file -- the single largest
+    # non-EU contributor, and no longer an EU market). See
+    # `prepare_eea_share_tables`'s own docstring in disaggregation.py for the full
+    # rationale and the documented, ACCEPTED limitation around uneven country-year
+    # coverage even within this scope (NO from 2019, IS from 2018, HR from 2014).
+    eea_country_scope = tuple(p01.eu_countries) + ("NO", "IS")
     eea_data, segment_shares_ext, liquids_shares_ext = prepare_eea_share_tables(
         output_dir=output_dir, start_year_model=start_year_model, end_year_model=end_year_model,
+        country_scope=eea_country_scope,
     )
     # NOTE: `start_year_model`/`end_year_model` here come from params["03_disaggregation"]
     # (1900 / 2070). But immediately below, `start_year`/`model_end_year` are recomputed

@@ -1099,6 +1099,16 @@ def run_flow_driven_model_monte_carlo(
     lifetime_change_by_drv: dict[str, dict[str, float]] | None = None,
     stock_modifier_2027: float = 1.0,
     stock_modifier_start_year: int = 2027,
+    # [NEW] Opt-in per-draw-varying inflow, passed straight through to
+    # `cohort_flow_mc.run_cohort_flow_monte_carlo`'s parameter of the same name --
+    # see that function's docstring / module docstring "PER-DRAW INFLOW OVERRIDE"
+    # section. `{(Region, Drive Train, Segment): {year: np.ndarray shape (n_draws,)}}`.
+    # Default None preserves fully-deterministic inflow, unchanged from before this
+    # parameter existed. Built by `03_02_adjustedflows.py`'s
+    # `sample_future_segment_share_inflow_draws` for scenarios with
+    # `ScenarioSpec.inflow_segment_share_spread` set (e.g. BAU) -- this wrapper does
+    # no sampling of its own, it only threads the precomputed dict through.
+    inflow_draws_by_group: dict[tuple, dict[int, np.ndarray]] | None = None,
     output_periods: list[tuple[int, int]] | None = None,
     seed: int | np.random.SeedSequence | None = None,
     chunk_size: int = 20_000,
@@ -1163,6 +1173,7 @@ def run_flow_driven_model_monte_carlo(
         outflow_timing=outflow_timing,
         lifetime_change_by_entity=lifetime_change_by_drv,
         period_inflow_multiplier=period_inflow_multiplier,
+        inflow_draws_by_group=inflow_draws_by_group,
         output_periods=output_periods,
         seed=seed, chunk_size=chunk_size, collect_per_year=collect_per_year,
         verbose=verbose, progress_label=progress_label,

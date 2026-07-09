@@ -142,12 +142,45 @@ def prepare_eea_share_tables(
     output_dir: str,
     start_year_model: int,
     end_year_model: int,
+    country_scope: tuple[str, ...] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     [FIXED] Previously a bare `pd.read_csv` -- if the file was missing, this failed
     deep inside pandas with a generic `FileNotFoundError` and no indication of what was
     actually expected. Now checks existence first and raises a clear, actionable error
     naming the exact path and the required schema.
+
+    [NEW] `country_scope`: which ISO2 `Country` values to keep before any aggregation.
+    Previously this function ignored the `Country` column entirely -- it grouped
+    straight to `(Year, Drive Train, Segment)` over WHATEVER countries happened to be
+    present in the raw file, silently including any non-EU countries the source file
+    contains. The real `EEA_final_data.csv` (confirmed by inspection) contains EU27 +
+    GB + NO + IS. Project convention ("EU plus 4"): use EU27 + Norway + Iceland (the
+    only two of the four EFTA/EEA countries actually present in this source -- CH and
+    LI are simply absent from the data, not deliberately excluded), and explicitly
+    DROP GB (14.0% of total registration volume in the real file -- by far the largest
+    non-EU contributor, and no longer an EU market).
+
+    Passing `country_scope=None` (the default) keeps the OLD behavior (no filtering) --
+    for backward compatibility with any other caller that doesn't pass this argument
+    yet. Every call site in this project's own pipeline (03_01_flowdriven.py,
+    03_02_adjustedflows.py) should pass `country_scope` explicitly -- see
+    `03_01_flowdriven.py`'s call site for the exact `eu_countries + ("NO", "IS")`
+    construction.
+
+    KNOWN, ACCEPTED LIMITATION (documented, not corrected here -- see
+    MATH_MODELS.md/HOW_TO_RUN_AND_VERIFY.md addenda): even after this filter, country
+    coverage is UNEVEN across years within `country_scope` itself -- GB's exclusion
+    aside, NO only has data from 2019 onward, IS only from 2018 onward, and HR only
+    from 2014 onward (EU accession year) in the source file. This means the country
+    composition of "EU+NO+IS" changes year to year even after this filter is applied.
+    No better data exists, so this is accepted as-is -- confirmed (see discussion log)
+    to have LOW impact on segment-share rankings/magnitudes, but MEANINGFUL impact on
+    drivetrain-level shares (Norway's disproportionately high BEV share pulls the
+    EU+NO+IS-wide BEV share up by roughly 0.5-1.2 percentage points in recent years
+    relative to an EU27-only baseline, despite NO being only ~0.43% of total
+    registration volume) -- flag this explicitly wherever drivetrain-level shares
+    derived from this function are reported or interpreted.
     """
     eea_path = Path(output_dir) / "EEA_final_data.csv"
     if not eea_path.exists():
@@ -165,6 +198,35 @@ def prepare_eea_share_tables(
             f"it at the path above."
         )
     eea_data = pd.read_csv(eea_path)
+
+    if country_scope is not None:
+        if "Country" not in eea_data.columns:
+            raise KeyError(
+                f"prepare_eea_share_tables: country_scope was given ({sorted(country_scope)}), "
+                f"but the loaded EEA_final_data.csv at {eea_path} has no 'Country' column to "
+                f"filter on. Either fix the file's schema or pass country_scope=None."
+            )
+        present = set(eea_data["Country"].unique())
+        missing_from_data = set(country_scope) - present
+        if missing_from_data:
+            print(
+                f"NOTE: prepare_eea_share_tables: country_scope includes "
+                f"{sorted(missing_from_data)}, which have NO rows in {eea_path.name} -- "
+                f"these will simply contribute nothing (not an error; e.g. CH/LI are "
+                f"expected to be absent from the current source file)."
+            )
+        dropped = present - set(country_scope)
+        if dropped:
+            dropped_share = (
+                eea_data.loc[eea_data["Country"].isin(dropped), "Registrations"].sum()
+                / eea_data["Registrations"].sum()
+            )
+            print(
+                f"prepare_eea_share_tables: excluding {sorted(dropped)} from country_scope "
+                f"({dropped_share:.1%} of total registration volume in the raw file)."
+            )
+        eea_data = eea_data[eea_data["Country"].isin(country_scope)].copy()
+
     eea_data = eea_data[
         (eea_data["Segment"].notna())
         & (eea_data["Segment"] != "")

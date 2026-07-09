@@ -388,6 +388,28 @@ class ScenarioSpec:
     inflow_segment_shares_drivetrain: str | None = None
     inflow_segment_shares_final: dict[str, float] | None = None
 
+    # [NEW] Monte Carlo uncertainty around `inflow_segment_shares_final` (the FUTURE
+    # segment-mix target, applied for years >= AdjustedFlowsParams.scenario_start_year)
+    # -- deliberately NOT applied to the real historic segment split (years before
+    # scenario_start_year), which comes from actual registration data and stays fully
+    # deterministic. `None` (default) means no segment-share uncertainty for this
+    # scenario -- opt-in, same sparse convention as every other override on this class.
+    #
+    # A per-segment Triangular(mode*(1-lower), mode, mode*(1+upper)) is sampled
+    # INDEPENDENTLY for each of the 12 segments (reusing this scenario's own
+    # `inflow_segment_shares_final` values as each segment's mode), one draw per Monte
+    # Carlo trial, then the whole 12-segment draw is renormalized (divided by its own
+    # sum) so it sums to exactly 1 -- every segment moves proportionally on every draw,
+    # not just whichever one happens to be picked to "absorb" the difference. Requires
+    # `inflow_segment_shares_final` to also be set (validated) -- there is nothing to
+    # sample around otherwise. Same `AsymmetricSpread` type as
+    # `StockFlowParams.lifetime_scale_lambda_relative_spread` (a plain float means
+    # symmetric spread); see `03_02_adjustedflows.py`'s
+    # `sample_future_segment_share_inflow_draws` for exactly how this gets sampled and
+    # turned into per-draw inflow values, and `cohort_flow_mc.py`'s
+    # `inflow_draws_by_group` parameter for how it's fed into the vectorized engine.
+    inflow_segment_share_spread: AsymmetricSpread | float | None = None
+
     # Sparse lifetime override: only drivetrains that actually change need an entry.
     lifetime_change_by_drv: dict[str, OpenEndedLifetimeChange] = field(default_factory=dict)
 
@@ -431,6 +453,21 @@ class ScenarioSpec:
                 issues.append(
                     f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final sums "
                     f"to {total:.6f}, expected 1.0."
+                )
+        if self.inflow_segment_share_spread is not None:
+            if self.inflow_segment_shares_final is None:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_share_spread is set "
+                    f"but inflow_segment_shares_final is None -- nothing to sample around."
+                )
+            if isinstance(self.inflow_segment_share_spread, AsymmetricSpread):
+                issues += self.inflow_segment_share_spread.validate(
+                    field_name=f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread"
+                )
+            elif self.inflow_segment_share_spread < 0:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread = "
+                    f"{self.inflow_segment_share_spread} must be >= 0."
                 )
         for drv, change in self.lifetime_change_by_drv.items():
             if change.scale_lambda <= 0 or change.shape_k <= 0:
@@ -524,6 +561,14 @@ class AdjustedFlowsParams:
                 "A": 0.11599, "B": 0.07235, "C": 0.17037, "D": 0.06288, "E": 0.04190, "F": 0.02945,
                 "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
             },
+            # [NEW, pilot] Future segment-mix uncertainty: 10% lower / 15% upper relative
+            # spread around each of the 12 mode values above, e.g. "A"'s Triangular is
+            # (0.11599*0.90, 0.11599, 0.11599*1.15) = (0.10439, 0.11599, 0.13339).
+            # Applied only to years >= scenario_start_year (2026) -- real historic
+            # segment-mix data stays fully deterministic. Not yet set for the other four
+            # segment-mix scenarios (BEV_A_F, BEV_JA_JF, BEV_large, BEV_small) -- BAU is
+            # a deliberate pilot; extend the same pattern to those once this is verified.
+            inflow_segment_share_spread=AsymmetricSpread(lower=0.10, upper=0.15),
         ),
         "BEV_only": ScenarioSpec(
             name="BEV_only",

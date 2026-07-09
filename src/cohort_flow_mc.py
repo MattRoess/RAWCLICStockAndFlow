@@ -100,6 +100,21 @@ UNCERTAINTY CONVENTION
     existing seed hierarchy rather than through the top-level convenience
     wrapper that assumes it owns the whole seed tree itself.
 
+PER-DRAW INFLOW OVERRIDE (opt-in, off by default)
+---------------------------------------------------
+Inflow is DETERMINISTIC by default -- the same scalar value from `df`/`inflow_col`
+is broadcast identically to every draw, exactly as before this feature existed.
+Callers that need a specific (group, year) to genuinely vary per draw instead
+(e.g. the vehicle pipeline's future inflow-SEGMENT-mix uncertainty, sampled and
+renormalized upstream in `03_02_adjustedflows.py`) pass `inflow_draws_by_group`:
+`{group_key: {year: np.ndarray of shape (n_draws,)}}`. Any (group, year) NOT
+present in this dict keeps using the plain scalar from `df` -- this is a strict,
+backward-compatible ADDITION: passing `None`/`{}` (the default) reproduces prior
+output byte-for-byte (verified by regression test). This engine itself does no
+sampling, ramping, or renormalizing of its own -- it only accepts a precomputed
+per-draw array and uses it in place of the scalar wherever supplied, so it stays
+product-agnostic (no "segment," "ramp," or "Triangular" concept here).
+
 MEMORY
 ------
 The cohort-level per-draw state (`stock_prev`, shape (n_draws, n_cohorts)) is
@@ -307,6 +322,10 @@ def run_cohort_flow_monte_carlo(
     outflow_timing: str = "post_inflow",
     lifetime_change_by_entity: dict[str, dict[str, float]] | None = None,
     period_inflow_multiplier: dict[int, float] | None = None,
+    # [NEW] Opt-in per-draw-varying inflow -- see module docstring's "PER-DRAW INFLOW
+    # OVERRIDE" section. `{group_key: {year: np.ndarray shape (n_draws,)}}`. Default
+    # None/{} preserves the fully-deterministic-inflow behavior exactly.
+    inflow_draws_by_group: dict[tuple, dict[int, np.ndarray]] | None = None,
     output_periods: list[tuple[int, int]] | None = None,
     seed: int | np.random.SeedSequence | None = None,
     chunk_size: int = 20_000,
@@ -357,12 +376,15 @@ def run_cohort_flow_monte_carlo(
         period ("stock-years", e.g. total vehicle-years in service).
       - `"stock_per_year"`: `{year: array}` for every year in the period --
         the full per-year series, not just start/end.
-    `"cumulative_inflow"` is also reported per period -- inflow is currently
-    DETERMINISTIC (not resampled per draw), so this is a `(n_draws,)` array
-    of an IDENTICAL value repeated -- kept as a full array (not a bare float)
-    so `monte_carlo.summarize_distribution()` can be applied uniformly to
+    `"cumulative_inflow"` is also reported per period -- inflow is DETERMINISTIC
+    (not resampled per draw) UNLESS `inflow_draws_by_group` supplies a per-draw
+    override for a given (group, year), see module docstring's "PER-DRAW INFLOW
+    OVERRIDE" section. In the default (no override) case this is a `(n_draws,)`
+    array of an IDENTICAL value repeated -- kept as a full array (not a bare
+    float) so `monte_carlo.summarize_distribution()` can be applied uniformly to
     every metric without special-casing (it will report `std=0`, a
-    degenerate-but-correct histogram, etc., for this one).
+    degenerate-but-correct histogram, etc., for this one). When an override IS
+    supplied, this array genuinely varies per draw like any other metric.
 
     Returns:
         {
@@ -418,6 +440,8 @@ def run_cohort_flow_monte_carlo(
         share_b_std_by_entity = {}
     if period_inflow_multiplier is None:
         period_inflow_multiplier = {}
+    if inflow_draws_by_group is None:
+        inflow_draws_by_group = {}
 
     entity_idx_in_group = group_cols.index(entity_key_col)
 
@@ -528,6 +552,22 @@ def run_cohort_flow_monte_carlo(
         year_inflow_map = dict(zip(sub[year_col], sub[inflow_col]))
         cohort_stock_map = starting_stock_by_cohort_lookup.get(lookup_key, {})
 
+        # [NEW] Per-draw inflow override for this group, if any -- see module
+        # docstring's "PER-DRAW INFLOW OVERRIDE" section. Validated once per group
+        # (cheap: at most n_years entries) rather than silently accepting a
+        # mis-shaped array, which would otherwise fail confusingly (or not at all,
+        # via broadcasting) deep inside the chunked draws loop below.
+        group_inflow_draws_raw = inflow_draws_by_group.get(lookup_key, {})
+        group_inflow_draws: dict[int, np.ndarray] = {}
+        for yr, arr in group_inflow_draws_raw.items():
+            arr = np.asarray(arr, dtype=float)
+            if arr.shape != (n_draws,):
+                raise ValueError(
+                    f"inflow_draws_by_group[{lookup_key!r}][{yr}] has shape {arr.shape}, "
+                    f"expected ({n_draws},) to match n_draws."
+                )
+            group_inflow_draws[int(yr)] = arr
+
         # [FIXED, resolves M33 -- same fix as, and cross-validated against,
         # flowdriven_model.py's scalar function; see that fix's comment for the full
         # explanation] `cohort_years` now includes any vintage in `cohort_stock_map`
@@ -546,19 +586,15 @@ def run_cohort_flow_monte_carlo(
             dtype=float,
         )
 
-        # Deterministic per-period inflow -- inflow doesn't vary by draw (only the
-        # lifetime/share DRAWS do), so this is computed once per group, outside the
-        # draws loop entirely, from plain Python arithmetic over `year_inflow_map`.
-        cumulative_inflow_by_period: dict[tuple, float] = {}
-        for start, end in output_periods:
-            total_inflow = 0.0
-            for t in years:
-                if start <= t <= end:
-                    inflow_t = float(year_inflow_map.get(t, 0.0))
-                    if t in period_inflow_multiplier:
-                        inflow_t *= float(period_inflow_multiplier[t])
-                    total_inflow += inflow_t
-            cumulative_inflow_by_period[(start, end)] = total_inflow
+        # Per-period cumulative inflow -- an accumulator like every other per-period
+        # metric below (NOT precomputed as a single deterministic float up front
+        # anymore): in the common case (no `inflow_draws_by_group` override for this
+        # group) every draw accumulates the identical scalar each year, so the
+        # resulting (n_draws,) array is still uniform -- byte-identical to the old
+        # precomputed-scalar-broadcast-to-n_draws behavior (verified by regression
+        # test). When an override IS present for a given year, this genuinely varies
+        # per draw like any other sampled metric.
+        cum_inflow_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
 
         cum_survival_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
         cum_a_by_period = {p: np.zeros(n_draws, dtype=float) for p in output_periods}
@@ -611,15 +647,23 @@ def run_cohort_flow_monte_carlo(
                 h = _weibull_hazard_vec(k_eff, lam_eff, max_age_group)  # (d, max_age+1)
 
                 stock_start = stock_prev  # (d, n_cohorts)
-                inflow_t = float(year_inflow_map.get(t, 0.0))
+
+                # [NEW] Per-draw-varying inflow when `group_inflow_draws` has an
+                # override for this year; otherwise the original scalar, broadcast to
+                # every draw in this chunk -- identical to pre-this-feature behavior.
+                if t in group_inflow_draws:
+                    inflow_t_draws = group_inflow_draws[t][chunk_start:chunk_end]
+                else:
+                    inflow_t_scalar = float(year_inflow_map.get(t, 0.0))
+                    inflow_t_draws = np.full(d, inflow_t_scalar, dtype=float)
                 if t in period_inflow_multiplier:
-                    inflow_t *= float(period_inflow_multiplier[t])
+                    inflow_t_draws = inflow_t_draws * float(period_inflow_multiplier[t])
 
                 if outflow_timing == "post_inflow":
                     stock_base = stock_start.copy()
                     newborn_mask = cohort_years == t
                     if newborn_mask.any():
-                        stock_base[:, newborn_mask] += inflow_t
+                        stock_base[:, newborn_mask] += inflow_t_draws[:, None]
                     ages_base = (t - cohort_years).astype(int)
                     active = cohort_years <= t
                 else:
@@ -638,7 +682,7 @@ def run_cohort_flow_monte_carlo(
                 if outflow_timing != "post_inflow":
                     newborn_mask = cohort_years == t
                     if newborn_mask.any():
-                        stock_end[:, newborn_mask] += inflow_t
+                        stock_end[:, newborn_mask] += inflow_t_draws[:, None]
 
                 out_a = out_surv * a_draws[:, None]
                 out_b = out_surv * b_draws[:, None]
@@ -658,6 +702,7 @@ def run_cohort_flow_monte_carlo(
                     cum_a_by_period[p][chunk_start:chunk_end] += out_a_sum
                     cum_b_by_period[p][chunk_start:chunk_end] += out_b_sum
                     cum_collected_by_period[p][chunk_start:chunk_end] += out_collected_sum
+                    cum_inflow_by_period[p][chunk_start:chunk_end] += inflow_t_draws
                     stock_sum_by_period[p][chunk_start:chunk_end] += stock_sum_this_year
                     stock_per_year_by_period[p][t][chunk_start:chunk_end] = stock_sum_this_year
                     if t == end:
@@ -678,7 +723,7 @@ def run_cohort_flow_monte_carlo(
                     "cumulative_a": cum_a_by_period[p],
                     "cumulative_b": cum_b_by_period[p],
                     "cumulative_collected": cum_collected_by_period[p],
-                    "cumulative_inflow": np.full(n_draws, cumulative_inflow_by_period[p], dtype=float),
+                    "cumulative_inflow": cum_inflow_by_period[p],
                     "stock_end_of_period": stock_end_by_period[p],
                     "stock_sum_over_period": stock_sum_by_period[p],
                     "stock_per_year": stock_per_year_by_period[p],
