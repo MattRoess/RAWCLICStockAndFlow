@@ -410,6 +410,44 @@ class ScenarioSpec:
     # `inflow_draws_by_group` parameter for how it's fed into the vectorized engine.
     inflow_segment_share_spread: AsymmetricSpread | float | None = None
 
+    # [NEW] Multi-drivetrain generalization of inflow_segment_shares_drivetrain/
+    # inflow_segment_shares_final/inflow_segment_share_spread above (which remain,
+    # unchanged, single-drivetrain fields used by the four BEV segment-profile
+    # scenarios below). Use THESE dict-keyed fields instead when a scenario needs to
+    # set a FUTURE segment-mix target (and optionally its Monte Carlo uncertainty) for
+    # MORE THAN ONE drivetrain at once -- e.g. BAU, which represents the realistic
+    # future segment mix for every drivetrain that has one, not just BEV.
+    #
+    # `inflow_segment_shares_final_by_drv[drv]` is exactly what
+    # `inflow_segment_shares_final` was for the single-drivetrain case: the FUTURE
+    # (year >= AdjustedFlowsParams.scenario_start_year) segment-mix target for THAT
+    # drivetrain, ramped in from the real historic mix the same way. Sparse: a
+    # drivetrain not present in this dict keeps its real historic mix, flat-
+    # extrapolated, with no override and no uncertainty -- same "missing means
+    # unchanged" convention as `lifetime_change_by_drv` etc.
+    #
+    # `inflow_segment_share_spread_by_drv[drv]` is the per-drivetrain Monte Carlo
+    # spread (same `AsymmetricSpread | float` semantics as `inflow_segment_share_
+    # spread`). A drivetrain present in `inflow_segment_shares_final_by_drv` but
+    # ABSENT from this dict gets a deterministic ramp with NO sampled uncertainty
+    # (03_02_adjustedflows.py's deterministic `tweak_inflow_segment_shares_within_
+    # drivetrain` call still applies; only the Monte Carlo draw is skipped for that
+    # drivetrain) -- this lets a scenario mix "some drivetrains get an uncertain
+    # future segment mix, others get a fixed one" without contradiction.
+    #
+    # Mutually exclusive with the single-drivetrain fields above, and with
+    # inflow_drivetrain_shares_final, on the SAME scenario (validated) -- a scenario
+    # picks one inflow-transform convention, not several at once.
+    #
+    # `03_02_adjustedflows.py`'s `main()` loops over this dict's keys, calling
+    # `tweak_inflow_segment_shares_within_drivetrain`/`sample_future_segment_share_
+    # inflow_draws` once per drivetrain and chaining/merging the results -- both
+    # functions already mask their effect to one drivetrain and pass every other row
+    # through untouched (confirmed from source), so looping over drivetrains is safe
+    # without any change to either function itself.
+    inflow_segment_shares_final_by_drv: dict[str, dict[str, float]] | None = None
+    inflow_segment_share_spread_by_drv: dict[str, AsymmetricSpread | float] | None = None
+
     # Sparse lifetime override: only drivetrains that actually change need an entry.
     lifetime_change_by_drv: dict[str, OpenEndedLifetimeChange] = field(default_factory=dict)
 
@@ -469,6 +507,56 @@ class ScenarioSpec:
                     f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread = "
                     f"{self.inflow_segment_share_spread} must be >= 0."
                 )
+        if self.inflow_segment_shares_final_by_drv is not None:
+            if self.inflow_segment_shares_final is not None or self.inflow_segment_shares_drivetrain is not None:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}']: both the single-drivetrain "
+                    f"inflow_segment_shares_final/inflow_segment_shares_drivetrain and the "
+                    f"multi-drivetrain inflow_segment_shares_final_by_drv are set -- use one "
+                    f"convention or the other, not both."
+                )
+            if self.inflow_drivetrain_shares_final is not None:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}']: both inflow_drivetrain_shares_final "
+                    f"and inflow_segment_shares_final_by_drv are set -- at most one inflow transform "
+                    f"should be."
+                )
+            for drv, shares in self.inflow_segment_shares_final_by_drv.items():
+                missing_segs = set(shares) - valid_segments
+                if missing_segs:
+                    issues.append(
+                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final_by_drv"
+                        f"['{drv}'] has unrecognized segments: {sorted(missing_segs)}."
+                    )
+                total = sum(shares.values())
+                if not (0.999 <= total <= 1.001):
+                    issues.append(
+                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final_by_drv"
+                        f"['{drv}'] sums to {total:.6f}, expected 1.0."
+                    )
+        if self.inflow_segment_share_spread_by_drv is not None:
+            if self.inflow_segment_shares_final_by_drv is None:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_share_spread_by_drv is "
+                    f"set but inflow_segment_shares_final_by_drv is None -- nothing to sample around."
+                )
+            else:
+                extra = set(self.inflow_segment_share_spread_by_drv) - set(self.inflow_segment_shares_final_by_drv)
+                if extra:
+                    issues.append(
+                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread_by_drv "
+                        f"has entries for drivetrains not in inflow_segment_shares_final_by_drv: {sorted(extra)}."
+                    )
+            for drv, spread in (self.inflow_segment_share_spread_by_drv or {}).items():
+                if isinstance(spread, AsymmetricSpread):
+                    issues += spread.validate(
+                        field_name=f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread_by_drv['{drv}']"
+                    )
+                elif spread < 0:
+                    issues.append(
+                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread_by_drv"
+                        f"['{drv}'] = {spread} must be >= 0."
+                    )
         for drv, change in self.lifetime_change_by_drv.items():
             if change.scale_lambda <= 0 or change.shape_k <= 0:
                 issues.append(
@@ -556,19 +644,58 @@ class AdjustedFlowsParams:
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
         "BAU": ScenarioSpec(
             name="BAU",
-            inflow_segment_shares_drivetrain="BEV",
-            inflow_segment_shares_final={
-                "A": 0.11599, "B": 0.07235, "C": 0.17037, "D": 0.06288, "E": 0.04190, "F": 0.02945,
-                "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
+            # [UPDATED] Migrated from the single-drivetrain inflow_segment_shares_drivetrain/
+            # inflow_segment_shares_final/inflow_segment_share_spread fields to the
+            # multi-drivetrain inflow_segment_shares_final_by_drv/inflow_segment_share_
+            # spread_by_drv fields -- BAU now carries a future segment-mix target (and
+            # Monte Carlo uncertainty) for all five segment-level drivetrains (BEV, HEV,
+            # PHEV, Diesel, Petrol), not just BEV. Every point estimate below is the REAL
+            # 2023 EU27+NO+IS-scoped EEA segment share for that drivetrain (see
+            # MATH_MODELS.md §3.2.1/§3.2.2 for the country-scope derivation) -- BEV's was
+            # already verified against real data; HEV/PHEV/Diesel/Petrol's were computed
+            # the identical way this round, via `build_segment_share_wide(segment_shares_ext)
+            # [drv].loc[2023]` under the same `country_scope`.
+            inflow_segment_shares_final_by_drv={
+                "BEV": {
+                    "A": 0.11599, "B": 0.07235, "C": 0.17037, "D": 0.06288, "E": 0.04190, "F": 0.02945,
+                    "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
+                },
+                "HEV": {
+                    "A": 0.10187, "B": 0.09933, "C": 0.17638, "D": 0.04487, "E": 0.02791, "F": 0.01154,
+                    "JA": 0.02083, "JB": 0.18129, "JC": 0.23536, "JD": 0.07358, "JE": 0.01920, "JF": 0.00784,
+                },
+                "PHEV": {
+                    "A": 0.01110, "B": 0.01460, "C": 0.27342, "D": 0.08505, "E": 0.01994, "F": 0.03298,
+                    "JA": 0.00000, "JB": 0.07381, "JC": 0.25640, "JD": 0.15015, "JE": 0.05942, "JF": 0.02312,
+                },
+                "Diesel": {
+                    "A": 0.01439, "B": 0.09332, "C": 0.28878, "D": 0.11207, "E": 0.03046, "F": 0.03703,
+                    "JA": 0.01493, "JB": 0.15551, "JC": 0.21596, "JD": 0.02153, "JE": 0.00822, "JF": 0.00779,
+                },
+                "Petrol": {
+                    "A": 0.07565, "B": 0.31560, "C": 0.15929, "D": 0.03751, "E": 0.00852, "F": 0.03546,
+                    "JA": 0.03222, "JB": 0.19392, "JC": 0.12687, "JD": 0.01026, "JE": 0.00334, "JF": 0.00135,
+                },
             },
-            # [NEW, pilot] Future segment-mix uncertainty: 10% lower / 15% upper relative
-            # spread around each of the 12 mode values above, e.g. "A"'s Triangular is
-            # (0.11599*0.90, 0.11599, 0.11599*1.15) = (0.10439, 0.11599, 0.13339).
-            # Applied only to years >= scenario_start_year (2026) -- real historic
-            # segment-mix data stays fully deterministic. Not yet set for the other four
-            # segment-mix scenarios (BEV_A_F, BEV_JA_JF, BEV_large, BEV_small) -- BAU is
-            # a deliberate pilot; extend the same pattern to those once this is verified.
-            inflow_segment_share_spread=AsymmetricSpread(lower=0.10, upper=0.15),
+            # [UPDATED, pilot -> extended] Future segment-mix uncertainty: same 10% lower /
+            # 15% upper relative spread BEV already had, now applied identically to all
+            # five drivetrains above -- no differentiated per-drivetrain uncertainty range
+            # exists yet (same placeholder-spread situation as
+            # StockFlowParams.lifetime_scale_lambda_relative_spread's uniform 0.15), so
+            # reusing BEV's already-reviewed pilot value everywhere is the defensible
+            # default until real per-drivetrain ranges are available. Applied only to years
+            # >= scenario_start_year (2026); real historic segment-mix data (all five
+            # drivetrains) stays fully deterministic. Not yet set for the four BEV
+            # segment-profile scenarios below (BEV_A_F, BEV_JA_JF, BEV_large, BEV_small) --
+            # those still use the single-drivetrain fields with no spread; extend the same
+            # pattern to those if/when wanted.
+            inflow_segment_share_spread_by_drv={
+                "BEV": AsymmetricSpread(lower=0.10, upper=0.15),
+                "HEV": AsymmetricSpread(lower=0.10, upper=0.15),
+                "PHEV": AsymmetricSpread(lower=0.10, upper=0.15),
+                "Diesel": AsymmetricSpread(lower=0.10, upper=0.15),
+                "Petrol": AsymmetricSpread(lower=0.10, upper=0.15),
+            },
         ),
         "BEV_only": ScenarioSpec(
             name="BEV_only",
