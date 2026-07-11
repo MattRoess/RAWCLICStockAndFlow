@@ -40,6 +40,33 @@ REMOVED (dead code, confirmed unused after the vectorization refactor that intro
 from the pre-vectorization implementation; their logic is now inlined (and
 array-vectorized) directly inside `_run_cohort_recurrence`. Grepped for call sites
 before removing -- none existed outside their own definitions and docstring mentions.
+
+[NEW] `hard_zero_inflow_from_year` -- a hard policy override, threaded through
+`_run_cohort_recurrence`/`run_cohort_survival_model`/`run_cohort_survival_monte_carlo`.
+NOT a mathematical/statistical correction of the residual-inflow formula's output --
+a deterministic if/else tied to a real, external, documented fact (e.g. a legal
+ICE-sales ban), applied identically to every draw. `None` (the default everywhere)
+is byte-identical to before this parameter existed -- verified via regression test.
+See `params_schema.py`'s `StockFlowParams.hard_zero_inflow_from_year_by_drv` for the
+full rationale and where the real value (drivetrain, year) is actually configured --
+nothing is hardcoded in this file. The pre-override raw residual is never discarded:
+it's always tracked separately (`inflow_pre_hard_zero_override_by_year`/`_t`/
+`diag_df["inflow_pre_hard_zero_override"]`), whether or not the override is active.
+
+[NEW, step 3 of the agreed plan] `hard_zero_inflow_until_year` -- the MIRROR IMAGE
+of `hard_zero_inflow_from_year`: forces inflow to exactly 0 for every year STRICTLY
+BEFORE `hard_zero_inflow_until_year`, instead of every year at/after some year. Same
+"real, external, documented fact" treatment -- here, a real-world introduction year
+(e.g. BEV first sold in Europe in 2011: REMIND's own target_stock trajectory implies
+a nonzero BEV inflow before 2011, which is a modeling artifact, not a real fact --
+the residual formula has no notion of "this drivetrain didn't exist yet"). Both
+parameters can be set independently for the same drivetrain (a "born in year X, phased
+out at year Y" window) or independently for different drivetrains -- the two
+conditions are combined with OR: `hard_zero_active = (from_year condition) OR
+(until_year condition)`. `None` (the default everywhere) is byte-identical to before
+this parameter existed. Same "raw residual always tracked separately" guarantee as
+`hard_zero_inflow_from_year` -- see `params_schema.py`'s
+`StockFlowParams.hard_zero_inflow_until_year_by_drv`.
 """
 
 from __future__ import annotations
@@ -99,6 +126,8 @@ def _run_cohort_recurrence(
     backcast: BackcastState,
     negative_inflow_policy: str,
     keep_full_history: bool,
+    hard_zero_inflow_from_year: int | None = None,
+    hard_zero_inflow_until_year: int | None = None,
 ) -> dict[str, Any]:
     """
     THE ONLY PLACE THE COHORT-SURVIVAL MATH IS IMPLEMENTED. `shape_k`/`scale_lambda`
@@ -120,6 +149,23 @@ def _run_cohort_recurrence(
     treated as uncertain (there's currently no mechanism for that), so when its window
     is active, every draw uses the override's own (shape_k, scale_lambda) for that
     year, replacing whatever that draw's own sampled/point values would have given.
+
+    `hard_zero_inflow_from_year`: [NEW] a hard policy override, NOT a mathematical
+    correction -- see `params_schema.py`'s `StockFlowParams.hard_zero_inflow_from_
+    year_by_drv` for the full rationale. `None` (default) means no override, byte-
+    identical behavior to before this parameter existed. When set, for every year
+    `>= hard_zero_inflow_from_year`, `inflow_applied` is forced to exactly 0 --
+    overriding whatever `negative_inflow_policy` would otherwise have computed --
+    and the cohort simply decays via ordinary Weibull attrition from then on. The
+    raw, would-have-been residual is NEVER discarded: it's always tracked separately
+    (`inflow_pre_hard_zero_override_by_year`/`_t`), regardless of whether the
+    override is active, so nothing is hidden.
+
+    `hard_zero_inflow_until_year`: [NEW, step 3] the mirror image -- when set, for
+    every year `< hard_zero_inflow_until_year`, `inflow_applied` is forced to exactly
+    0 instead (a drivetrain that had not been introduced yet). Combines with
+    `hard_zero_inflow_from_year` via OR if both are set for the same drivetrain. Same
+    "raw residual always tracked separately, `None` is byte-identical" guarantees.
     """
     n_draws = int(shape_k.shape[0])
     tau_back = backcast.tau_back
@@ -147,6 +193,12 @@ def _run_cohort_recurrence(
     # isolated endpoint histogram.
     inflow_by_year = np.zeros((n_t, n_draws), dtype=float)
     out_survival_by_year = np.zeros((n_t, n_draws), dtype=float)
+    # [NEW] Always tracked, same cost class as inflow_by_year above -- the raw
+    # residual BEFORE any hard_zero_inflow_from_year override is applied. Equal to
+    # inflow_by_year whenever no override is active (or none is configured for this
+    # drivetrain); diverges only in override years, where inflow_by_year becomes 0
+    # but this array still shows what the residual formula would have implied.
+    inflow_pre_hard_zero_override_by_year = np.zeros((n_t, n_draws), dtype=float)
 
     if negative_inflow_policy not in ("report_only", "clip_to_target"):
         raise ValueError(
@@ -159,6 +211,7 @@ def _run_cohort_recurrence(
         stock_t_tau[0] = cohort_state
         outflow_surv_t_tau = np.zeros_like(stock_t_tau)
         inflow_t = np.zeros((n_t, n_draws), dtype=float)
+        inflow_pre_hard_zero_override_t = np.zeros((n_t, n_draws), dtype=float)
         outflow_surv_t = np.zeros((n_t, n_draws), dtype=float)
         outflow_excess_t = np.zeros((n_t, n_draws), dtype=float)
         outflow_total_t = np.zeros((n_t, n_draws), dtype=float)
@@ -232,21 +285,48 @@ def _run_cohort_recurrence(
             cohort_state[safe, :] = cohort_state[safe, :] * scale[safe, None]
             excess_outflow = np.where(safe, remaining_total - cohort_state.sum(axis=1), 0.0)
 
+        # [NEW] Hard-zero policy override -- applied AFTER negative_inflow_policy,
+        # overriding whatever that policy computed. Not a mathematical correction of
+        # inflow_raw: a deterministic if/else tied to an external fact (e.g. a real
+        # ICE-sales ban), same treatment for every draw. See docstring above and
+        # params_schema.py's StockFlowParams.hard_zero_inflow_from_year_by_drv for
+        # the full rationale. `inflow_raw` itself is untouched either way -- only
+        # what gets ADDED to the cohort (inflow_applied) and what gets RECORDED as
+        # "the" inflow for this year changes; the raw residual stays separately
+        # visible in inflow_pre_hard_zero_override_by_year/_t regardless.
+        # [NEW, step 3] hard_zero_inflow_until_year is the mirror image: forces the
+        # same zero-inflow override for every year BEFORE a drivetrain's real
+        # introduction year, instead of every year at/after some policy year. The two
+        # conditions are independent and combined via OR, so a drivetrain could in
+        # principle have both (a "born in year X, phased out in year Y" window),
+        # though as configured today only one or the other is ever set per drivetrain.
+        hard_zero_active = (
+            (hard_zero_inflow_from_year is not None and year >= hard_zero_inflow_from_year)
+            or (hard_zero_inflow_until_year is not None and year < hard_zero_inflow_until_year)
+        )
+        if hard_zero_active:
+            inflow_applied = np.zeros(n_draws, dtype=float)
+
         j_new = np.where(tau_back == year)[0]
         if j_new.size != 1:
             raise ValueError(f"Year {year} not found in tau_back range.")
         cohort_state[:, j_new[0]] += inflow_applied
-        # NOTE: `inflow_raw` (not `inflow_applied`) is what gets recorded for
-        # diagnostics below -- the raw, possibly-negative value stays visible
-        # regardless of policy, so switching policies never hides that a
-        # negative-inflow year occurred.
+        # NOTE: absent a hard_zero override, `inflow_raw` (not `inflow_applied`) is
+        # what gets recorded below -- the raw, possibly-negative value stays visible
+        # regardless of negative_inflow_policy, so switching policies never hides
+        # that a negative-inflow year occurred. With an ACTIVE hard_zero override,
+        # the recorded value becomes `inflow_applied` (== 0) instead, since for that
+        # year there is no real residual-inflow question left to report -- inflow is
+        # unconditionally 0 by policy. The pre-override raw residual is preserved
+        # separately either way (see inflow_pre_hard_zero_override_by_year/_t).
 
         cumulative_inflow += inflow_applied
         this_year_out_survival = out_surv.sum(axis=1)
         this_year_total_outflow = this_year_out_survival + excess_outflow
         cumulative_out_survival += this_year_total_outflow
 
-        inflow_by_year[i_t] = inflow_raw
+        inflow_by_year[i_t] = inflow_applied if hard_zero_active else inflow_raw
+        inflow_pre_hard_zero_override_by_year[i_t] = inflow_raw
         out_survival_by_year[i_t] = this_year_total_outflow
 
         if keep_full_history:
@@ -254,7 +334,8 @@ def _run_cohort_recurrence(
             year_out_tau = np.zeros((n_draws, n_cohorts), dtype=float)
             year_out_tau[:, valid] = out_surv
             outflow_surv_t_tau[i_t] = year_out_tau
-            inflow_t[i_t] = inflow_raw
+            inflow_t[i_t] = inflow_applied if hard_zero_active else inflow_raw
+            inflow_pre_hard_zero_override_t[i_t] = inflow_raw
             outflow_surv_t[i_t] = this_year_out_survival
             outflow_excess_t[i_t] = excess_outflow
             outflow_total_t[i_t] = this_year_total_outflow
@@ -264,6 +345,7 @@ def _run_cohort_recurrence(
         "cumulative_out_survival": cumulative_out_survival,
         "t": t,
         "inflow_by_year": inflow_by_year,
+        "inflow_pre_hard_zero_override_by_year": inflow_pre_hard_zero_override_by_year,
         "out_survival_by_year": out_survival_by_year,
         # [FIXED] `stock_t` (the prescribed target -- deterministic, identical for
         # every draw regardless of lifetime uncertainty; see module docstring in
@@ -279,7 +361,8 @@ def _run_cohort_recurrence(
         result.update({
             "tau_back": tau_back,
             "stock_t_tau": stock_t_tau, "outflow_surv_t_tau": outflow_surv_t_tau,
-            "inflow_t": inflow_t, "outflow_surv_t": outflow_surv_t,
+            "inflow_t": inflow_t, "inflow_pre_hard_zero_override_t": inflow_pre_hard_zero_override_t,
+            "outflow_surv_t": outflow_surv_t,
             "outflow_excess_t": outflow_excess_t, "outflow_total_t": outflow_total_t,
         })
     return result
@@ -294,6 +377,8 @@ def run_cohort_survival_model(
     lifetime_override: LifetimeOverride | None,
     backcast: BackcastState,
     negative_inflow_policy: str = "report_only",
+    hard_zero_inflow_from_year: int | None = None,
+    hard_zero_inflow_until_year: int | None = None,
 ) -> dict[str, pd.DataFrame]:
     """
     Single deterministic run for ONE (region, drivetrain) key -- a thin wrapper
@@ -307,6 +392,18 @@ def run_cohort_survival_model(
     "clip_to_target" -- see `apply_negative_inflow_policy()` above and
     `MATH_MODELS.md` §2.3 for the exact mechanics of both.
 
+    `hard_zero_inflow_from_year`: [NEW] `None` (default) preserves byte-identical
+    behavior. See `_run_cohort_recurrence`'s docstring and `params_schema.py`'s
+    `StockFlowParams.hard_zero_inflow_from_year_by_drv` for the full rationale --
+    forces `flows_df["inflow"]` to exactly 0 from this year onward, while
+    `diag_df["inflow_pre_hard_zero_override"]` preserves what the raw residual
+    would have been, for every year, regardless of whether the override is active.
+
+    `hard_zero_inflow_until_year`: [NEW, step 3] the mirror image -- forces
+    `flows_df["inflow"]` to exactly 0 for every year BEFORE this one (a drivetrain
+    not yet introduced). `None` (default) preserves byte-identical behavior. See
+    `params_schema.py`'s `StockFlowParams.hard_zero_inflow_until_year_by_drv`.
+
     Returns a dict with keys: "stock_t_tau_df", "outflow_surv_df", "flows_df",
     "diag_df", "results_df".
     """
@@ -315,11 +412,14 @@ def run_cohort_survival_model(
         shape_k=np.array([base_shape_k], dtype=float), scale_lambda=np.array([base_scale_lambda], dtype=float),
         lifetime_override=lifetime_override, backcast=backcast,
         negative_inflow_policy=negative_inflow_policy, keep_full_history=True,
+        hard_zero_inflow_from_year=hard_zero_inflow_from_year,
+        hard_zero_inflow_until_year=hard_zero_inflow_until_year,
     )
     t, tau_back, stock_t = core["t"], core["tau_back"], core["stock_t"]
     stock_t_tau = core["stock_t_tau"][:, 0, :]
     outflow_surv_t_tau = core["outflow_surv_t_tau"][:, 0, :]
     inflow_t = core["inflow_t"][:, 0]
+    inflow_pre_hard_zero_override_t = core["inflow_pre_hard_zero_override_t"][:, 0]
     outflow_surv_t = core["outflow_surv_t"][:, 0]
     outflow_excess_t = core["outflow_excess_t"][:, 0]
     outflow_total_t = core["outflow_total_t"][:, 0]
@@ -350,6 +450,10 @@ def run_cohort_survival_model(
         "nas": stock_t - prev_stock_total, "out_survival": outflow_surv_t,
         "out_excess": outflow_excess_t, "out_total": outflow_total_t,
         "inflow_residual": inflow_t,
+        # [NEW] Always present, regardless of whether hard_zero_inflow_from_year is
+        # set for this drivetrain -- equal to "inflow_residual" in every year where
+        # no override is active. See module/StockFlowParams docstrings.
+        "inflow_pre_hard_zero_override": inflow_pre_hard_zero_override_t,
     }).set_index("year").iloc[1:]
 
     results_df = stock_df.join(diag_df, how="left")
@@ -372,6 +476,8 @@ def run_cohort_survival_monte_carlo(
     lifetime_override: LifetimeOverride | None,
     backcast: BackcastState,
     negative_inflow_policy: str = "report_only",
+    hard_zero_inflow_from_year: int | None = None,
+    hard_zero_inflow_until_year: int | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Many-draw run for ONE (region, drivetrain) key -- a thin wrapper around the SAME
@@ -384,8 +490,19 @@ def run_cohort_survival_monte_carlo(
     This is a documented simplification, not an oversight: it only affects the small
     initial stock at `t0`, not the forward-simulated majority of the horizon.
 
+    `hard_zero_inflow_from_year`: [NEW] `None` (default) preserves byte-identical
+    behavior. See `_run_cohort_recurrence`'s docstring for the full rationale --
+    applies identically to every draw (the override is not itself uncertain).
+
+    `hard_zero_inflow_until_year`: [NEW, step 3] the mirror image -- forces inflow
+    to 0 for every year before this one, instead of after. `None` (default)
+    preserves byte-identical behavior. See `params_schema.py`'s
+    `StockFlowParams.hard_zero_inflow_until_year_by_drv`.
+
     Returns {"cumulative_inflow": (n_draws,), "cumulative_out_survival": (n_draws,),
-    "t": (n_years,), "inflow_by_year": (n_years, n_draws), "out_survival_by_year":
+    "t": (n_years,), "inflow_by_year": (n_years, n_draws),
+    "inflow_pre_hard_zero_override_by_year": (n_years, n_draws) -- [NEW] the raw
+    residual before any override, always present, "out_survival_by_year":
     (n_years, n_draws), "stock_t": (n_years,) -- the prescribed target, deterministic,
     identical regardless of draw}. See `monte_carlo.sum_by_period()` for turning
     "inflow_by_year"/"out_survival_by_year" into cumulative sums over an arbitrary
@@ -396,6 +513,6 @@ def run_cohort_survival_monte_carlo(
         shape_k=np.asarray(shape_k_draws, dtype=float), scale_lambda=np.asarray(scale_lambda_draws, dtype=float),
         lifetime_override=lifetime_override, backcast=backcast,
         negative_inflow_policy=negative_inflow_policy, keep_full_history=False,
+        hard_zero_inflow_from_year=hard_zero_inflow_from_year,
+        hard_zero_inflow_until_year=hard_zero_inflow_until_year,
     )
-
-

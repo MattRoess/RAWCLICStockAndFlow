@@ -143,8 +143,21 @@ def prepare_eea_share_tables(
     start_year_model: int,
     end_year_model: int,
     country_scope: tuple[str, ...] | None = None,
+    introduction_year_by_drv: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
+    [NEW param, step 2 of the agreed plan] `introduction_year_by_drv`: e.g.
+    `params.disaggregation.introduction_year_by_drv` (`{"BEV": 2011, "HEV": 2000,
+    "PHEV": 2012}`). Fixes the SAME confirmed bug as `build_hev_phev_split` (see its
+    docstring), but here in `segment_shares_ext` (Drive Train x Segment shares) and
+    `liquids_shares_ext` (Diesel/Petrol shares) -- both previously filled leading
+    gaps via a blanket `.bfill()`, which would backfill a drivetrain's first real
+    EEA share value into years before it existed. `None` (default) preserves the
+    ORIGINAL `.bfill().ffill()` behavior exactly, for backward compatibility with
+    any caller that doesn't pass it. Diesel/Petrol are unaffected either way since
+    neither is in the default `introduction_year_by_drv` (both existed for the
+    entire modeled period).
+
     [FIXED] Previously a bare `pd.read_csv` -- if the file was missing, this failed
     deep inside pandas with a generic `FileNotFoundError` and no indication of what was
     actually expected. Now checks existence first and raises a clear, actionable error
@@ -256,7 +269,9 @@ def prepare_eea_share_tables(
         .sort_index()
         .reindex(seg_full_index)
         .groupby(level=["Drive Train", "Segment"], group_keys=False)
-        .apply(lambda frame: frame.bfill().ffill())
+        .apply(lambda frame: _fill_frame_with_introduction_year(
+            frame, frame.index.get_level_values("Drive Train")[0], introduction_year_by_drv,
+        ))
         .reset_index()
     )
 
@@ -280,7 +295,9 @@ def prepare_eea_share_tables(
         .sort_index()
         .reindex(drv_full_index)
         .groupby(level=["Drive Train"], group_keys=False)
-        .apply(lambda frame: frame.bfill().ffill())
+        .apply(lambda frame: _fill_frame_with_introduction_year(
+            frame, frame.index.get_level_values("Drive Train")[0], introduction_year_by_drv,
+        ))
         .reset_index()
     )
 
@@ -351,7 +368,148 @@ def build_two_way_split_wide(
     return wide.div(wide.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
 
 
-def build_hev_phev_split(eea_data: pd.DataFrame, years_full: pd.Index) -> pd.DataFrame:
+def _fill_share_with_introduction_year(
+    share: pd.Series, drv: str, introduction_year_by_drv: dict[str, int] | None,
+) -> pd.Series:
+    """
+    [NEW, resolves confirmed bug -- see build_hev_phev_split's docstring] Fill a
+    single drivetrain's Year-indexed "share" series for years with no real data.
+
+    THE MATH / LOGIC (deliberately NOT a single blanket fill direction):
+      1. `.ffill()` first -- carries the nearest EARLIER real value forward, through
+         any gap in the middle of the series, and past the LAST real year to the
+         end of the horizon. Unchanged from the original behavior; a reasonable
+         "assume no further change" extrapolation for gaps where the drivetrain is
+         already known to exist.
+      2. Any year STILL missing after that is, by construction, BEFORE this
+         drivetrain's first real data point. For those years specifically:
+           - If `introduction_year_by_drv` gives a real-world introduction year for
+             `drv`, and the year is BEFORE it: fill with exactly 0. This is a known
+             fact (the drivetrain did not exist yet), not an assumption -- e.g.
+             PHEV's share for 2005 is 0 even if EEA's first PHEV row is 2019.
+           - Otherwise (year >= introduction year, but still no real data -- a
+             genuine data-coverage gap, not an existence question; e.g. HEV
+             genuinely existed since 2000 but EEA's first HEV row is 2019): fall
+             back to `.bfill()` -- carry the nearest LATER real value backward.
+             This is the ONLY case that still uses the old (2005-2018 in the real
+             diagnostic run) fallback behavior, and only because there is no better
+             information available for that specific gap.
+      3. No `introduction_year_by_drv` entry for `drv` at all: falls back to plain
+         `.bfill()` for every remaining gap -- BYTE-IDENTICAL to the original
+         function's behavior for any drivetrain without a configured introduction
+         year (verified via regression test).
+    """
+    filled = share.ffill()
+    still_missing = filled.isna()
+    if not still_missing.any():
+        return filled
+
+    intro_year = (introduction_year_by_drv or {}).get(drv)
+    if intro_year is not None:
+        before_intro = pd.Series(filled.index.to_numpy() < intro_year, index=filled.index)
+        zero_mask = still_missing & before_intro
+        filled = filled.where(~zero_mask, 0.0)
+
+    return filled.bfill()
+
+
+def _fill_frame_with_introduction_year(
+    frame: pd.DataFrame,
+    drv: str,
+    introduction_year_by_drv: dict[str, int] | None,
+    year_level: str = "Year",
+) -> pd.DataFrame:
+    """
+    [NEW, step 2 of the agreed plan -- same confirmed bug as build_hev_phev_split,
+    now fixed in prepare_eea_share_tables's segment_shares_ext/liquids_shares_ext
+    construction] Generalizes `_fill_share_with_introduction_year` (written for a
+    single "share" Series) to an entire per-(Drive Train[, Segment]) group frame --
+    prepare_eea_share_tables fills THREE columns per group (raw Registrations, a
+    running total, and the actual share column), all via the same blanket
+    `.bfill().ffill()` as the original build_hev_phev_split bug. Applies the
+    IDENTICAL introduction-year logic to every column: years before a drivetrain's
+    real introduction year get a hard 0 (correct for Registrations too -- a
+    drivetrain that did not exist yet really did have 0 registrations, not just a
+    0 share), years after introduction but with no EEA data yet fall back to
+    bfill exactly as before.
+
+    `introduction_year_by_drv=None`, or `drv` missing from the dict, falls back to
+    plain `.bfill().ffill()` on the whole frame -- BYTE-IDENTICAL to the original
+    behavior (verified via regression test), same convention as
+    `_fill_share_with_introduction_year`.
+    """
+    if introduction_year_by_drv is None or drv not in introduction_year_by_drv:
+        return frame.bfill().ffill()
+
+    year_values = frame.index.get_level_values(year_level)
+    out = frame.copy()
+    for col in out.columns:
+        series = pd.Series(out[col].to_numpy(), index=year_values)
+        filled = _fill_share_with_introduction_year(series, drv, introduction_year_by_drv)
+        out[col] = filled.to_numpy()
+    return out
+
+
+def mask_inflow_before_introduction_year(
+    inflow_df: pd.DataFrame,
+    introduction_year_by_drv: dict[str, int] | None,
+    drv_col: str = "Drive Train",
+    year_col: str = "year",
+    value_col: str = "value",
+) -> pd.DataFrame:
+    """
+    [NEW, step 4 of the agreed plan] Post-hoc mask for
+    `flowdriven_model.py`'s `build_synthetic_pre_baseyear_inflows` output (the
+    1975-2004 synthetic pre-base-year backcast, used by 03_01_flowdriven.py) -- NOT
+    a change to that function's own math. Per explicit instruction ("We are not
+    touching the model"): applied AFTER `build_synthetic_pre_baseyear_inflows` runs,
+    to its OUTPUT only. Zero `value_col` for every row whose `year_col` is strictly
+    BEFORE that row's drivetrain's real introduction year (per
+    `introduction_year_by_drv`) -- e.g. BEV and PHEV, both introduced after 2004
+    (2011 and 2012), have their ENTIRE 1975-2004 synthetic backcast zeroed; HEV
+    (introduced 2000) keeps its 2000-2004 synthetic values and only 1975-1999
+    becomes 0. Same "logic not a function" treatment as every other
+    introduction-year fix in this plan (steps 1-3): a plain boolean mask + zero
+    assignment, not a mathematical/statistical smoothing or reallocation of any kind.
+
+    `introduction_year_by_drv=None` (default), or a drivetrain missing from it,
+    leaves those rows completely untouched -- BYTE-IDENTICAL to before this function
+    existed, for backward compatibility with any caller not yet passing it (e.g.
+    Diesel/Petrol, both absent from the default `introduction_year_by_drv`, are
+    always left alone -- they existed for the entire backcast window).
+
+    Returns a NEW DataFrame; does not mutate `inflow_df` in place.
+    """
+    if not introduction_year_by_drv:
+        return inflow_df
+    out = inflow_df.copy()
+    drv_intro_year = out[drv_col].map(introduction_year_by_drv)  # NaN where drv not in dict
+    pre_introduction = drv_intro_year.notna() & (out[year_col] < drv_intro_year)
+    out.loc[pre_introduction, value_col] = 0.0
+    return out
+
+
+def build_hev_phev_split(
+    eea_data: pd.DataFrame,
+    years_full: pd.Index,
+    introduction_year_by_drv: dict[str, int] | None = None,
+) -> pd.DataFrame:
+    """
+    `introduction_year_by_drv`: e.g. `params.disaggregation.introduction_year_by_drv`
+    (`{"HEV": 2000, "PHEV": 2012, ...}`). `None` (default) preserves the ORIGINAL
+    `.bfill().ffill()` behavior exactly, for backward compatibility.
+
+    [FIXED, confirmed via a real diagnostic run 2026-07-11] The original fill
+    (`.bfill().ffill()`, applied uniformly with no notion of when a drivetrain
+    actually existed) would carry PHEV's first real share value backward into
+    every year before it, including years before PHEV was ever sold -- e.g. if
+    EEA's first PHEV row is 2019, every year 2005-2018 would show 2019's PHEV
+    share, not 0. See `_fill_share_with_introduction_year`'s docstring for the
+    exact corrected logic, including the (real, confirmed) case where BOTH HEV and
+    PHEV's real EEA data starts the same year: years before HEV's own (earlier)
+    introduction year still correctly fall back to the nearest real data via
+    bfill, since HEV genuinely existed then even though EEA has no row for it.
+    """
     hyb = eea_data[eea_data["Drive Train"].isin(["HEV", "PHEV"])].copy()
     hyb_year = hyb.groupby(["Year", "Drive Train"])["Registrations"].sum().reset_index()
     hyb_year["share"] = hyb_year["Registrations"] / hyb_year.groupby("Year")["Registrations"].transform("sum")
@@ -368,10 +526,16 @@ def build_hev_phev_split(eea_data: pd.DataFrame, years_full: pd.Index) -> pd.Dat
         hyb_year.set_index(["Drive Train", "Year"])
         .sort_index()
         .reindex(full_index)
-        .groupby(level=["Drive Train"], group_keys=False)
-        .apply(lambda frame: frame.bfill().ffill())
-        .reset_index()
     )
+
+    filled_parts = []
+    for drv, frame in hyb_ext.groupby(level="Drive Train"):
+        share = frame["share"].droplevel("Drive Train").sort_index()
+        share = _fill_share_with_introduction_year(share, drv, introduction_year_by_drv)
+        out = share.rename("share").reset_index()
+        out["Drive Train"] = drv
+        filled_parts.append(out)
+    hyb_ext = pd.concat(filled_parts, ignore_index=True)
 
     return build_two_way_split_wide(
         hyb_ext,

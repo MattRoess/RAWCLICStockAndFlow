@@ -100,6 +100,7 @@ save_many = artifacts.save_many
 artifact_status = artifacts.artifact_status
 
 build_hev_phev_split = disagg.build_hev_phev_split
+mask_inflow_before_introduction_year = disagg.mask_inflow_before_introduction_year
 build_liquids_split_wide = disagg.build_liquids_split_wide
 build_segment_share_wide = disagg.build_segment_share_wide
 disaggregate_model_to_segments = disagg.disaggregate_model_to_segments
@@ -272,10 +273,26 @@ def main() -> dict[str, Any]:
     # `prepare_eea_share_tables`'s own docstring in disaggregation.py for the full
     # rationale and the documented, ACCEPTED limitation around uneven country-year
     # coverage even within this scope (NO from 2019, IS from 2018, HR from 2014).
-    eea_country_scope = tuple(p01.eu_countries) + ("NO", "IS")
+    # [FIXED, this round -- confirmed via a real diagnostic run] Was
+    # `tuple(p01.eu_countries) + ("NO", "IS")` -- `eu_countries` holds FULL COUNTRY
+    # NAMES ("Austria", "Belgium", ...), but EEA_final_data.csv's own "Country"
+    # column holds ISO2 codes ("AT", "BE", ...). Full names never matched ISO2
+    # codes, so this silently filtered down to ~0.5% of total registration volume
+    # (effectively just "NO"/"IS", which happen to already be 2-letter codes) --
+    # meaning segment shares, the Diesel/Petrol split, AND the HEV/PHEV split were
+    # all being computed from Norway+Iceland alone instead of the real EU-27. Now
+    # uses the dedicated `eu_countries_iso2` field (same 27 countries, ISO2 form) --
+    # `eu_countries` itself is untouched, since `clean_export_data` (data_prep.py)
+    # separately needs it in full-name form.
+    eea_country_scope = tuple(p01.eu_countries_iso2) + ("NO", "IS")
+    # [FIXED, step 2 of agreed plan, same confirmed bug as build_hev_phev_split]
+    # introduction_year_by_drv makes segment_shares_ext/liquids_shares_ext give a
+    # hard 0 for years before a drivetrain's real introduction year, instead of the
+    # old .bfill() backfilling a later real EEA share into years before it existed.
     eea_data, segment_shares_ext, liquids_shares_ext = prepare_eea_share_tables(
         output_dir=output_dir, start_year_model=start_year_model, end_year_model=end_year_model,
         country_scope=eea_country_scope,
+        introduction_year_by_drv=p03.introduction_year_by_drv,
     )
     # NOTE: `start_year_model`/`end_year_model` here come from params["03_disaggregation"]
     # (1900 / 2070). But immediately below, `start_year`/`model_end_year` are recomputed
@@ -315,7 +332,16 @@ def main() -> dict[str, Any]:
     )
 
     # Hybrid -> HEV/PHEV split, using a time-varying EEA-derived ratio.
-    split_hp = build_hev_phev_split(eea_data=eea_data, years_full=years_full)
+    # [FIXED, step 1 of agreed plan, confirmed via real diagnostic run] Pass
+    # introduction_year_by_drv so years before a drivetrain's real first sale get a
+    # hard 0 share instead of the old .bfill() backfilling a later real value into
+    # years before it existed (e.g. PHEV, first sold 2012, no longer shows a nonzero
+    # share in 2005). See disaggregation.py's _fill_share_with_introduction_year for
+    # the exact logic, including the HEV/PHEV-same-EEA-start-year case.
+    split_hp = build_hev_phev_split(
+        eea_data=eea_data, years_full=years_full,
+        introduction_year_by_drv=p03.introduction_year_by_drv,
+    )
     split_hybrid_inflow_afterwards(matrices_by_key=matrices_by_key, split_hp=split_hp, region="EUR", base_drv="Hybrid")
     split_hybrid_outflows_afterwards(matrices_by_key=matrices_by_key, split_hp=split_hp, region="EUR", base_drv="Hybrid")
 
@@ -440,6 +466,16 @@ def main() -> dict[str, Any]:
         base_year=BASE_YEAR, backcast_start_year=BACKCAST_START_YEAR,
         group_cols=["Region", "Drive Train", "Segment"], value_col="value",
     )
+    # [FIXED, step 4 of the agreed plan] Post-hoc zero out any (Drive Train, year)
+    # row in the 1975-2004 synthetic backcast that falls before that drivetrain's
+    # real introduction year -- e.g. BEV and PHEV (introduced 2011/2012, both after
+    # 2004) have their ENTIRE synthetic backcast zeroed; HEV (introduced 2000) keeps
+    # 2000-2004 and only 1975-1999 is zeroed. The model itself
+    # (build_synthetic_pre_baseyear_inflows) is untouched -- this masks its OUTPUT
+    # only. See disaggregation.py's mask_inflow_before_introduction_year.
+    synthetic_pre_2005_inflows = mask_inflow_before_introduction_year(
+        synthetic_pre_2005_inflows, introduction_year_by_drv=p03.introduction_year_by_drv,
+    )
 
     # -----------------------------------------------------------------------
     # Run the FLOW-DRIVEN model
@@ -544,6 +580,18 @@ def main() -> dict[str, Any]:
     #
     # Uncertainty spreads (`unknown_whereabouts_share_std`, `export_share_std`) come
     # from `params.stock_flow` -- nothing hardcoded here.
+    #
+    # [FIXED, step 5 of the agreed plan] The `run_cohort_survival_monte_carlo` call
+    # below now also passes `hard_zero_inflow_from_year`/`hard_zero_inflow_until_year`
+    # (from `params.stock_flow`, same `.get(drivetrain)` pattern as
+    # `02_stockdriven.py`'s own MC call) -- previously omitted here, meaning this
+    # block's re-derived per-year `out_survival_by_year` (and the collected/export/
+    # unknown bands built from it) would silently diverge from what stage 02 actually
+    # computed and persisted for Liquids/Hybrid (post-2050 hard zero) and BEV
+    # (pre-2011 hard zero), even though it's regenerated from the SAME saved
+    # scale_lambda draws. See `params_schema.py`'s
+    # `StockFlowParams.hard_zero_inflow_from_year_by_drv`/`hard_zero_inflow_until_
+    # year_by_drv` for the full rationale.
     # -----------------------------------------------------------------------
     if params.monte_carlo.enabled:
         try:
@@ -628,6 +676,20 @@ def main() -> dict[str, Any]:
                     shape_k_draws=np.full(n_draws, base_shape_k), scale_lambda_draws=scale_lambda_draws,
                     lifetime_override=p02.lifetime_override_by_drv.get(drivetrain), backcast=backcast,
                     negative_inflow_policy=p02.negative_inflow_policy,
+                    # [FIXED, step 5 of the agreed plan] This block RE-RUNS
+                    # run_cohort_survival_monte_carlo to regenerate a per-year band
+                    # from the SAME saved scale_lambda draws -- it's only a faithful
+                    # reproduction of stage 02's own run if EVERY argument that
+                    # affects the cohort trajectory matches, including the hard-zero
+                    # overrides. Without these two, this re-derived out_survival_by_
+                    # year (and the collected/export/unknown bands built from it)
+                    # would silently diverge from what 02_stockdriven.py actually
+                    # computed and persisted for Liquids/Hybrid (post-2050) and BEV
+                    # (pre-2011) -- the exact kind of dragged inconsistency this
+                    # whole plan exists to avoid. Same params.stock_flow fields,
+                    # same .get(drivetrain) pattern, as 02_stockdriven.py's own call.
+                    hard_zero_inflow_from_year=p02.hard_zero_inflow_from_year_by_drv.get(drivetrain),
+                    hard_zero_inflow_until_year=p02.hard_zero_inflow_until_year_by_drv.get(drivetrain),
                 )
                 # (n_years, n_draws) x (n_draws,) broadcasts correctly: each draw's own
                 # share applies to that same draw's every year.
@@ -787,34 +849,22 @@ def main() -> dict[str, Any]:
                 ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
             axes[-1].set_xlabel("Year")
             plt.tight_layout(rect=[0, 0, 0.85, 1])
-            fig_path = fig_dir / "03_monte_carlo_flows_over_time.png"
+            # [FIXED, this round] Renamed from "03_monte_carlo_flows_over_time.png" --
+            # missing the stage number, inconsistent with this same file's sibling
+            # output "03_01_monte_carlo_sensitivity_tornado.png". Confirmed with the
+            # user.
+            fig_path = fig_dir / "03_01_monte_carlo_flows_over_time.png"
             fig.savefig(fig_path, dpi=150, bbox_inches="tight")
             print(f"Saved diagnostic plot: {fig_path}")
 
-            # -----------------------------------------------------------------------
-            # Plot 2: cumulative-by-2070 histogram, EU total collected -- "what's the
-            # total by the end of the horizon", complementing plot 1's "how does the
-            # uncertainty evolve year by year".
-            # -----------------------------------------------------------------------
-            fig, ax = plt.subplots(figsize=(9, 5.5))
-            edges = np.array(s["bin_edges"])
-            freqs = np.array(s["frequencies"])
-            ax.bar((edges[:-1] + edges[1:]) / 2, freqs, width=np.diff(edges), color="#4a7fb5", alpha=0.85)
-            ax.axvline(s["mean"], color="black", linewidth=1.4, label=f"mean={s['mean']:.1f}")
-            ax.axvline(s["median"], color="#2b8a3e", linewidth=1.2, linestyle="-.", label=f"median={s['median']:.1f}")
-            ax.axvline(s["mode"], color="#e0793c", linewidth=1.2, linestyle=":", label=f"mode={s['mode']:.1f}")
-            ax.axvline(s["p2_5"], color="black", linestyle="--", linewidth=1.0, label=f"P2.5={s['p2_5']:.1f}")
-            ax.axvline(s["p97_5"], color="black", linestyle="--", linewidth=1.0, label=f"P97.5={s['p97_5']:.1f}")
-            ax.set_title(f"Monte Carlo: EU-total cumulative collected volume through {end_year_model} (n={n_draws:,})")
-            ax.set_xlabel("Cumulative collected [million vehicles]")
-            ax.set_ylabel("Draws")
-            ax.legend(frameon=False)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            plt.tight_layout()
-            fig_path = fig_dir / "03_monte_carlo_eu_collected.png"
-            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-            print(f"Saved diagnostic plot: {fig_path}")
+            # [REMOVED, this round, confirmed with the user] "Plot 2" -- the EU-total
+            # cumulative-collected-by-{end_year_model} histogram (previously saved as
+            # "03_monte_carlo_eu_collected.png") is no longer generated. It used
+            # `s["bin_edges"]`/`s["frequencies"]` (EU_total__cumulative_collected's
+            # summarize_distribution() output) purely for this plot; that summary
+            # itself is still computed and saved in `summary_mc` either way (used
+            # elsewhere, e.g. the printed mean/median/P2.5/P97.5 line above), so nothing
+            # upstream needed to change -- only this figure's generation was deleted.
 
     return saved
 

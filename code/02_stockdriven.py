@@ -86,6 +86,70 @@ Right after `matrices_by_key` is built, this stage now generates and saves TWO c
   2. `02_flows_by_drivetrain_check.png` -- **NEW**: inflow (can go negative) and
      outflow (survival vs. excess) over time, per drivetrain -- the direct visual for
      this stage's core mechanism, not just its end result.
+
+[DISPLAY-ONLY FIX, this round] Both `02_flows_by_drivetrain_check.png` and
+`02_monte_carlo_flows_over_time.png` (the Monte Carlo counterpart) now start plotting
+one year AFTER t0 instead of AT t0. Root cause, confirmed directly in
+`src/stockflow_model.py`'s `_run_cohort_recurrence`: its loop is `for i_t in
+range(1, n_t)`, so t0 (the backcast base year) never gets a computed inflow/outflow
+value -- every drivetrain's flows_df row 0 is exactly 0.0 by construction (the
+initial cohort-by-age snapshot, not a simulated flow). This was visually glaring for
+"Liquids" (its real t0 magnitude is large, ~20M/year) and invisible for drivetrains
+whose real t0 magnitude happens to already be near zero (e.g. BEV, Hybrid) -- same
+underlying cause everywhere, just only visible where the true value is large.
+Per explicit instruction, the model itself and `matrices_by_key`/`flows_df`/
+`summary_by_drv` (the actual saved artifacts, consumed by stage 03) are completely
+UNCHANGED -- t0's row is still there. Only `plot_flows_by_drivetrain()` and the
+Monte Carlo "Plot 1" block below crop their own x-range by one year at display time.
+Whether t0's true value is genuinely unknown (REMIND's first reported year) or
+recoverable was explicitly left open -- nothing is invented here either way.
+
+[NEW, this round] hard_zero_inflow_from_year_by_drv -- a real policy override, not a
+mathematical correction
+--------------------------------------------------------------------------------------
+Verified directly against real data (2026-07-11): for "Liquids", the residual-inflow
+formula manufactures a genuine positive "phantom" inflow from ~2047 onward (peaking
+~0.45M/year around 2054) -- confirmed to NOT be an interpolation artifact (the raw
+REMIND target_stock itself is smooth and monotonically declining throughout) and NOT
+tied to a preceding negative-inflow year (none occurred). It's a mechanical
+consequence of the model always being forced to hit target_stock exactly: once the
+aging survivor fleet's natural attrition outpaces the target's own decline rate near
+a low floor, the model invents new registrations to hold the target, with zero basis
+in reality. Per an actual documented external fact (a real ICE-sales ban), real
+inflow should be a hard 0 from the ban year on, and modeled stock should be allowed
+to fall below REMIND's target from that point.
+
+`params.stock_flow.hard_zero_inflow_from_year_by_drv` (default `{"Liquids": 2050}`)
+is threaded into both the deterministic call and the Monte Carlo call below. This is
+a single point of truth: 03_01_flowdriven.py and 03_02_adjustedflows.py read this
+stage's `flows_df["inflow"]` and only DISAGGREGATE it (Liquids -> Diesel/Petrol, then
+into segments) -- they never recompute it -- so a 0 here becomes a genuine 0
+downstream automatically, with no override logic duplicated in those files. Nothing
+is hidden: `diag_df` gains a new `"inflow_pre_hard_zero_override"` column showing
+what the raw residual would have been every year, whether or not the override is
+active for that drivetrain/year. See `stockflow_model.py` and `params_schema.py`'s
+`StockFlowParams.hard_zero_inflow_from_year_by_drv` for the full mechanism and
+rationale, and `diagnose_02_liquids_2050_bump.py` for the diagnostic that found this.
+
+[NEW, step 3 of the agreed plan] hard_zero_inflow_until_year_by_drv -- the mirror
+image, for real introduction years
+--------------------------------------------------------------------------------------
+Same principle, opposite direction: BEV was first sold in Europe in 2011 -- there
+were no BEV registrations before then. REMIND's own target_stock trajectory for BEV
+nonetheless implies a nonzero residual inflow before 2011 (the model has no notion
+of "this drivetrain didn't exist yet"), which is exactly the same kind of modeling
+artifact as the Liquids 2050+ phantom inflow, just at the START of a drivetrain's
+history instead of after a real-world cutoff.
+
+`params.stock_flow.hard_zero_inflow_until_year_by_drv` (default `{"BEV": 2011}`) is
+threaded into both the deterministic call and the Monte Carlo call below, alongside
+`hard_zero_inflow_from_year_by_drv` -- the two are independent and OR'd together
+inside `_run_cohort_recurrence`, so a drivetrain could in principle have both a start
+and an end cutoff. Same single-point-of-truth propagation to stage 03 as
+`hard_zero_inflow_from_year_by_drv` (03_01/03_02 only disaggregate this stage's
+`flows_df["inflow"]`, never recompute it). See `stockflow_model.py` and
+`params_schema.py`'s `StockFlowParams.hard_zero_inflow_until_year_by_drv` for the
+full mechanism.
 """
 
 from __future__ import annotations
@@ -160,6 +224,20 @@ def plot_flows_by_drivetrain(
     (bottom, stacked), per drivetrain in `region`. A negative dip in the top panel is
     exactly a negative-inflow year; a nonzero orange band in the bottom panel is
     "out_excess" from the "clip_to_target" policy (always zero under "report_only").
+
+    [DISPLAY-ONLY FIX, this round] The first plotted year is t0+1, not t0. Confirmed
+    directly in `src/stockflow_model.py`'s `_run_cohort_recurrence`: its loop is
+    `for i_t in range(1, n_t)`, so row 0 (year == t0, the backcast base year) of
+    `flows_df["inflow"]`/`["out_survival"]`/`["out_excess"]` is never computed -- it
+    stays at its zero-initialized value for EVERY drivetrain. This is the model
+    treating t0 as the initial cohort-by-age snapshot, not a simulated flow year --
+    not a data problem specific to any one drivetrain (it's just invisible for
+    drivetrains whose real t0 magnitude happens to already be near zero, and glaring
+    for one whose t0 magnitude is large, e.g. Liquids). Per explicit instruction: the
+    model and `matrices_by_key`/`flows_df` themselves are NOT touched -- t0's row is
+    still there, unchanged, in the underlying data and in every saved artifact. Only
+    this chart's x-range is cropped to start one year later, so the zero-by-
+    construction point is never drawn as if it were a real value.
     """
     keys = sorted(k for k in matrices_by_key if k[0] == region)
     fig, (ax_in, ax_out) = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
@@ -167,7 +245,7 @@ def plot_flows_by_drivetrain(
 
     for i, key in enumerate(keys):
         drivetrain = key[1]
-        flows = matrices_by_key[key]["flows_df"]
+        flows = matrices_by_key[key]["flows_df"].iloc[1:]  # drop t0 -- see docstring
         color = colors[i % len(colors)]
         ax_in.plot(flows.index, flows["inflow"], color=color, linewidth=1.6, label=drivetrain)
 
@@ -186,7 +264,7 @@ def plot_flows_by_drivetrain(
     focus_drv = max(totals, key=totals.get) if totals else None
     if focus_drv is not None:
         focus_key = next(k for k in keys if k[1] == focus_drv)
-        flows = matrices_by_key[focus_key]["flows_df"]
+        flows = matrices_by_key[focus_key]["flows_df"].iloc[1:]  # drop t0 -- see docstring
         ax_out.stackplot(
             flows.index, flows["out_survival"], flows["out_excess"],
             labels=["out_survival", "out_excess"], colors=["#4a7fb5", "#e0793c"],
@@ -284,6 +362,18 @@ def main() -> dict[str, Path]:
     LIFETIME_BY_DRV = p02.lifetime_by_drv
     LIFETIME_OVERRIDE_BY_DRV = p02.lifetime_override_by_drv
     negative_inflow_policy = p02.negative_inflow_policy
+    HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV = p02.hard_zero_inflow_from_year_by_drv
+    # [NEW] Real, external policy override (e.g. an actual ICE-sales ban) -- NOT a
+    # mathematical correction of the residual-inflow formula. See
+    # params_schema.py's StockFlowParams.hard_zero_inflow_from_year_by_drv for the
+    # full rationale. `.get(drivetrain)` returns None (no override) for every
+    # drivetrain not explicitly listed there -- byte-identical to before this
+    # mechanism existed.
+    HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV = p02.hard_zero_inflow_until_year_by_drv
+    # [NEW, step 3 of the agreed plan] The mirror image, e.g. BEV first sold in
+    # Europe in 2011 -- REMIND's target_stock trajectory implies a nonzero BEV
+    # inflow before then, a modeling artifact with no basis in reality. See
+    # params_schema.py's StockFlowParams.hard_zero_inflow_until_year_by_drv.
     # NOTE (organizational, unchanged from earlier review): `p02` also has
     # `unknown_whereabouts_share` and `export_share_by_drv`, neither read here --
     # both are actually consumed by stage 03. Declared under stock_flow for historical
@@ -318,6 +408,8 @@ def main() -> dict[str, Path]:
             lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain),
             backcast=backcast,
             negative_inflow_policy=negative_inflow_policy,
+            hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
+            hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
         )
 
         results_by_key[key] = out["results_df"]
@@ -444,6 +536,8 @@ def main() -> dict[str, Path]:
                 shape_k_draws=np.full(n_draws, base.shape_k), scale_lambda_draws=scale_lambda_draws,
                 lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain), backcast=backcast,
                 negative_inflow_policy=negative_inflow_policy,
+                hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
+                hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
             )
             draws_by_drv[drivetrain] = {
                 "scale_lambda": scale_lambda_draws,
@@ -566,10 +660,16 @@ def main() -> dict[str, Path]:
             color = colors[i % len(colors)]
             inb = summary_by_drv[drivetrain]["inflow_by_year_band"]
             oub = summary_by_drv[drivetrain]["out_survival_by_year_band"]
-            ax_in.plot(inb["years"], inb["median"], color=color, linewidth=1.6, label=drivetrain)
-            ax_in.fill_between(inb["years"], inb["p2_5"], inb["p97_5"], color=color, alpha=0.2)
-            ax_out.plot(oub["years"], oub["median"], color=color, linewidth=1.6, label=drivetrain)
-            ax_out.fill_between(oub["years"], oub["p2_5"], oub["p97_5"], color=color, alpha=0.2)
+            # [DISPLAY-ONLY FIX, this round -- same cause as plot_flows_by_drivetrain()
+            # above] inb["years"][0]/oub["years"][0] is t0; inflow_by_year/
+            # out_survival_by_year are always exactly 0.0 at t0 for every draw (same
+            # _run_cohort_recurrence loop, starts at i_t=1 -- see stockflow_model.py).
+            # `summary_by_drv` (the saved artifact, used by stage 03) is NOT touched --
+            # only the slice used for THIS plot skips index 0.
+            ax_in.plot(inb["years"][1:], inb["median"][1:], color=color, linewidth=1.6, label=drivetrain)
+            ax_in.fill_between(inb["years"][1:], inb["p2_5"][1:], inb["p97_5"][1:], color=color, alpha=0.2)
+            ax_out.plot(oub["years"][1:], oub["median"][1:], color=color, linewidth=1.6, label=drivetrain)
+            ax_out.fill_between(oub["years"][1:], oub["p2_5"][1:], oub["p97_5"][1:], color=color, alpha=0.2)
 
         ax_in.axhline(0, color="black", linewidth=0.8)
         ax_in.set_title(f"Monte Carlo: annual inflow, median + P2.5-P97.5 band (n={n_draws:,})", fontsize=12)

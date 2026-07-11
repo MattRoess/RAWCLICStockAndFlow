@@ -75,28 +75,6 @@ class DataPrepParams:
         "Malta", "Netherlands", "Poland", "Portugal", "Romania",
         "Slovakia", "Slovenia", "Spain", "Sweden",
     )
-    # [NEW] Same 27 countries as `eu_countries` above, but as ISO2 codes -- SEPARATE
-    # field, not a replacement. `eu_countries` (full names) is also used directly in
-    # `clean_export_data` (data_prep.py), filtering against `Exp_Name`/`Imp_Name`
-    # columns that are canonicalized to full names via NAME_MAP -- changing its
-    # representation would have broken that call site. This field exists ONLY for
-    # `prepare_eea_share_tables`'s `country_scope` (disaggregation.py), which filters
-    # EEA_final_data.csv's own "Country" column -- CONFIRMED via a real diagnostic
-    # run (2026-07-11) to contain ISO2 codes, not full names. Before this field
-    # existed, `03_01_flowdriven.py` passed `tuple(p01.eu_countries) + ("NO", "IS")`
-    # directly as `country_scope` -- since full country names never match ISO2 codes,
-    # that silently matched almost nothing (0.5% of total registration volume in the
-    # real file -- effectively just "NO"/"IS", which happen to already be 2-letter
-    # codes by coincidence), meaning segment shares, the Diesel/Petrol split, AND the
-    # HEV/PHEV split were all being computed from Norway+Iceland alone instead of the
-    # EU-27. Order matches `eu_countries` above 1:1, for easy cross-checking.
-    eu_countries_iso2: tuple[str, ...] = (
-        "AT", "BE", "BG", "HR", "CY", "CZ",
-        "DK", "EE", "FI", "FR", "DE", "GR",
-        "HU", "IE", "IT", "LV", "LT", "LU",
-        "MT", "NL", "PL", "PT", "RO",
-        "SK", "SI", "ES", "SE",
-    )
 
     remind_regions: tuple[str, ...] = ("DEU", "ECE", "ECS", "ENC", "ESC", "ESW", "EWN", "FRA", "UKI", "NEN")
     remind_technology: tuple[str, ...] = ("BEV", "Hybrid", "Liquids", "Gases", "FCEV")
@@ -149,14 +127,6 @@ class DataPrepParams:
             issues.append(f"data_prep.scenario={self.scenario!r} is not in scenario_list.")
         if self.export_min_year >= self.export_max_year_exclusive:
             issues.append("data_prep: export_min_year must be strictly before export_max_year_exclusive.")
-        if len(self.eu_countries_iso2) != len(self.eu_countries):
-            issues.append(
-                f"data_prep: eu_countries_iso2 has {len(self.eu_countries_iso2)} entries "
-                f"but eu_countries has {len(self.eu_countries)} -- they must list the same "
-                f"countries 1:1 (full name vs. ISO2 code)."
-            )
-        if len(set(self.eu_countries_iso2)) != len(self.eu_countries_iso2):
-            issues.append("data_prep: eu_countries_iso2 contains duplicate codes.")
         return issues
 
 
@@ -268,89 +238,6 @@ class StockFlowParams:
     # See 02_stockdriven.py's NEGATIVE_INFLOW_POLICIES for the implementation, and
     # HOW_TO_RUN_AND_VERIFY.md for how to verify either one.
 
-    hard_zero_inflow_from_year_by_drv: dict[str, int] = field(default_factory=lambda: {
-        "Liquids": 2050,
-        "Hybrid": 2050,
-    })
-    # [NEW] A hard, unconditional policy override -- NOT a mathematical/statistical
-    # correction of the residual-inflow formula's output. For a drivetrain listed here,
-    # from the given year onward, `run_cohort_survival_model`/`run_cohort_survival_
-    # monte_carlo` force `inflow_applied = 0` regardless of what
-    # `inflow(t) = target(t) - remaining_total(t)` computes -- no new registrations are
-    # added, the surviving cohort simply decays via ordinary Weibull attrition from
-    # that year on.
-    #
-    # "Hybrid" added 2026-07-11, same year (2050), per direct visual confirmation
-    # against the real 02_flows_by_drivetrain_check.png chart -- the same
-    # near-zero-then-small-bump shape identified and numerically traced for "Liquids"
-    # is also visible on Hybrid's own inflow line. UNLIKE Liquids, this one has NOT
-    # been separately traced line-by-line against diag_df/target_stock numbers (no
-    # diagnostic run was requested for Hybrid) -- applied directly on your
-    # confirmation that the same real-world policy applies. Re-run
-    # diagnose_02_liquids_2050_bump.py with DRIVETRAIN="Hybrid" if you want the same
-    # numeric trace as Liquids got before trusting this by eye alone.
-    #
-    # WHY THIS EXISTS: verified directly against real data (2026-07-11 diagnostic run)
-    # that for "Liquids", the residual formula manufactures a genuine, non-trivial
-    # POSITIVE "phantom" inflow from ~2047 onward (peaking ~0.45M/year around 2054),
-    # purely because natural attrition on the aging survivor fleet removes stock FASTER
-    # than REMIND's own (smooth, monotonically-declining, NOT an interpolation
-    # artifact -- separately confirmed) target is falling. The model has no way to let
-    # modeled stock undershoot target, so it invents new-vehicle inflow to hold the
-    # target exactly -- with zero basis in any actual registration. Per an actual
-    # legal ICE-sales ban (a real, documented external fact, not a data-fitting
-    # assumption), real inflow should be a hard 0 from the ban year on, and modeled
-    # stock should be ALLOWED to fall below REMIND's target from that point -- REMIND's
-    # target simply stops being achievable/binding for this drivetrain past the ban.
-    #
-    # SCOPE, per explicit decision: applied here at stage 02, on the aggregate
-    # "Liquids" category, BEFORE the Diesel/Petrol split happens in 03_01_flowdriven.py
-    # -- a single point of truth. 03_01 and 03_02 read stage 02's `flows_df["inflow"]`
-    # and only DISAGGREGATE it (never recompute it) for years from the base year
-    # onward, so a 0 here becomes a genuine 0 for both Diesel and Petrol downstream,
-    # automatically, without any override logic duplicated in those files.
-    #
-    # NOTHING IS HIDDEN: `run_cohort_survival_model`'s diag_df gains a new
-    # "inflow_pre_hard_zero_override" column holding what the raw residual would have
-    # been absent this override, for every year -- so the "phantom demand" REMIND's
-    # target implies stays fully inspectable, it's just no longer treated as real.
-    #
-    # Empty dict (`{}`) for a drivetrain not listed here means no override -- byte-
-    # identical behavior to before this field existed (verified via regression test in
-    # stockflow_model.py's own test suite).
-
-    hard_zero_inflow_until_year_by_drv: dict[str, int] = field(default_factory=lambda: {
-        "BEV": 2011,
-    })
-    # [NEW, step 3 of the agreed plan] The mirror image of
-    # `hard_zero_inflow_from_year_by_drv`: for a drivetrain listed here, for every
-    # year BEFORE the given year, `run_cohort_survival_model`/`run_cohort_survival_
-    # monte_carlo` force `inflow_applied = 0` -- a drivetrain that had not been
-    # introduced yet cannot have had real registrations, no matter what
-    # `inflow(t) = target(t) - remaining_total(t)` computes from REMIND's own
-    # target_stock trajectory.
-    #
-    # "BEV": 2011 -- first BEV sold in Europe in 2011, per direct user confirmation.
-    # (Also confirmed by the user, but NOT YET WIRED as of this dict: "PHEV first
-    # sold in 2012", "HEV before 2000 is 0" -- both apply to the HEV/PHEV SPLIT within
-    # the "Hybrid" aggregate, which only exists from 03_01_flowdriven.py onward
-    # (stage 02 only tracks "Hybrid" as a whole, not HEV/PHEV separately) -- see
-    # `disaggregation.py`'s `introduction_year_by_drv` / `build_hev_phev_split` (step
-    # 1 of this plan) for where those two are actually enforced; they do NOT belong
-    # in this stage-02-only dict, since stage 02 has no "HEV"/"PHEV" key to begin with.
-    #
-    # SCOPE / propagation: same single-point-of-truth mechanism as
-    # `hard_zero_inflow_from_year_by_drv` -- applied here at stage 02, before
-    # 03_01_flowdriven.py/03_02_adjustedflows.py disaggregate stage 02's own
-    # `flows_df["inflow"]` (they never recompute it), so a 0 here becomes a genuine 0
-    # downstream automatically. `diag_df["inflow_pre_hard_zero_override"]` preserves
-    # what the raw residual would have been for every year, whether or not this
-    # override is active for that drivetrain/year -- nothing is hidden.
-    #
-    # Empty dict (`{}`) for a drivetrain not listed here means no override -- byte-
-    # identical behavior to before this field existed (verified via regression test in
-    # stockflow_model.py's own test suite).
-
     # -------------------------------------------------------------------------
     # Monte Carlo uncertainty around the point estimates above.
     # -------------------------------------------------------------------------
@@ -418,39 +305,6 @@ class StockFlowParams:
                 f"stock_flow.negative_inflow_policy={self.negative_inflow_policy!r} is "
                 f"not one of ['report_only', 'clip_to_target']."
             )
-
-        for drv, year in self.hard_zero_inflow_from_year_by_drv.items():
-            if drv not in lifetime_drvs:
-                issues.append(
-                    f"stock_flow.hard_zero_inflow_from_year_by_drv has key {drv!r}, which "
-                    f"is not a drivetrain present in lifetime_by_drv ({sorted(lifetime_drvs)})."
-                )
-            if not isinstance(year, int) or year < 1900:
-                issues.append(
-                    f"stock_flow.hard_zero_inflow_from_year_by_drv[{drv!r}] = {year!r} must "
-                    f"be a plausible calendar year (int >= 1900)."
-                )
-
-        for drv, year in self.hard_zero_inflow_until_year_by_drv.items():
-            if drv not in lifetime_drvs:
-                issues.append(
-                    f"stock_flow.hard_zero_inflow_until_year_by_drv has key {drv!r}, which "
-                    f"is not a drivetrain present in lifetime_by_drv ({sorted(lifetime_drvs)})."
-                )
-            if not isinstance(year, int) or year < 1900:
-                issues.append(
-                    f"stock_flow.hard_zero_inflow_until_year_by_drv[{drv!r}] = {year!r} must "
-                    f"be a plausible calendar year (int >= 1900)."
-                )
-            from_year = self.hard_zero_inflow_from_year_by_drv.get(drv)
-            if from_year is not None and isinstance(year, int) and from_year <= year:
-                issues.append(
-                    f"stock_flow.hard_zero_inflow_from_year_by_drv[{drv!r}] = {from_year!r} "
-                    f"is <= hard_zero_inflow_until_year_by_drv[{drv!r}] = {year!r} -- this "
-                    f"would zero EVERY year for {drv!r} (the 'from' window and the 'until' "
-                    f"window overlap/cover the whole horizon), which is almost certainly not "
-                    f"intended."
-                )
 
         for name, mapping in (
             ("export_share_by_drv", self.export_share_by_drv),
@@ -851,37 +705,10 @@ class DisaggregationParams:
     # place; no other code change is needed either way.
     synthetic_eea_seed: int = 42
 
-    introduction_year_by_drv: dict[str, int] = field(default_factory=lambda: {
-        "BEV": 2011, "HEV": 2000, "PHEV": 2012,
-    })
-    # [NEW] Real-world first year each drivetrain was ever sold -- a documented
-    # external fact, not a data-fitting assumption. Confirmed with you directly
-    # (2026-07-11). Used in TWO places, both needing the SAME single source of
-    # truth:
-    #   1. `build_hev_phev_split` (disaggregation.py): for a (drivetrain, year) with
-    #      no real EEA registration data, a year BEFORE that drivetrain's
-    #      introduction year is treated as exactly 0 (known fact -- it didn't exist
-    #      yet), rather than backfilled from whenever real data happens to start.
-    #      Years AT/AFTER the introduction year but still missing data (a genuine
-    #      data-coverage gap, not an existence question) still fall back to the old
-    #      nearest-available-real-value behavior -- there's no better information
-    #      for that case.
-    #   2. The synthetic 1975-2004 pre-base-year backcast (03_01_flowdriven.py):
-    #      masks any backcast row before a drivetrain's introduction year to 0.
-    # "BEV" is not itself split by build_hev_phev_split (that function only handles
-    # HEV/PHEV) -- its entry here is for the stage-02 "before year" mechanism and
-    # the backcast masking (item 2 above), not this function.
-
     def validate(self) -> list[str]:
         issues: list[str] = []
         if self.start_year_model >= self.end_year_model:
             issues.append("disaggregation: start_year_model must be strictly before end_year_model.")
-        for drv, year in self.introduction_year_by_drv.items():
-            if not isinstance(year, int) or year < 1900:
-                issues.append(
-                    f"disaggregation.introduction_year_by_drv[{drv!r}] = {year!r} must be "
-                    f"a plausible calendar year (int >= 1900)."
-                )
         return issues
 
 

@@ -166,6 +166,7 @@ from src.monte_carlo import summarize_distribution, sensitivity_correlations, pl
 load_many = artifacts.load_many
 save_many = artifacts.save_many
 plot_flows_split_collected_unknown_all_trackers = plotting.plot_flows_split_collected_unknown_all_trackers
+plot_flows_split_collected_unknown_from_tracker = plotting.plot_flows_split_collected_unknown_from_tracker
 
 
 # ---------------------------------------------------------------------------
@@ -1040,22 +1041,93 @@ def main() -> dict[str, Any]:
     print("Saved lifetime/loss/stock scenario artifacts (C6 fix):", saved_other_scenarios)
 
     # -----------------------------------------------------------------------
-    # Diagnostic plot: inflow/outflow split, ALL 11 scenarios at once -- integrated
-    # here (not a separate script), since this is exactly the step where every
-    # scenario's tracker is available. This is also the most direct visual
-    # confirmation that the C6 fix actually produced 5 genuinely different scenarios,
-    # not 5 more silent copies of BAU.
+    # [CHANGED, this round -- confirmed with the user] Diagnostic plot: inflow/
+    # outflow split, ONE FULL A4-LANDSCAPE PNG PER ACTIVE SCENARIO -- previously a
+    # single multi-scenario grid figure (`plot_flows_split_collected_unknown_all_
+    # trackers`, all scenarios crammed into small subplots). Now one full-page
+    # figure per scenario (`03_02_flows_<scenario>.png`), starting at 1990 (not
+    # 2015), using the already-fixed drivetrain-colored `plot_flows_split_
+    # collected_unknown_from_tracker` (solid=inflow, dashed=total outflow, one
+    # color per drivetrain -- see plotting.py's module docstring). With
+    # `scenarios_to_run=None` now auto-detecting whatever is live in `params_
+    # schema.py`'s `scenarios` dict (see AdjustedFlowsParams), this loop
+    # automatically produces exactly one PNG per active scenario -- no count to
+    # keep in sync here.
     # -----------------------------------------------------------------------
     fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    fig_path = fig_dir / "03_02_flows_all_scenarios.png"
-    plot_flows_split_collected_unknown_all_trackers(
-        tracker_keyed_by_scenario=tracker_keyed_by_scenario,
-        region=materials_region,
-        show=False,
-        save_path=fig_path,
-    )
-    print(f"Saved diagnostic plot: {fig_path}")
+
+    A4_LANDSCAPE_INCHES = (11.69, 8.27)
+    flows_drivetrains = ("BEV", "Diesel", "Petrol", "PHEV", "HEV")
+    for scenario_name in active_scenario_names:
+        fig, ax = plt.subplots(figsize=A4_LANDSCAPE_INCHES)
+        plot_flows_split_collected_unknown_from_tracker(
+            tracker_keyed=tracker_keyed_by_scenario[scenario_name],
+            region=materials_region,
+            drivetrains=flows_drivetrains,
+            year_min=1990,
+            year_max=2070,
+            ax=ax,
+        )
+        ax.set_title(scenario_name, fontsize=13)
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Vehicles [million]")
+        drv_handles = [
+            plt.Line2D([0], [0], color=plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333"), lw=2)
+            for drv in flows_drivetrains
+        ]
+        style_handles = [
+            plt.Line2D([0], [0], color="black", lw=2, linestyle="-"),
+            plt.Line2D([0], [0], color="black", lw=2, linestyle="--"),
+        ]
+        ax.legend(
+            drv_handles + style_handles,
+            list(flows_drivetrains) + ["Inflow", "Total outflow"],
+            loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False,
+        )
+        plt.tight_layout(rect=[0, 0, 0.82, 1])
+        fig_path = fig_dir / f"03_02_flows_{scenario_name}.png"
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved diagnostic plot: {fig_path}")
+
+    # -----------------------------------------------------------------------
+    # [NEW, this round -- confirmed with the user] Detailed per-drivetrain inflow
+    # figures, 1975-2070: for EVERY active scenario, one separate figure per
+    # drivetrain (BEV/HEV/PHEV/Diesel/Petrol), summed over segments. Uses `inflow_
+    # by_scenario[name]` -- the same resolved (post drivetrain/segment-share-tweak
+    # and phase-out, if any) inflow every scenario's own simulation run above
+    # actually used, not a re-derivation.
+    # -----------------------------------------------------------------------
+    for scenario_name in active_scenario_names:
+        inflow_scn = inflow_by_scenario[scenario_name]
+        inflow_by_year_drv = (
+            inflow_scn[inflow_scn["Region"] == materials_region]
+            .groupby(["Drive Train", "year"], as_index=False)["value"].sum()
+        )
+        for drv in flows_drivetrains:
+            d = inflow_by_year_drv[
+                (inflow_by_year_drv["Drive Train"] == drv)
+                & (inflow_by_year_drv["year"] >= 1975)
+                & (inflow_by_year_drv["year"] <= 2070)
+            ].sort_values("year")
+            if d.empty:
+                print(f"Skipped inflow figure: no data for scenario={scenario_name!r}, drivetrain={drv!r}.")
+                continue
+            fig, ax = plt.subplots(figsize=(10, 6))
+            color = plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333")
+            ax.plot(d["year"], d["value"], color=color, linewidth=2)
+            ax.set_title(f"{scenario_name} / {drv}: inflow, 1975-2070", fontsize=12)
+            ax.set_xlabel("Year")
+            ax.set_ylabel("Inflow [million/year]")
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            plt.tight_layout()
+            fig_path = fig_dir / f"03_02_inflow_{scenario_name}_{drv}.png"
+            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"Saved diagnostic plot: {fig_path}")
 
     # -----------------------------------------------------------------------
     # Monte Carlo (opt-in via params.monte_carlo.enabled, default False -- does not
