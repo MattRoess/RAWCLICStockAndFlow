@@ -410,44 +410,6 @@ class ScenarioSpec:
     # `inflow_draws_by_group` parameter for how it's fed into the vectorized engine.
     inflow_segment_share_spread: AsymmetricSpread | float | None = None
 
-    # [NEW] Multi-drivetrain generalization of inflow_segment_shares_drivetrain/
-    # inflow_segment_shares_final/inflow_segment_share_spread above (which remain,
-    # unchanged, single-drivetrain fields used by the four BEV segment-profile
-    # scenarios below). Use THESE dict-keyed fields instead when a scenario needs to
-    # set a FUTURE segment-mix target (and optionally its Monte Carlo uncertainty) for
-    # MORE THAN ONE drivetrain at once -- e.g. BAU, which represents the realistic
-    # future segment mix for every drivetrain that has one, not just BEV.
-    #
-    # `inflow_segment_shares_final_by_drv[drv]` is exactly what
-    # `inflow_segment_shares_final` was for the single-drivetrain case: the FUTURE
-    # (year >= AdjustedFlowsParams.scenario_start_year) segment-mix target for THAT
-    # drivetrain, ramped in from the real historic mix the same way. Sparse: a
-    # drivetrain not present in this dict keeps its real historic mix, flat-
-    # extrapolated, with no override and no uncertainty -- same "missing means
-    # unchanged" convention as `lifetime_change_by_drv` etc.
-    #
-    # `inflow_segment_share_spread_by_drv[drv]` is the per-drivetrain Monte Carlo
-    # spread (same `AsymmetricSpread | float` semantics as `inflow_segment_share_
-    # spread`). A drivetrain present in `inflow_segment_shares_final_by_drv` but
-    # ABSENT from this dict gets a deterministic ramp with NO sampled uncertainty
-    # (03_02_adjustedflows.py's deterministic `tweak_inflow_segment_shares_within_
-    # drivetrain` call still applies; only the Monte Carlo draw is skipped for that
-    # drivetrain) -- this lets a scenario mix "some drivetrains get an uncertain
-    # future segment mix, others get a fixed one" without contradiction.
-    #
-    # Mutually exclusive with the single-drivetrain fields above, and with
-    # inflow_drivetrain_shares_final, on the SAME scenario (validated) -- a scenario
-    # picks one inflow-transform convention, not several at once.
-    #
-    # `03_02_adjustedflows.py`'s `main()` loops over this dict's keys, calling
-    # `tweak_inflow_segment_shares_within_drivetrain`/`sample_future_segment_share_
-    # inflow_draws` once per drivetrain and chaining/merging the results -- both
-    # functions already mask their effect to one drivetrain and pass every other row
-    # through untouched (confirmed from source), so looping over drivetrains is safe
-    # without any change to either function itself.
-    inflow_segment_shares_final_by_drv: dict[str, dict[str, float]] | None = None
-    inflow_segment_share_spread_by_drv: dict[str, AsymmetricSpread | float] | None = None
-
     # Sparse lifetime override: only drivetrains that actually change need an entry.
     lifetime_change_by_drv: dict[str, OpenEndedLifetimeChange] = field(default_factory=dict)
 
@@ -507,56 +469,6 @@ class ScenarioSpec:
                     f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread = "
                     f"{self.inflow_segment_share_spread} must be >= 0."
                 )
-        if self.inflow_segment_shares_final_by_drv is not None:
-            if self.inflow_segment_shares_final is not None or self.inflow_segment_shares_drivetrain is not None:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}']: both the single-drivetrain "
-                    f"inflow_segment_shares_final/inflow_segment_shares_drivetrain and the "
-                    f"multi-drivetrain inflow_segment_shares_final_by_drv are set -- use one "
-                    f"convention or the other, not both."
-                )
-            if self.inflow_drivetrain_shares_final is not None:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}']: both inflow_drivetrain_shares_final "
-                    f"and inflow_segment_shares_final_by_drv are set -- at most one inflow transform "
-                    f"should be."
-                )
-            for drv, shares in self.inflow_segment_shares_final_by_drv.items():
-                missing_segs = set(shares) - valid_segments
-                if missing_segs:
-                    issues.append(
-                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final_by_drv"
-                        f"['{drv}'] has unrecognized segments: {sorted(missing_segs)}."
-                    )
-                total = sum(shares.values())
-                if not (0.999 <= total <= 1.001):
-                    issues.append(
-                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final_by_drv"
-                        f"['{drv}'] sums to {total:.6f}, expected 1.0."
-                    )
-        if self.inflow_segment_share_spread_by_drv is not None:
-            if self.inflow_segment_shares_final_by_drv is None:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_share_spread_by_drv is "
-                    f"set but inflow_segment_shares_final_by_drv is None -- nothing to sample around."
-                )
-            else:
-                extra = set(self.inflow_segment_share_spread_by_drv) - set(self.inflow_segment_shares_final_by_drv)
-                if extra:
-                    issues.append(
-                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread_by_drv "
-                        f"has entries for drivetrains not in inflow_segment_shares_final_by_drv: {sorted(extra)}."
-                    )
-            for drv, spread in (self.inflow_segment_share_spread_by_drv or {}).items():
-                if isinstance(spread, AsymmetricSpread):
-                    issues += spread.validate(
-                        field_name=f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread_by_drv['{drv}']"
-                    )
-                elif spread < 0:
-                    issues.append(
-                        f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread_by_drv"
-                        f"['{drv}'] = {spread} must be >= 0."
-                    )
         for drv, change in self.lifetime_change_by_drv.items():
             if change.scale_lambda <= 0 or change.shape_k <= 0:
                 issues.append(
@@ -644,58 +556,19 @@ class AdjustedFlowsParams:
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
         "BAU": ScenarioSpec(
             name="BAU",
-            # [UPDATED] Migrated from the single-drivetrain inflow_segment_shares_drivetrain/
-            # inflow_segment_shares_final/inflow_segment_share_spread fields to the
-            # multi-drivetrain inflow_segment_shares_final_by_drv/inflow_segment_share_
-            # spread_by_drv fields -- BAU now carries a future segment-mix target (and
-            # Monte Carlo uncertainty) for all five segment-level drivetrains (BEV, HEV,
-            # PHEV, Diesel, Petrol), not just BEV. Every point estimate below is the REAL
-            # 2023 EU27+NO+IS-scoped EEA segment share for that drivetrain (see
-            # MATH_MODELS.md §3.2.1/§3.2.2 for the country-scope derivation) -- BEV's was
-            # already verified against real data; HEV/PHEV/Diesel/Petrol's were computed
-            # the identical way this round, via `build_segment_share_wide(segment_shares_ext)
-            # [drv].loc[2023]` under the same `country_scope`.
-            inflow_segment_shares_final_by_drv={
-                "BEV": {
-                    "A": 0.11599, "B": 0.07235, "C": 0.17037, "D": 0.06288, "E": 0.04190, "F": 0.02945,
-                    "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
-                },
-                "HEV": {
-                    "A": 0.10187, "B": 0.09933, "C": 0.17638, "D": 0.04487, "E": 0.02791, "F": 0.01154,
-                    "JA": 0.02083, "JB": 0.18129, "JC": 0.23536, "JD": 0.07358, "JE": 0.01920, "JF": 0.00784,
-                },
-                "PHEV": {
-                    "A": 0.01110, "B": 0.01460, "C": 0.27342, "D": 0.08505, "E": 0.01994, "F": 0.03298,
-                    "JA": 0.00000, "JB": 0.07381, "JC": 0.25640, "JD": 0.15015, "JE": 0.05942, "JF": 0.02312,
-                },
-                "Diesel": {
-                    "A": 0.01439, "B": 0.09332, "C": 0.28878, "D": 0.11207, "E": 0.03046, "F": 0.03703,
-                    "JA": 0.01493, "JB": 0.15551, "JC": 0.21596, "JD": 0.02153, "JE": 0.00822, "JF": 0.00779,
-                },
-                "Petrol": {
-                    "A": 0.07565, "B": 0.31560, "C": 0.15929, "D": 0.03751, "E": 0.00852, "F": 0.03546,
-                    "JA": 0.03222, "JB": 0.19392, "JC": 0.12687, "JD": 0.01026, "JE": 0.00334, "JF": 0.00135,
-                },
+            inflow_segment_shares_drivetrain="BEV",
+            inflow_segment_shares_final={
+                "A": 0.11599, "B": 0.07235, "C": 0.17037, "D": 0.06288, "E": 0.04190, "F": 0.02945,
+                "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
             },
-            # [UPDATED, pilot -> extended] Future segment-mix uncertainty: same 10% lower /
-            # 15% upper relative spread BEV already had, now applied identically to all
-            # five drivetrains above -- no differentiated per-drivetrain uncertainty range
-            # exists yet (same placeholder-spread situation as
-            # StockFlowParams.lifetime_scale_lambda_relative_spread's uniform 0.15), so
-            # reusing BEV's already-reviewed pilot value everywhere is the defensible
-            # default until real per-drivetrain ranges are available. Applied only to years
-            # >= scenario_start_year (2026); real historic segment-mix data (all five
-            # drivetrains) stays fully deterministic. Not yet set for the four BEV
-            # segment-profile scenarios below (BEV_A_F, BEV_JA_JF, BEV_large, BEV_small) --
-            # those still use the single-drivetrain fields with no spread; extend the same
-            # pattern to those if/when wanted.
-            inflow_segment_share_spread_by_drv={
-                "BEV": AsymmetricSpread(lower=0.10, upper=0.15),
-                "HEV": AsymmetricSpread(lower=0.10, upper=0.15),
-                "PHEV": AsymmetricSpread(lower=0.10, upper=0.15),
-                "Diesel": AsymmetricSpread(lower=0.10, upper=0.15),
-                "Petrol": AsymmetricSpread(lower=0.10, upper=0.15),
-            },
+            # [NEW, pilot] Future segment-mix uncertainty: 10% lower / 15% upper relative
+            # spread around each of the 12 mode values above, e.g. "A"'s Triangular is
+            # (0.11599*0.90, 0.11599, 0.11599*1.15) = (0.10439, 0.11599, 0.13339).
+            # Applied only to years >= scenario_start_year (2026) -- real historic
+            # segment-mix data stays fully deterministic. Not yet set for the other four
+            # segment-mix scenarios (BEV_A_F, BEV_JA_JF, BEV_large, BEV_small) -- BAU is
+            # a deliberate pilot; extend the same pattern to those once this is verified.
+            inflow_segment_share_spread=AsymmetricSpread(lower=0.10, upper=0.15),
         ),
         "BEV_only": ScenarioSpec(
             name="BEV_only",
@@ -922,8 +795,123 @@ class MaterialsParams:
     # confirm both are intentional once you can check against the segment taxonomy.
     average_battery_capacity_kwh: float = 60.0
 
+    # -----------------------------------------------------------------------
+    # Stage 04, part 1 REWRITE -- component-material (C-M) Monte Carlo
+    # composition (04_01_materials.py). Replaces the old bulk ELV_2010_2050.xlsx
+    # composition table's role for the materials stage with a component x
+    # material x drivetrain x segment x year MASS DISTRIBUTION [kg/vehicle]
+    # (mean/median/mode/std/P025/P975, plus a full 50-bin histogram for genuine
+    # Monte Carlo bootstrap sampling) -- not a single point estimate.
+    # -----------------------------------------------------------------------
+    composition_summary_file_name: str = "36_MonteCarlo_Summary.xlsx"
+    # [NEW] The ~10MB summary workbook, living in `data/raw/composition/`: one tab
+    # per drivetrain (componentCarPetrol/Diesel/BEV/HEV/PHEV/Other), columns
+    # `components, segment, year, variable, mean, median, mode, std, P025, P975`
+    # -- one row per (component, material) mass distribution for a given
+    # segment/year/drivetrain. `componentCarOther` is never read (out of scope,
+    # matches `drivetrains` below); `segment == "standard"` rows are dropped (a
+    # generic/non-segment-specific summary row, not used downstream). Feeds the
+    # SCALAR (deterministic) materials path's point estimate -- see
+    # `composition_scalar_statistic`.
+
+    composition_scalar_statistic: str = "mean"
+    # [NEW] Which column of `composition_summary_file_name` the scalar materials
+    # path multiplies vehicle counts by. One of "mean", "median", "mode"
+    # (validated). Defaults to "mean" -- change if the scalar path should track
+    # the median or mode instead.
+
+    histogram_file_name: str = "37_MonteCarlo_Histograms.xlsx"
+    # [NEW] The large (~260MB today, expected to grow toward ~5x once resolution
+    # moves from every-5-years to annual) histogram workbook, also in
+    # `data/raw/composition/`. Columns: `components, segment, year, variable,
+    # bin_lower, bin_upper, count, frequency` -- 50 contiguous, equal-width bins
+    # per (components, segment, year, variable) group within a sheet, `count`
+    # summing to the number of underlying draws (200,000 in the real data seen
+    # so far), `frequency` summing to 1.0. This is what the Monte Carlo path
+    # bootstraps composition draws from (see `bootstrap_composition_draws` in
+    # `04_01_materials.py`).
+
+    histogram_sheet_names_by_drv: dict[str, list[str]] = field(default_factory=lambda: {
+        "Petrol": ["componentCarPetrol_1", "componentCarPetrol_2"],
+        "Diesel": ["componentCarDiesel_1", "componentCarDiesel_2"],
+        "BEV": ["componentCarBEV"],
+        "HEV": ["componentCarHEV"],
+        "PHEV": ["componentCarPHEV"],
+    })
+    # [NEW] Explicit sheet-name mapping, NOT inferred from a naming pattern --
+    # some drivetrains' histogram data is split across multiple sheets (Excel's
+    # per-sheet row limit), with no guarantee that split follows a consistent
+    # numbering scheme as more time points get added. `Other` is deliberately
+    # absent (out of scope, matches `drivetrains` below). Extend this dict
+    # yourself as more sheets appear (e.g. once resolution moves to annual and a
+    # drivetrain needs a 3rd/4th sheet) -- no code change needed, just add the
+    # sheet name(s) here. Keys are validated against `drivetrains` below.
+
+    material_mc_time_resolution: str = "period"
+    # [NEW] Controls what vehicle-count granularity the Monte Carlo materials
+    # path combines composition draws against:
+    #   "period" (default) -- mc["by_group"][...]["periods"][(start,end)]
+    #                          ["cumulative_collected"], the SAME period-level
+    #                          draws stage 03_02 already computes. No extra MC
+    #                          cost beyond what 03_02 already pays.
+    #   "annual"           -- one set of material-mass draws PER YEAR, not just
+    #                          per requested period. Requires per-year vehicle-
+    #                          count draws upstream in 03_02 (collect_per_year=
+    #                          True, or many single-year output_periods entries)
+    #                          -- materially more expensive; only turn on once
+    #                          year-by-year material mass is actually needed.
+    #   "both"             -- compute both of the above.
+    # One of "period", "annual", "both" (validated).
+
+    materials_mc_n_draws: int = 20_000
+    # [NEW] Number of Monte Carlo draws for the MATERIALS-stage combination (vehicle-
+    # count bootstrap x composition bootstrap). Deliberately INDEPENDENT of
+    # `monte_carlo.n_draws` (stage 03_02's own resolution, 200,000 by default) -- since
+    # both sides of the materials combination are bootstrapped fresh from SAVED
+    # histograms/summaries (see the architecture note in `04_01_materials.py`; raw
+    # per-draw arrays from stage 03_02 are never persisted to disk), this is a free
+    # choice tuned purely for the materials stage's own speed/precision tradeoff.
+    # Confirmed with the user: start at 20,000 (verified on the real project: full
+    # BEV drivetrain, 936 (component, material, segment) groups, bootstrapped + combined
+    # in under a second at this size) -- must stay fully vectorized as this increases
+    # (it already is: one `rng.random(n_draws)` call per group, no per-draw Python loop).
+
+    materials_mc_seed: int | None = 42
+    # [NEW] Seed for the materials-stage bootstrap RNG stream. Kept SEPARATE from
+    # `monte_carlo.seed` (stage 03_02) and `monte_carlo.stockflow_seed` (stage 02) --
+    # same "one seed per stage" convention already used elsewhere in this file --
+    # so materials-stage randomness never accidentally correlates with (or depends on
+    # the exact draw sequence of) an earlier stage's MC run.
+
     def validate(self) -> list[str]:
         issues: list[str] = []
+        if self.materials_mc_n_draws <= 0:
+            issues.append(f"materials.materials_mc_n_draws={self.materials_mc_n_draws} must be positive.")
+        if self.composition_scalar_statistic not in {"mean", "median", "mode"}:
+            issues.append(
+                f"materials.composition_scalar_statistic={self.composition_scalar_statistic!r} "
+                f"is not one of ['mean', 'median', 'mode']."
+            )
+        if self.material_mc_time_resolution not in {"period", "annual", "both"}:
+            issues.append(
+                f"materials.material_mc_time_resolution={self.material_mc_time_resolution!r} "
+                f"is not one of ['period', 'annual', 'both']."
+            )
+        missing_histogram_drvs = set(self.drivetrains) - set(self.histogram_sheet_names_by_drv)
+        if missing_histogram_drvs:
+            issues.append(
+                f"materials.histogram_sheet_names_by_drv is missing drivetrain(s) present "
+                f"in drivetrains: {sorted(missing_histogram_drvs)}."
+            )
+        extra_histogram_drvs = set(self.histogram_sheet_names_by_drv) - set(self.drivetrains)
+        if extra_histogram_drvs:
+            issues.append(
+                f"materials.histogram_sheet_names_by_drv has drivetrain(s) not present in "
+                f"drivetrains: {sorted(extra_histogram_drvs)} -- these will never be read."
+            )
+        for drv, sheet_names in self.histogram_sheet_names_by_drv.items():
+            if not sheet_names:
+                issues.append(f"materials.histogram_sheet_names_by_drv['{drv}'] is empty -- needs at least one sheet name.")
         if self.composition_parameter_code not in {"m-c", "e-m"}:
             issues.append(
                 f"materials.composition_parameter_code={self.composition_parameter_code!r} "

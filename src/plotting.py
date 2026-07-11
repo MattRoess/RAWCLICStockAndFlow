@@ -6,6 +6,30 @@ Visualization library for the EVmodel pipeline (`src.plotting`).
 
 FIXES APPLIED THIS ROUND
 --------------------------
+- `plot_flows_split_collected_unknown_from_tracker` / `_all_trackers`: CONFIRMED BUG --
+  the previous version drew every drivetrain passed in `drivetrains` (5 of them, by
+  default: BEV, Diesel, Petrol, PHEV, HEV) onto the SAME axes using the SAME five
+  colors (one green for "inflow", one dark red for "total outflow", three reds for the
+  stacked collected/unknown/export areas) with NO per-drivetrain distinction at all.
+  Concretely: for a scenario like "BAU", the single panel was showing 5 overlapping
+  green inflow lines and 5 overlapping dark-red total-outflow lines on top of each
+  other in identical colors -- e.g. BEV/HEV/PHEV's much smaller numbers (correctly
+  ramping to 0 per their phase-out target years) tangled together visually with
+  Diesel/Petrol's much larger, healthy, non-zero numbers. This made it look like
+  something was badly wrong with Diesel/Petrol when in fact their underlying data was
+  fine (confirmed independently via `tracker_keyed` inspection) -- the chart itself just
+  couldn't show which line belonged to which drivetrain. This bug predates and is
+  unrelated to any of the HEV/PHEV/BEV backcast or phase-out fixes made elsewhere in the
+  pipeline; it was already this way before those fixes changed HEV/PHEV's shape.
+
+  FIX: each drivetrain now gets its own fixed color (`DRIVETRAIN_LINE_COLORS` below).
+  Inflow is drawn as a solid line, total outflow as a dashed line, both in that
+  drivetrain's color. The stacked collected/unknown/export areas are DROPPED -- with 5
+  drivetrains sharing one panel there is no way to stack 5 independent sets of areas
+  without them overlapping just as ambiguously as the old lines did; inflow vs. total
+  outflow per drivetrain is the comparison that matters here. Legend is now two-part:
+  drivetrain color swatches, plus a solid/dashed key for inflow vs. total outflow.
+
 - `plot_flows_split_collected_unknown_all_trackers` now returns `(fig, axes)` and
   accepts `show`/`save_path` parameters, instead of unconditionally calling
   `plt.show()` -- same convention as every other stage's diagnostic plots. This is
@@ -41,6 +65,21 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.lines import Line2D
 import math
+
+
+# Fixed per-drivetrain colors used by `plot_flows_split_collected_unknown_from_tracker`
+# / `_all_trackers` so the same drivetrain always gets the same color across every
+# scenario panel. Kept distinct from each other and from the green/dark-red convention
+# used elsewhere in this file for single-drivetrain plots. Any drivetrain not in this
+# map (shouldn't happen for the current 5-drivetrain pipeline, but kept as a safety net)
+# falls back to matplotlib's default color cycle.
+DRIVETRAIN_LINE_COLORS = {
+    "BEV": "#1b9e77",
+    "HEV": "#e6ab02",
+    "PHEV": "#d95f02",
+    "Diesel": "#7570b3",
+    "Petrol": "#377eb8",
+}
 
 
 def plot_vehicle_stock_liq(df: pd.DataFrame, scenario_name: str, year_start: int, year_end: int) -> None:
@@ -979,14 +1018,24 @@ def plot_flows_split_collected_unknown_from_tracker(
     year_max=2070,
     ax=None,
 ):
+    """
+    [FIXED] Previously drew every drivetrain in `drivetrains` onto the same `ax` using
+    the SAME fixed colors for inflow/outflow/collected/unknown/export -- with no way to
+    tell which line/area belonged to which drivetrain. When called with all 5
+    drivetrains at once (the default in `plot_flows_split_collected_unknown_all_trackers`
+    below), this produced an unreadable overlay where e.g. BEV/HEV/PHEV's much smaller,
+    zero-trending numbers were tangled together with Diesel/Petrol's much larger, stable
+    numbers in identical colors. See the module docstring for the full diagnosis.
+
+    Now: each drivetrain gets its own fixed color from `DRIVETRAIN_LINE_COLORS`. Inflow
+    is a solid line, total outflow (collected + unknown + export) is a dashed line, both
+    in that drivetrain's color. The stacked collected/unknown/export breakdown is
+    dropped -- with 5 drivetrains sharing one axes there is no non-overlapping way to
+    stack 5 independent sets of areas, and inflow-vs-outflow per drivetrain is the
+    comparison that actually needs to be readable here.
+    """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 6))
-
-    green = "#2b8a3e"
-    red_collect = "#ffc9c9"
-    red_unknown = "#ff8787"
-    red_export = "#c92a2a"
-    red_total = "#7f0000"
 
     for drv in drivetrains:
         key = (region, drv)
@@ -1020,16 +1069,13 @@ def plot_flows_split_collected_unknown_from_tracker(
         out_coll = pivot.get("collected", 0)
         out_unk = pivot.get("unknown_whereabouts", 0)
         out_exp = pivot.get("export", 0)
+        out_total = out_coll + out_unk + out_exp
 
         x = pivot.index.to_numpy()
+        color = DRIVETRAIN_LINE_COLORS.get(drv)
 
-        # STACKED AREAS (consistent from version 1)
-        ax.fill_between(x, 0, out_coll, color=red_collect, alpha=0.8, linewidth=0)
-        ax.fill_between(x, out_coll, out_coll + out_unk, color=red_unknown, alpha=0.8, linewidth=0)
-        ax.fill_between(x, out_coll + out_unk, out_coll + out_unk + out_exp, color=red_export, alpha=0.8, linewidth=0)
-
-        ax.plot(x, inflow, color=green, linewidth=2)
-        ax.plot(x, out_coll + out_unk + out_exp, color=red_total, linewidth=2)
+        ax.plot(x, inflow, color=color, linestyle="-", linewidth=2, zorder=3)
+        ax.plot(x, out_total, color=color, linestyle="--", linewidth=2, zorder=2)
 
     ax.set_ylim(bottom=0)
     ax.grid(True, linestyle="--", alpha=0.25)
@@ -1052,6 +1098,13 @@ def plot_flows_split_collected_unknown_all_trackers(
     `save_path=<path>` to also save a PNG -- this is what lets this function be called
     from a non-interactive pipeline script (see `03_02_adjustedflows.py`'s `main()`),
     consistent with every other stage's diagnostic-plot convention.
+
+    [FIXED] Legend rebuilt to match the drivetrain-distinguishable rendering in
+    `plot_flows_split_collected_unknown_from_tracker`: one color swatch per drivetrain,
+    plus a solid/dashed key for inflow vs. total outflow. Previously this legend
+    described a stacked collected/unknown/export breakdown that, with 5 drivetrains
+    overlaid in identical colors, could not actually be read off the chart -- see the
+    module docstring for the full diagnosis.
     """
     if scenario_order is None:
         scenario_order = list(tracker_keyed_by_scenario.keys())
@@ -1089,24 +1142,23 @@ def plot_flows_split_collected_unknown_all_trackers(
     for j in range(len(scenarios), len(axes)):
         axes[j].axis("off")
 
-    # SINGLE shared legend (from version 1 style)
-    handles = [
-        plt.Line2D([0], [0], color="#2b8a3e", lw=2),
-        plt.Line2D([0], [0], color="#7f0000", lw=2),
-        plt.Rectangle((0, 0), 1, 1, color="#c92a2a", alpha=0.8),
-        plt.Rectangle((0, 0), 1, 1, color="#ff8787", alpha=0.8),
-        plt.Rectangle((0, 0), 1, 1, color="#ffc9c9", alpha=0.8),
+    # Two-part shared legend: drivetrain colors, then inflow/outflow linestyle key.
+    drv_handles = [
+        plt.Line2D([0], [0], color=DRIVETRAIN_LINE_COLORS.get(drv, "#333333"), lw=2)
+        for drv in drivetrains
     ]
+    drv_labels = list(drivetrains)
 
-    labels = [
-        "Inflow",
-        "Total outflow",
-        "Export outflow",
-        "Unknown whereabouts",
-        "Collected ELV outflow",
+    style_handles = [
+        plt.Line2D([0], [0], color="black", lw=2, linestyle="-"),
+        plt.Line2D([0], [0], color="black", lw=2, linestyle="--"),
     ]
+    style_labels = ["Inflow", "Total outflow"]
 
-    fig.legend(handles, labels, loc="upper center", ncol=5, frameon=False)
+    handles = drv_handles + style_handles
+    labels = drv_labels + style_labels
+
+    fig.legend(handles, labels, loc="upper center", ncol=len(handles), frameon=False)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     if save_path is not None:

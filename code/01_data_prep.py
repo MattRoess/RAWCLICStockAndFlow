@@ -39,6 +39,18 @@ FIXES APPLIED THIS ROUND
        `df_exp_eu`), a sanity check on the C1/C2 fixes' real-world magnitude (North
        Korea exclusion, dedup fix) -- if this number looks implausible, that's the
        first place to look.
+- **[FIXED, this round]** `01_stock_by_drivetrain.png` was plotting the FULL raw REMIND
+  data horizon (out to 2150 -- confirmed, REMIND's raw `.mif` files genuinely contain
+  data that far out; there was never any year-clipping logic in `plot_stock_by_
+  drivetrain` or in `build_stock_dict`/`prepare_remind_scenarios` in `src/data_prep.py`,
+  neither of which this fix touches). Confirmed with the user: this stage's own diagnostic
+  PLOT should be capped at 2100, matching stage 02's own `model_end_year=2100` (see the
+  comment in `03_01_flowdriven.py` noting "REMIND raw data to 2150 (stage 01),
+  model_end_year=2100 (stage 02)") -- so this plot now shows the same horizon stage 02
+  actually uses, instead of the full uncut raw range. This is DISPLAY-ONLY: `stock_dict`
+  and `stock_dict_df` (the artifacts actually saved and handed to stage 02) are
+  completely unchanged, still the full raw REMIND range -- only `plot_stock_by_
+  drivetrain`'s own chart is capped. See `PLOT_YEAR_MAX` below.
 """
 
 from __future__ import annotations
@@ -84,15 +96,30 @@ from src.stock_flow import (  # type: ignore
 )
 
 
-def plot_stock_by_drivetrain(stock_dict_df, scenario: str, region: str = "EUR"):
+# [FIXED, this round] `01_stock_by_drivetrain.png`'s x-axis cap -- see the module
+# docstring's "FIXES APPLIED THIS ROUND" entry above for the full reasoning. Matches
+# stage 02's own `model_end_year=2100` (confirmed with the user), NOT the full raw REMIND
+# horizon (2150) that `stock_dict_df` itself still contains. DISPLAY-ONLY: only this
+# plot function reads it; `stock_dict`/`stock_dict_df` (what actually gets saved for
+# stage 02) are untouched. Edit this one number to retune -- no other code change needed.
+PLOT_YEAR_MAX = 2100
+
+
+def plot_stock_by_drivetrain(stock_dict_df, scenario: str, region: str = "EUR", year_max: int = PLOT_YEAR_MAX):
     """
     The single most direct "does my data look right" check for this stage: actual
     stock trajectory per drivetrain, for the scenario actually selected in params --
     exactly what gets handed to stage 02, not a scenario-comparison abstraction.
+
+    `year_max`: DISPLAY-ONLY cap on the plotted x-axis (default `PLOT_YEAR_MAX`, 2100 --
+    matches stage 02's own `model_end_year`). `stock_dict_df` itself is NOT filtered or
+    modified -- only the rows plotted here are restricted to `year <= year_max`, so the
+    y-axis autoscale also reflects just this capped window rather than being stretched
+    by the long flat tail out to the raw REMIND data's full 2150 horizon.
     """
     fig, ax = plt.subplots(figsize=(10, 6))
     for tech, grp in stock_dict_df.groupby("technology"):
-        grp = grp.sort_values("year")
+        grp = grp[grp["year"] <= year_max].sort_values("year")
         ax.plot(grp["year"], grp["value"], linewidth=1.8, label=tech)
     ax.set_title(f"{region} vehicle stock by drivetrain — scenario '{scenario}'", fontsize=12)
     ax.set_xlabel("Year")
@@ -222,7 +249,9 @@ def main() -> dict[str, Path]:
 
     # -----------------------------------------------------------------------
     # Diagnostic plot 2: actual stock by drivetrain for the selected scenario -- the
-    # most direct check of what this stage hands to stage 02.
+    # most direct check of what this stage hands to stage 02. [FIXED, this round]:
+    # capped at PLOT_YEAR_MAX=2100 (display-only, see plot_stock_by_drivetrain's
+    # docstring) instead of the full raw REMIND horizon (2150).
     # -----------------------------------------------------------------------
     fig, ax = plot_stock_by_drivetrain(stock_dict_df, scenario=p01.scenario)
     fig_path = fig_dir / "01_stock_by_drivetrain.png"

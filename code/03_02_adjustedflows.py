@@ -909,21 +909,6 @@ def main() -> dict[str, Any]:
                 scenario_start_year=p03_02.scenario_start_year, ramp_end_year=p03_02.scenario_ramp_end_year,
                 target_shares_final=spec.inflow_drivetrain_shares_final,
             )
-        elif spec.inflow_segment_shares_final_by_drv is not None:
-            # [NEW] Multi-drivetrain path (e.g. BAU): `tweak_inflow_segment_shares_within_
-            # drivetrain` already masks its effect to ONE drivetrain and passes every other
-            # row through untouched (`df_other` in that function), so chaining one call per
-            # drivetrain -- each call's output feeding the next call's input -- composes
-            # correctly without any change to the function itself. Order doesn't matter:
-            # each call only ever touches rows for its own drivetrain.
-            resolved = inflow_segments_scenario
-            for drv, target_shares in spec.inflow_segment_shares_final_by_drv.items():
-                resolved = tweak_inflow_segment_shares_within_drivetrain(
-                    inflow_df=resolved, region="EUR", drivetrain=drv,
-                    scenario_start_year=p03_02.scenario_start_year, ramp_end_year=p03_02.scenario_ramp_end_year,
-                    target_segment_shares_final=target_shares,
-                )
-            inflow_by_scenario[name] = resolved
         elif spec.inflow_segment_shares_final is not None:
             inflow_by_scenario[name] = tweak_inflow_segment_shares_within_drivetrain(
                 inflow_df=inflow_segments_scenario, region="EUR", drivetrain=spec.inflow_segment_shares_drivetrain,
@@ -978,39 +963,7 @@ def main() -> dict[str, Any]:
         # the returned draws dict line up exactly with what the engine iterates over.
         # -----------------------------------------------------------------------
         inflow_draws_for_scenario = None
-        if monte_carlo_enabled and spec.inflow_segment_share_spread_by_drv is not None and spec.inflow_segment_shares_final_by_drv is not None:
-            # [NEW] Multi-drivetrain path (e.g. BAU). One independently-seeded RNG per
-            # drivetrain -- spawned from this scenario's own seed, same multi-level
-            # spawn-hierarchy convention as the single-drivetrain case below (scenario ->
-            # drivetrain -> entity), so each drivetrain's segment-share sampling stream is
-            # independent of every other drivetrain's and of the engine's own later
-            # lifetime/share entity-draw streams. `sample_future_segment_share_inflow_
-            # draws` already keys its returned dict by `(region, drivetrain, seg)`, so
-            # merging multiple drivetrains' results is a plain dict union -- no key
-            # collisions across drivetrains are possible.
-            scenario_inflow_years = np.arange(
-                int(inflow_by_scenario[name]["year"].min()),
-                int(inflow_by_scenario[name]["year"].max()) + 1,
-                dtype=int,
-            )
-            drvs_with_spread = [
-                drv for drv in spec.inflow_segment_shares_final_by_drv
-                if drv in spec.inflow_segment_share_spread_by_drv
-            ]
-            drv_seeds = mc_scenario_seeds[name].spawn(len(drvs_with_spread))
-            inflow_draws_for_scenario = {}
-            for drv, drv_seed in zip(drvs_with_spread, drv_seeds):
-                drv_rng = np.random.default_rng(drv_seed)
-                drv_draws = sample_future_segment_share_inflow_draws(
-                    inflow_df=inflow_segments_scenario, region="EUR", drivetrain=drv,
-                    scenario_start_year=p03_02.scenario_start_year,
-                    ramp_end_year=p03_02.scenario_ramp_end_year,
-                    target_segment_shares_final=spec.inflow_segment_shares_final_by_drv[drv],
-                    inflow_segment_share_spread=spec.inflow_segment_share_spread_by_drv[drv],
-                    n_draws=n_draws_mc, rng=drv_rng, years=scenario_inflow_years,
-                )
-                inflow_draws_for_scenario.update(drv_draws)
-        elif (
+        if (
             monte_carlo_enabled
             and spec.inflow_segment_share_spread is not None
             and spec.inflow_segment_shares_final is not None
@@ -1072,7 +1025,6 @@ def main() -> dict[str, Any]:
         name for name in active_scenario_names
         if p03_02.scenarios[name].inflow_drivetrain_shares_final is not None
         or p03_02.scenarios[name].inflow_segment_shares_final is not None
-        or p03_02.scenarios[name].inflow_segment_shares_final_by_drv is not None
     ]
     other_names = [name for name in scenario_names_all if name not in inflow_mix_names]
 

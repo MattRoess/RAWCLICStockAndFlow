@@ -32,6 +32,16 @@ EVmodel_review_consolidated.md and HOW_TO_RUN_AND_VERIFY.md for the exact comman
 5. **[NEW, M14]** `melt_and_expand`'s pipe-count filter now prints how many rows it
    drops, instead of silently discarding shallower taxonomy paths with no visibility.
 6. **[L3]** File paths built with `pathlib.Path` instead of string concatenation.
+7. **[NEW, this round]** `clean_export_data`'s priority-scoring comparison
+   (`Source_Code.eq(...)` against `Exp_Country_ISO3`/`Imp_Country_ISO3`) crashed on a
+   recent pandas/pyarrow combination (`ArrowTypeError: Expected bytes, got a 'int'
+   object`) whenever the raw Excel had even one non-string value in one of these
+   columns (pandas then reads that column with a mixed dtype, which the Arrow-backed
+   string comparison can't box). Fixed: `Exp_Country_ISO3`, `Imp_Country_ISO3`, and
+   `Source_Code` are now explicitly cast to pandas' nullable "string" dtype (same idiom
+   `canonicalize_country_names` already used for Exp_Name/Imp_Name) with missing values
+   filled as "" before any comparison -- see the comment at the `.assign(...)` call in
+   `clean_export_data` for the full reasoning (including why "" and not `pd.NA`).
 
 STILL OPEN (not touched this round -- no code change needed, just documenting status)
 ----------------------------------------------------------------------------------------
@@ -291,7 +301,25 @@ def clean_export_data(
         .assign(
             Exp_Name=lambda frame: canonicalize_country_names(frame["Exp_Country_Name"]),
             Imp_Name=lambda frame: canonicalize_country_names(frame["Imp_Country_Name"]),
-            Source_Code=lambda frame: frame["Source_Code"].replace(dict(iso3_corrections)),
+            # [FIXED, new] `Exp_Country_ISO3`/`Imp_Country_ISO3`/`Source_Code` are
+            # compared against each other with `.eq()` below (priority scoring). If the
+            # raw Excel has even one non-string value in one of these columns (a
+            # malformed/blank cell -- common in trade data), pandas reads that column
+            # with a mixed dtype, and comparing it against a clean, uniformly-typed
+            # column raises (observed: `ArrowTypeError: Expected bytes, got a 'int'
+            # object`, on a recent pandas/pyarrow combination). Casting all three to
+            # pandas' nullable "string" dtype -- same idiom `canonicalize_country_names`
+            # already uses for Exp_Name/Imp_Name -- forces a uniform, comparable type.
+            # Missing values are filled with "" (not left as `pd.NA`): `pd.NA` would
+            # propagate through `.eq()` into the priority-score `.astype(int)` step
+            # further down and raise there instead -- "" can never equal a real ISO3
+            # code or "EUR", so it cleanly and correctly falls into the "unmatched"
+            # bucket, consistent with a row whose source truly can't be identified.
+            Exp_Country_ISO3=lambda frame: frame["Exp_Country_ISO3"].astype("string").str.strip().fillna(""),
+            Imp_Country_ISO3=lambda frame: frame["Imp_Country_ISO3"].astype("string").str.strip().fillna(""),
+            Source_Code=lambda frame: (
+                frame["Source_Code"].astype("string").str.strip().fillna("").replace(dict(iso3_corrections))
+            ),
         )
         .loc[lambda frame: ~frame["Exp_Name"].isin(AGGREGATES | EXCLUDED_RAW_NAMES)]
         .loc[lambda frame: ~frame["Imp_Name"].isin(AGGREGATES | EXCLUDED_RAW_NAMES)]
