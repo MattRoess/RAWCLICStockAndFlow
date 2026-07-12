@@ -544,6 +544,15 @@ def run_adjusted_scenario(
     unknown_whereabouts_share_std: dict[str, float] | None = None,
     export_share_std: dict[str, float] | None = None,
     mc_seed: int | np.random.SeedSequence | None = None,
+    # [NEW] Unmutated clone of `mc_seed` (same entropy + spawn_key, built by main()
+    # BEFORE `mc_seed` is spawned from at all -- see main()'s `mc_scenario_seeds_
+    # drivetrain` construction) -- required whenever `monte_carlo_enabled=True`.
+    # Used ONLY for the independent by-drivetrain re-simulation below, so that its
+    # sampled per-drivetrain lifetime/export/unknown draws are IDENTICAL to the
+    # ones the segment-level Monte Carlo run above used (same entity, same draws,
+    # just not split into segments) -- letting the two results be compared without
+    # the comparison being confounded by independently-resampled randomness.
+    mc_seed_by_drivetrain: int | np.random.SeedSequence | None = None,
     mc_chunk_size: int = 20_000,
     output_periods: list[tuple[int, int]] | None = None,
     # [NEW] Precomputed per-draw future segment-share inflow overrides for this
@@ -607,6 +616,23 @@ def run_adjusted_scenario(
     deterministic inflow. See `sample_future_segment_share_inflow_draws`'s docstring
     for exactly how it's built, and `cohort_flow_mc.py`'s "PER-DRAW INFLOW OVERRIDE"
     module docstring section for how the engine consumes it.
+
+    [NEW] By-drivetrain independent re-simulation (`mc["by_drivetrain"]`, only when
+    `monte_carlo_enabled=True`): alongside the 12-segment-per-drivetrain Monte Carlo
+    result above, this ALSO runs the exact same flow-driven Monte Carlo engine a
+    second time, directly at (Region, Drive Train) granularity -- its own starting
+    stock read straight from `matrices_by_key` (bypassing the base-year segment-share
+    split entirely -- see `build_stock_by_drivetrain_at_base_year`), and its own
+    inflow (`inflow_df` summed over Segment, which exactly reconstructs the pre-split
+    per-drivetrain total, since segment shares always sum to 1 after the base-year
+    0/0 guard fix in `build_stock_by_segment_at_base_year`). This is a genuine second
+    simulation, NOT a post-hoc sum of the segment-level result -- `main()` separately
+    also sums the 12 segments (via `_sum_period_results`, unchanged, existing logic)
+    so the two can be compared side by side: since `mc_seed_by_drivetrain` reproduces
+    IDENTICAL per-drivetrain entity draws as the segment-level run, any difference
+    between "independent by_drivetrain result" and "segment-sum" is attributable only
+    to the base-year segment-mix assumption (uniform segment split across cohort
+    vintages), not to different random draws.
     """
     if lifetime_change_by_drv is None:
         lifetime_change_by_drv = {}
@@ -674,6 +700,65 @@ def run_adjusted_scenario(
             verbose=True, progress_label=scenario_name,
         )
         print(f"[{scenario_name}] Monte Carlo run done in {time.time() - t_start_mc:.1f}s")
+
+        # ---------------------------------------------------------------------------
+        # [NEW] Independent by-drivetrain re-simulation -- see docstring section above.
+        # ---------------------------------------------------------------------------
+        if mc_seed_by_drivetrain is None:
+            raise ValueError(
+                f"[{scenario_name}] monte_carlo_enabled=True but mc_seed_by_drivetrain "
+                "was not supplied -- required for the independent by-drivetrain "
+                "re-simulation (see run_adjusted_scenario docstring)."
+            )
+
+        inflow_df_drivetrain = (
+            inflow_df.groupby(["Region", "Drive Train", "year"], as_index=False)["value"].sum()
+        )
+
+        stock_by_drivetrain_base = fdm.build_stock_by_drivetrain_at_base_year(
+            matrices_by_key=matrices_by_key, region="EUR", base_year=base_year,
+            allowed_drivetrains=("BEV", "HEV", "PHEV", "Diesel", "Petrol"),
+        )
+        starting_stock_by_cohort_lookup_drivetrain = fdm.build_starting_stock_by_cohort_lookup(
+            stock_by_drivetrain_base, group_cols=["Region", "Drive Train"],
+        )
+
+        # If this scenario carries per-draw future segment-share inflow overrides
+        # (e.g. BAU's `inflow_segment_share_spread`), aggregate them to drivetrain
+        # level too (sum the same per-draw arrays across a drivetrain's segments,
+        # for the SAME draw index) -- so the independent re-simulation's inflow is
+        # genuinely the same per-draw realization as the segment-level run's, not a
+        # fixed/deterministic total.
+        inflow_draws_by_group_drivetrain = None
+        if inflow_draws_by_group is not None:
+            inflow_draws_by_group_drivetrain = {}
+            for (grp_region, grp_drv, _grp_seg), year_draws in inflow_draws_by_group.items():
+                drv_key = (grp_region, grp_drv)
+                acc = inflow_draws_by_group_drivetrain.setdefault(drv_key, {})
+                for yr, arr in year_draws.items():
+                    acc[yr] = acc[yr] + arr if yr in acc else arr.copy()
+
+        print(f"[{scenario_name}] Monte Carlo run (by-drivetrain, independent re-simulation): {n_draws:,} draws...")
+        t_start_mc_drv = time.time()
+        mc_result_by_drivetrain = fdm.run_flow_driven_model_monte_carlo(
+            df=inflow_df_drivetrain, years=years, t_end=int(years.max()),
+            lifetime_by_drv=mapped_inputs["lifetime_by_drv"],
+            unknown_whereabouts_share=unknown_whereabouts_share,
+            export_share_by_drivetrain=export_share_by_drivetrain,
+            starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup_drivetrain,
+            n_draws=n_draws,
+            lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
+            unknown_whereabouts_share_std=unknown_whereabouts_share_std,
+            export_share_std=export_share_std,
+            group_cols=["Region", "Drive Train"], outflow_timing="post_inflow",
+            lifetime_change_by_drv=lifetime_change_by_drv, stock_modifier_2027=stock_modifier_2027,
+            stock_modifier_start_year=stock_modifier_start_year, output_periods=output_periods,
+            inflow_draws_by_group=inflow_draws_by_group_drivetrain,
+            seed=mc_seed_by_drivetrain, chunk_size=mc_chunk_size, collect_per_year=False,
+            verbose=True, progress_label=f"{scenario_name} [by_drivetrain]",
+        )
+        print(f"[{scenario_name}] Monte Carlo run (by-drivetrain) done in {time.time() - t_start_mc_drv:.1f}s")
+        mc_result["by_drivetrain"] = mc_result_by_drivetrain["by_group"]
 
     flows_new = results["flows_df"].copy()
     outflow_surv_new = results["outflow_surv_df"].copy()
@@ -879,6 +964,21 @@ def main() -> dict[str, Any]:
     mc_seed_seq = np.random.SeedSequence(params.monte_carlo.seed, spawn_key=(2,))
     mc_scenario_seeds = dict(zip(scenario_names_all, mc_seed_seq.spawn(len(scenario_names_all))))
 
+    # [NEW] For the by_drivetrain independent re-simulation (see run_adjusted_
+    # scenario's docstring): one UNMUTATED clone per scenario of its own seed above,
+    # built with the identical (entropy, spawn_key) pair -- NOT the same live object
+    # -- captured here, BEFORE `mc_scenario_seeds[name]` is spawned from at all. Any
+    # `.spawn()` call made on the original below (the segment-share draw, if this
+    # scenario has one, then the engine's own 5 per-drivetrain entity spawns inside
+    # `run_adjusted_scenario`) is mirrored on this clone in the SAME order (see the
+    # segment-share-draw block just below), so the two seeds' spawn counters stay
+    # aligned and the independent by_drivetrain run gets IDENTICAL per-drivetrain
+    # entity draws to the segment-level run.
+    mc_scenario_seeds_drivetrain = {
+        name: np.random.SeedSequence(entropy=seed.entropy, spawn_key=seed.spawn_key, pool_size=seed.pool_size)
+        for name, seed in mc_scenario_seeds.items()
+    }
+
     # -----------------------------------------------------------------------
     # Take 03_01's baseline inflow (by DRIVETRAIN + SEGMENT) as this notebook's starting point
     # -----------------------------------------------------------------------
@@ -970,6 +1070,11 @@ def main() -> dict[str, Any]:
             and spec.inflow_segment_shares_final is not None
         ):
             segment_share_seed = mc_scenario_seeds[name].spawn(1)[0]
+            # [NEW] Mirror this spawn on the by_drivetrain clone too (discarded --
+            # only used to keep its spawn counter aligned with the original's), so
+            # the 5 per-drivetrain entity spawns that happen later, inside
+            # run_adjusted_scenario, land on the SAME child indices on both seeds.
+            _ = mc_scenario_seeds_drivetrain[name].spawn(1)[0]
             segment_share_rng = np.random.default_rng(segment_share_seed)
             scenario_inflow_years = np.arange(
                 int(inflow_by_scenario[name]["year"].min()),
@@ -1005,6 +1110,7 @@ def main() -> dict[str, Any]:
             lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
             unknown_whereabouts_share_std=unknown_whereabouts_share_std_mc,
             export_share_std=export_share_std_mc, mc_seed=mc_scenario_seeds[name],
+            mc_seed_by_drivetrain=mc_scenario_seeds_drivetrain[name],
             mc_chunk_size=mc_chunk_size, output_periods=params.monte_carlo.output_periods,
             inflow_draws_by_group=inflow_draws_for_scenario,
         )
@@ -1250,6 +1356,12 @@ def main() -> dict[str, Any]:
                 # exactly the same `drv_period_result`/`g["periods"][period]` values
                 # `_summarize_period_result` already computes on, not a re-derivation.
                 collected_by_drivetrain: dict[str, np.ndarray] = {}
+                # [NEW] Same shape as collected_by_drivetrain above, but from the
+                # independent by-drivetrain re-simulation (mc["by_drivetrain"]) instead
+                # of the segment-sum -- feeds the second "5 drivetrains, direct" boxplot
+                # + KDE comparison figure below, for a visual same-scenario cross-check
+                # against the existing segment-sum comparison figure.
+                collected_by_drivetrain_direct: dict[str, np.ndarray] = {}
                 collected_by_segment_within_drivetrain: dict[str, dict[str, np.ndarray]] = {}
 
                 for drivetrain in drivetrains_present:
@@ -1261,6 +1373,31 @@ def main() -> dict[str, Any]:
                         drv_period_result, f"{scenario_name}__{period_label}__{drivetrain}", summary_mc
                     )
                     collected_by_drivetrain[drivetrain] = drv_period_result["cumulative_collected"]
+
+                    # [NEW] Independent by-drivetrain re-simulation, if this scenario's
+                    # `mc` has one (see `run_adjusted_scenario`'s docstring) -- summarized
+                    # under the SAME `{scenario}__{period}__{drivetrain}` prefix as the
+                    # segment-sum above, PLUS a `__direct` suffix, so the two are saved
+                    # side by side in `summary_mc` for direct comparison: `..__{drivetrain}
+                    # __cumulative_collected` (segment-sum, existing) vs.
+                    # `..__{drivetrain}__direct__cumulative_collected` (independent resim,
+                    # new). A mismatch beyond Monte Carlo noise would flag that the base-
+                    # year segment-mix assumption (uniform split across cohort vintages,
+                    # see `build_stock_by_segment_at_base_year`'s docstring) has a real
+                    # effect for that drivetrain/period.
+                    by_drivetrain_direct = mc.get("by_drivetrain")
+                    if by_drivetrain_direct is not None:
+                        direct_group_key = ("EUR", drivetrain)
+                        direct_group = by_drivetrain_direct.get(direct_group_key)
+                        if direct_group is not None:
+                            _summarize_period_result(
+                                direct_group["periods"][period],
+                                f"{scenario_name}__{period_label}__{drivetrain}__direct",
+                                summary_mc,
+                            )
+                            collected_by_drivetrain_direct[drivetrain] = (
+                                direct_group["periods"][period]["cumulative_collected"]
+                            )
 
                     # Segment level: individual (drivetrain, segment) groups, no further summing.
                     segment_values: dict[str, np.ndarray] = {}
@@ -1297,6 +1434,25 @@ def main() -> dict[str, Any]:
                         ylabel="Cumulative collected [million vehicles]",
                         fig_path_boxplot=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_boxplot.png",
                         fig_path_pdf=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_pdf.png",
+                    )
+
+                # [NEW] Second, additional comparison figure: the SAME 5-drivetrain
+                # comparison, but built from the independent by-drivetrain
+                # re-simulation (mc["by_drivetrain"]) instead of the 12-segment sum
+                # above -- same entity draws (seed clone), same inputs, just not split
+                # into segments. Distinct filename ("_direct_") so it sits alongside the
+                # segment-sum figure above without overwriting it; put the two side by
+                # side to see whether the base-year uniform-segment-mix assumption
+                # visibly shifts any drivetrain's distribution.
+                if len(collected_by_drivetrain_direct) > 1:
+                    plot_group_comparison_boxplot_and_pdf(
+                        collected_by_drivetrain_direct,
+                        title=f"{scenario_name}: cumulative collected by drivetrain (independent re-simulation, "
+                              f"not segment-sum), {period_label}",
+                        xlabel="Cumulative collected [million vehicles]",
+                        ylabel="Cumulative collected [million vehicles]",
+                        fig_path_boxplot=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_direct_{scenario_name}_{period_label}_boxplot.png",
+                        fig_path_pdf=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_direct_{scenario_name}_{period_label}_pdf.png",
                     )
 
                 for drivetrain, segment_values in collected_by_segment_within_drivetrain.items():

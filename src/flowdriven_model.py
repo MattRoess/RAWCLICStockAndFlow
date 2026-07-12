@@ -275,7 +275,19 @@ def build_stock_by_segment_at_base_year(
             raise ValueError(f"Missing segment shares for {drv} in {base_year}.")
 
         seg_shares = share_wide.loc[base_year].fillna(0.0)
-        seg_shares = seg_shares / seg_shares.sum()
+        seg_share_total = seg_shares.sum()
+        # [NEW] A drivetrain with an all-zero segment-share row at base_year has not
+        # been introduced yet (e.g. BEV before 2011, correctly hard-zeroed by the
+        # introduction_year_by_drv fix) -- there is no real segment MIX to normalize
+        # to, and `seg_shares / 0` is an undefined 0/0 that silently produces NaN for
+        # every segment, which then multiplies into that drivetrain's (possibly tiny
+        # but nonzero) base-year stock and corrupts every cohort/segment row for it.
+        # Same guarded-fallback treatment `prepare_backcasting_state` already uses
+        # for its own analogous zero-weight case: leave `seg_shares` at its already-
+        # all-zero value instead of normalizing, so `stock_value * seg_share` stays a
+        # real, finite 0.0 downstream. `None`/nonzero-sum behavior is unchanged.
+        if seg_share_total > 0:
+            seg_shares = seg_shares / seg_share_total
 
         for cohort_year, stock_value in stock_base.items():
             stock_value = float(stock_value)
@@ -295,6 +307,143 @@ def build_stock_by_segment_at_base_year(
                 )
 
     return pd.DataFrame(rows)
+
+
+def build_stock_by_drivetrain_at_base_year(
+    matrices_by_key: dict,
+    *,
+    region: str = "EUR",
+    base_year: int = 2005,
+    allowed_drivetrains: tuple[str, ...] = ("BEV", "HEV", "PHEV", "Diesel", "Petrol"),
+) -> pd.DataFrame:
+    """
+    [NEW] The TRUE pre-segmentation base-year stock by cohort, for each drivetrain --
+    read directly from stage 02's `stock_t_tau_df`, with NO segment-share split
+    applied at all (contrast with `build_stock_by_segment_at_base_year`, which takes
+    this exact same `stock_t_tau_df.loc[base_year]` row and multiplies it by
+    `seg_share_by_drv[drv].loc[base_year]`). Same base-year stock is used for every
+    scenario -- scenarios only adjust FUTURE inflow/lifetime, never the historical
+    backcast/base-year condition -- so this needs no `seg_share_by_drv` argument.
+
+    Exists to feed the independent by-drivetrain Monte Carlo re-simulation in
+    `03_02_adjustedflows.py`'s `run_adjusted_scenario` (see its docstring's
+    "By-drivetrain independent re-simulation" section) -- a genuine second
+    simulation at (Region, Drive Train) granularity, not a re-derivation from the
+    12-segment result.
+
+    Returns a DataFrame with columns Region, Drive Train, year, cohort_year, stock
+    (same shape as `build_stock_by_segment_at_base_year`'s output, minus the
+    Segment column) -- feed straight into `build_starting_stock_by_cohort_lookup(...,
+    group_cols=["Region", "Drive Train"])`.
+    """
+    rows: list[dict] = []
+
+    for (reg, drv), mats in matrices_by_key.items():
+        if reg != region or drv not in allowed_drivetrains:
+            continue
+        if "stock_t_tau_df" not in mats:
+            continue
+
+        stock_t_tau = mats["stock_t_tau_df"].copy()
+        if base_year not in stock_t_tau.index:
+            continue
+
+        stock_base = stock_t_tau.loc[base_year].copy()
+        stock_base.index = pd.to_numeric(stock_base.index, errors="coerce").astype(int)
+
+        for cohort_year, stock_value in stock_base.items():
+            stock_value = float(stock_value)
+            if stock_value == 0.0:
+                continue
+            rows.append(
+                {
+                    "Region": reg,
+                    "Drive Train": drv,
+                    "year": int(base_year),
+                    "cohort_year": int(cohort_year),
+                    "stock": stock_value,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def fill_base_year_gap_via_interpolation(
+    inflow_df: pd.DataFrame,
+    *,
+    base_year: int = 2005,
+    group_cols: list[str] | None = None,
+    year_col: str = "year",
+    value_col: str = "value",
+    zero_tol: float = 1e-9,
+) -> pd.DataFrame:
+    """
+    [NEW] Fixes a known, structural gap in the underlying cohort model: stage 02's
+    `_run_cohort_recurrence` (in `stockflow_model.py`) initializes `inflow_by_year`
+    to zero and its main loop starts at `i_t=1`, so `inflow_by_year[0]` -- the
+    model's very first simulated year, `base_year` -- is NEVER actually computed
+    for ANY drivetrain; it silently stays at its zero-initialized default. This
+    artifact propagates forward through disaggregation into every downstream
+    inflow series, visible as a sharp, unrealistic dip to exactly 0 at `base_year`
+    for drivetrains that genuinely already existed before then (e.g. Diesel,
+    Petrol, HEV), while for drivetrains truly introduced at/after `base_year`
+    (e.g. BEV, PHEV) that same zero is CORRECT and must not be touched.
+
+    This function does NOT touch `_run_cohort_recurrence` or any other model code
+    -- the recurrence loop is left exactly as-is. It is a data-side, POST-HOC fill
+    of ONLY `base_year`'s row, and ONLY for (Region, Drive Train, Segment) groups
+    that match this exact, structurally-identifiable signature:
+      - a REAL (nonzero) value the year immediately BEFORE `base_year` (proving the
+        group already existed then, so a genuine zero at `base_year` would be
+        implausible), AND
+      - a REAL (nonzero) value the year immediately AFTER `base_year` (proving the
+        zero at `base_year` isn't the start of a genuine phase-out/discontinuation),
+        AND
+      - `base_year` itself is exactly (within `zero_tol`) zero.
+    Any group NOT matching all three conditions -- including BEV/PHEV, whose true
+    value at `base_year` genuinely IS zero because they had not been introduced yet
+    -- is left completely unchanged, at that year and every other year.
+
+    The filled value is a straight-line interpolation between the two neighboring
+    years: `value[base_year] = (value[base_year - 1] + value[base_year + 1]) / 2`.
+    No year other than `base_year`, for any group, is ever modified.
+    """
+    if group_cols is None:
+        group_cols = ["Region", "Drive Train", "Segment"]
+
+    out = inflow_df.copy()
+
+    def _year_slice(y: int) -> pd.Series:
+        s = out.loc[out[year_col] == y].set_index(group_cols)[value_col]
+        return s[~s.index.duplicated(keep="first")]
+
+    before = _year_slice(base_year - 1)
+    at = _year_slice(base_year)
+    after = _year_slice(base_year + 1)
+
+    common = before.index.intersection(at.index).intersection(after.index)
+    if len(common) == 0:
+        return out
+
+    is_gap = (
+        (before.loc[common].abs() > zero_tol)
+        & (at.loc[common].abs() <= zero_tol)
+        & (after.loc[common].abs() > zero_tol)
+    )
+    gap_groups = common[is_gap]
+    if len(gap_groups) == 0:
+        return out
+
+    interpolated = (before.loc[gap_groups] + after.loc[gap_groups]) / 2.0
+
+    row_index = out.set_index(group_cols, drop=False).index
+    at_base_year = (out[year_col] == base_year).to_numpy()
+    for group_key, new_val in interpolated.items():
+        matches_group = np.asarray(row_index == group_key)
+        row_mask = at_base_year & matches_group
+        out.loc[row_mask, value_col] = new_val
+
+    return out
 
 
 def build_starting_stock_by_cohort_lookup(

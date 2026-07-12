@@ -493,6 +493,21 @@ def main() -> dict[str, Any]:
         .sort_values(["Region", "Drive Train", "Segment", "year"]).reset_index(drop=True)
     )
 
+    # [NEW] Fix a known, structural gap: stage 02's cohort recurrence never computes
+    # its own t0=BASE_YEAR row (loop starts at i_t=1 by construction), so every
+    # drivetrain that genuinely already existed before BASE_YEAR shows a false dip
+    # to exactly 0 there (e.g. Diesel/Petrol/HEV), while drivetrains truly
+    # introduced at/after BASE_YEAR (BEV, PHEV) correctly stay at 0 -- see
+    # flowdriven_model.py's fill_base_year_gap_via_interpolation docstring for the
+    # exact, narrow condition used to tell these two cases apart. Does NOT touch
+    # _run_cohort_recurrence or any other model code; only BASE_YEAR's row is ever
+    # modified, and only for groups matching that condition -- every other
+    # (group, year) value in inflow_segments_full is byte-identical to before.
+    inflow_segments_full = fdm.fill_base_year_gap_via_interpolation(
+        inflow_segments_full, base_year=BASE_YEAR,
+        group_cols=["Region", "Drive Train", "Segment"], year_col="year", value_col="value",
+    )
+
     years_model = np.arange(BACKCAST_START_YEAR, years_full.values[-1] + 1, dtype=int)
 
     # THE MATH MODEL: flow-driven cohort model -- the mirror image of stage 02.
