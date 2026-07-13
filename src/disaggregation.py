@@ -43,57 +43,91 @@ import numpy as np
 import pandas as pd
 
 
-def compute_collected_export_unknown_shares(unknown_whereabouts_share, export_share):
+def compute_collected_export_unknown_shares(collected_share, export_share, unknown_whereabouts_share):
     """
-    [NEW] The actual arithmetic of the collected/export/unknown split, extracted into
-    one place so both the deterministic per-year split below AND a Monte Carlo
+    [REWRITTEN] The actual arithmetic of the collected/export/unknown split, extracted
+    into one place so both the deterministic per-year split below AND the Monte Carlo
     per-draw split (see 03_01_flowdriven.py's Monte Carlo block) use the IDENTICAL
     computation -- not two separate implementations of the same formula.
 
-    Works for EITHER a plain float (the normal, single-run case) OR a NumPy array
-    (Monte Carlo, one value per draw) -- `np.clip` and elementwise arithmetic behave
-    the same way for both, so no special-casing is needed for the arithmetic itself.
+    Works for EITHER plain floats (the normal, single-run case) OR NumPy arrays
+    (Monte Carlo, one value per draw) -- elementwise arithmetic behaves the same way
+    for both, so no special-casing is needed.
 
-    Returns (unknown_share, export_s, collected_share), same type/shape as the inputs.
+    [FIXED, corrected domain understanding] Was a two-argument function
+    (`unknown_whereabouts_share`, `export_share`) that computed `collected_share`
+    as whatever's left over (`1 - unknown - export`) -- treating `collected` as
+    having no uncertainty of its own, silently absorbing both other shares'
+    sampling noise. That's backwards: `collected` and `export` are MEASURED
+    (collection statistics, trade statistics) and `unknown_whereabouts` is itself
+    an ESTIMATE, not a residual computed from a known total -- total outflow
+    itself is a model output of the lifetime survival curve, not an independent
+    measurement. None of the three has a privileged "remainder" status.
 
-    ERROR HANDLING DIFFERS BETWEEN THE TWO CASES, deliberately:
-    - Scalar input: raises `ValueError` if unknown_share + export_s > 1 -- EXACT
-      original behavior, unchanged.
-    - Array input: rather than aborting an entire 200,000-draw Monte Carlo run over a
-      handful of draws where two independently-sampled shares happen to sum past 1
-      (an edge-of-distribution sampling artifact, not a data error), those draws'
-      `collected_share` is clipped to 0 instead, and a count is printed. Aborting a
-      long-running batch over a handful of extreme draws would be worse than slightly
-      under-representing the tail for those specific draws.
+    Now takes all THREE shares and NORMALIZES them to sum to exactly 1:
+        total = collected_share + export_share + unknown_whereabouts_share
+        (collected_share, export_share, unknown_whereabouts_share) / total
+
+    Each input is clipped to [0, 1] BEFORE normalizing (guards against a garbage
+    negative draw at the tail of a Triangular distribution). If all three are
+    (invalidly) zero or negative for a given entry, `total` would be 0 and the
+    division would produce NaN/inf -- guarded explicitly below rather than
+    silently propagating NaN downstream.
+
+    For the DETERMINISTIC (scalar) case with the actual point estimates from
+    `params_schema.py` (which sum to 1 by construction -- see
+    `StockFlowParams.validate()`'s sum-to-1 check), normalizing is a no-op:
+    byte-identical output to the old two-argument implementation for every
+    existing point-estimate call site.
+
+    Returns (collected_share, export_share, unknown_share), same type/shape as
+    the inputs, always summing to exactly 1 (elementwise).
     """
-    unknown_share = np.clip(unknown_whereabouts_share, 0.0, 1.0)
+    collected = np.clip(collected_share, 0.0, 1.0)
     export_s = np.clip(export_share, 0.0, 1.0)
-    total_share = unknown_share + export_s
+    unknown = np.clip(unknown_whereabouts_share, 0.0, 1.0)
+    total = collected + export_s + unknown
 
-    if isinstance(unknown_share, np.ndarray) or isinstance(export_s, np.ndarray):
-        over = total_share > 1.0
-        if np.any(over):
+    is_array = isinstance(total, np.ndarray)
+    if is_array:
+        zero_total = total <= 0.0
+        if np.any(zero_total):
             print(
-                f"NOTE: {int(np.sum(over))}/{np.size(total_share)} Monte Carlo draws had "
-                f"unknown_whereabouts_share + export_share > 1.0 (sampling artifact at "
-                f"the tails) -- collected_share clipped to 0 for those draws instead of "
-                f"raising, so the run isn't aborted over rare edge draws."
+                f"NOTE: {int(np.sum(zero_total))}/{np.size(total)} entries had "
+                f"collected_share + export_share + unknown_whereabouts_share <= 0 "
+                f"after clipping -- these entries are set to (0, 0, 0) instead of "
+                f"dividing by zero."
             )
-        collected_share = np.clip(1.0 - total_share, 0.0, None)
+        safe_total = np.where(zero_total, 1.0, total)  # avoid 0-division; result forced to 0 below anyway
+        collected_out = np.where(zero_total, 0.0, collected / safe_total)
+        export_out = np.where(zero_total, 0.0, export_s / safe_total)
+        unknown_out = np.where(zero_total, 0.0, unknown / safe_total)
     else:
-        if total_share > 1.0:
-            raise ValueError(f"Shares exceed 1 for this drivetrain: unknown={unknown_share}, export={export_s}")
-        collected_share = 1.0 - total_share
+        if total <= 0.0:
+            raise ValueError(
+                f"collected_share + export_share + unknown_whereabouts_share = {total} "
+                f"(<= 0) -- cannot normalize. Got collected={collected_share}, "
+                f"export={export_share}, unknown={unknown_whereabouts_share}."
+            )
+        collected_out = collected / total
+        export_out = export_s / total
+        unknown_out = unknown / total
 
-    return unknown_share, export_s, collected_share
+    return collected_out, export_out, unknown_out
 
 
 def split_outflows_collected_unknown_export(
     matrices_by_key: dict,
-    unknown_whereabouts_share: dict[str, float],
+    collected_share: dict[str, float],
     export_share: dict[str, float],
+    unknown_whereabouts_share: dict[str, float],
 ) -> tuple[dict, dict[str, float]]:
-
+    """
+    [FIXED signature] Now takes all THREE per-drivetrain share dicts explicitly
+    (`collected_share` is new -- previously only implicit, see
+    `params_schema.py`'s `StockFlowParams.collected_share_by_drv`), matching
+    `compute_collected_export_unknown_shares`'s new three-argument signature.
+    """
     for key in matrices_by_key:
         surv_df = matrices_by_key[key]["outflow_surv_df"]
         drivetrain = key[1]
@@ -102,14 +136,19 @@ def split_outflows_collected_unknown_export(
                 f"Missing unknown whereabouts share for drivetrain={drivetrain!r}. "
                 "Add it to unknown_whereabouts_share."
             )
+        if drivetrain not in collected_share:
+            raise KeyError(
+                f"Missing collected share for drivetrain={drivetrain!r}. Add it to "
+                "collected_share (params_schema.py's StockFlowParams.collected_share_by_drv)."
+            )
 
-        unknown_share, export_s, collected_share = compute_collected_export_unknown_shares(
-            unknown_whereabouts_share[drivetrain], export_share.get(drivetrain, 0.0),
+        collected_s, export_s, unknown_share = compute_collected_export_unknown_shares(
+            collected_share[drivetrain], export_share.get(drivetrain, 0.0), unknown_whereabouts_share[drivetrain],
         )
 
         unk_df = surv_df * unknown_share
         exp_df = surv_df * export_s
-        coll_df = surv_df * collected_share
+        coll_df = surv_df * collected_s
 
 
         matrices_by_key[key]["outflow_unk_df"] = unk_df

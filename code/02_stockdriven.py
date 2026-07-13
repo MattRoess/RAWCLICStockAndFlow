@@ -178,12 +178,20 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.artifacts import load_many, save_many, artifact_status  # type: ignore
 from src.monte_carlo import (  # type: ignore
-    Triangular, summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
+    summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
 )
 from src.stockflow_model import (  # type: ignore
     BackcastState, build_backcast_state,
     run_cohort_survival_model, run_cohort_survival_monte_carlo,
 )
+# [NEW] Shared with stage 03_02 (via flowdriven_model.py) -- same asymmetric-spread
+# resolution + Triangular-bounds logic, one implementation. See these functions'
+# own docstrings in cohort_flow_mc.py for the full behavior; `resolve_lifetime_spread`
+# accepts a plain float (symmetric), a (lower, upper) tuple, or an
+# `AsymmetricSpread`-like object (anything with `.lower`/`.upper`, e.g.
+# `params_schema.AsymmetricSpread`) -- exactly what `p02.lifetime_scale_lambda_
+# relative_spread[drivetrain]` can now hold.
+from src.cohort_flow_mc import resolve_lifetime_spread, sample_relative_triangular_scale  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -516,10 +524,21 @@ def main() -> dict[str, Path]:
         for drivetrain, child_seed in zip(drivetrains_present, child_seeds):
             rng = np.random.default_rng(child_seed)
             base = LIFETIME_BY_DRV[drivetrain]
-            spread = p02.lifetime_scale_lambda_relative_spread[drivetrain]
-            scale_lambda_draws = Triangular(
-                base.scale_lambda * (1 - spread), base.scale_lambda, base.scale_lambda * (1 + spread),
-            ).sample(rng, n=n_draws)
+            # [FIXED] Was: `spread = p02.lifetime_scale_lambda_relative_spread[drivetrain]`
+            # followed by `base.scale_lambda * (1 - spread)` -- broke immediately (a
+            # confusing TypeError from `1 - AsymmetricSpread(...)`) the moment ANY
+            # drivetrain's spread was set to an `AsymmetricSpread` in params_schema.py,
+            # since this stage never unwrapped it. `resolve_lifetime_spread` handles a
+            # plain float (symmetric, old behavior exactly preserved), a (lower, upper)
+            # tuple, or an `AsymmetricSpread` uniformly; `sample_relative_triangular_scale`
+            # builds Triangular(point*(1-lower), point, point*(1+upper)) from the
+            # resolved pair -- same shared logic stage 03_02 already uses.
+            lower_spread, upper_spread = resolve_lifetime_spread(
+                p02.lifetime_scale_lambda_relative_spread, drivetrain, default=(0.0, 0.0)
+            )
+            scale_lambda_draws = sample_relative_triangular_scale(
+                base.scale_lambda, lower_spread, upper_spread, n_draws, rng
+            )
             sensitivity_input_draws[f"{drivetrain}_scale_lambda"] = scale_lambda_draws
 
             stock_series = pd.to_numeric(stock_dict[("EUR", drivetrain)]["stock"], errors="coerce").fillna(0.0)
@@ -548,8 +567,28 @@ def main() -> dict[str, Path]:
             # Per-YEAR uncertainty band (median, P2.5, P97.5) -- computed from the
             # full (n_years, n_draws) arrays, but only the tiny summarized band (one
             # triple of numbers PER YEAR, not per draw) is kept/saved.
+            #
+            # [FIXED, renamed] TWO bands are now kept, not one:
+            #   - "inflow_applied_by_year_band": from `inflow_applied_by_year`
+            #     (always >= 0 per draw, floored BEFORE the percentile is taken --
+            #     the mathematically correct order). This is what actually got
+            #     simulated -- used for the main flows-over-time plot and period
+            #     sums (matches `cumulative_inflow`'s own convention).
+            #   - "inflow_raw_by_year_band": from `inflow_by_year` (the unfloored
+            #     residual, can be negative -- deliberately preserved, same
+            #     diagnostic role as `02_flows_by_drivetrain_check.png`'s
+            #     deterministic counterpart: a negative-residual year should never
+            #     be silently invisible). Was previously computed under the OLD key
+            #     name `inflow_by_year_band` and used (incorrectly, pre-fix) for the
+            #     main plot -- now kept only as the explicit diagnostic band.
             years_list = result["t"].tolist()
-            inflow_band = {
+            inflow_applied_band = {
+                "years": years_list,
+                "p2_5": np.percentile(result["inflow_applied_by_year"], 2.5, axis=1).tolist(),
+                "median": np.percentile(result["inflow_applied_by_year"], 50, axis=1).tolist(),
+                "p97_5": np.percentile(result["inflow_applied_by_year"], 97.5, axis=1).tolist(),
+            }
+            inflow_raw_band = {
                 "years": years_list,
                 "p2_5": np.percentile(result["inflow_by_year"], 2.5, axis=1).tolist(),
                 "median": np.percentile(result["inflow_by_year"], 50, axis=1).tolist(),
@@ -565,7 +604,8 @@ def main() -> dict[str, Path]:
             summary_by_drv[drivetrain] = {
                 "cumulative_inflow": summarize_distribution(result["cumulative_inflow"]),
                 "cumulative_out_survival": summarize_distribution(result["cumulative_out_survival"]),
-                "inflow_by_year_band": inflow_band,
+                "inflow_applied_by_year_band": inflow_applied_band,
+                "inflow_raw_by_year_band": inflow_raw_band,
                 "out_survival_by_year_band": out_survival_band,
             }
             s = summary_by_drv[drivetrain]["cumulative_out_survival"]
@@ -576,7 +616,13 @@ def main() -> dict[str, Path]:
             )
 
             # --- [NEW] period-based summaries for this drivetrain ---
-            inflow_period_sums = sum_by_period(result["inflow_by_year"], result["t"], output_periods)
+            # [FIXED] Was `result["inflow_by_year"]` (raw residual) -- inconsistent
+            # with `cumulative_inflow` above, which sums `inflow_applied` (>= 0 per
+            # draw). A negative-residual year would previously make a period's
+            # summed inflow LOWER than what was actually simulated for that period,
+            # and could even make a period sum negative. `inflow_applied_by_year`
+            # matches `cumulative_inflow`'s own convention exactly.
+            inflow_period_sums = sum_by_period(result["inflow_applied_by_year"], result["t"], output_periods)
             out_survival_period_sums = sum_by_period(result["out_survival_by_year"], result["t"], output_periods)
             drv_period_summary: dict[tuple[int, int], dict] = {}
             for period in output_periods:
@@ -658,7 +704,7 @@ def main() -> dict[str, Path]:
         colors = plt.cm.tab10.colors
         for i, drivetrain in enumerate(drivetrains_present):
             color = colors[i % len(colors)]
-            inb = summary_by_drv[drivetrain]["inflow_by_year_band"]
+            inb = summary_by_drv[drivetrain]["inflow_applied_by_year_band"]
             oub = summary_by_drv[drivetrain]["out_survival_by_year_band"]
             # [DISPLAY-ONLY FIX, this round -- same cause as plot_flows_by_drivetrain()
             # above] inb["years"][0]/oub["years"][0] is t0; inflow_by_year/
@@ -691,6 +737,62 @@ def main() -> dict[str, Path]:
         fig_path = fig_dir / "02_monte_carlo_flows_over_time.png"
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         print(f"Saved diagnostic plot: {fig_path}")
+
+        # -----------------------------------------------------------------------
+        # Plot 1b: [NEW] raw residual vs. actually-applied inflow, side by side --
+        # direct answer to "the two ways inflow is now tracked, plotted separately".
+        # Top panel: inflow_raw_by_year_band (unfloored residual -- CAN go negative;
+        # same diagnostic quantity `02_flows_by_drivetrain_check.png` shows for the
+        # deterministic run, just as a Monte Carlo band here). Bottom panel:
+        # inflow_applied_by_year_band (floored per draw before the percentile is
+        # taken -- always >= 0; this is what Plot 1 above uses, and what
+        # `cumulative_inflow` sums). For most drivetrains the two are visually
+        # identical (no negative-residual years ever occur for them); the
+        # difference is only visible for drivetrains that actually hit a
+        # negative-residual year (Liquids, Hybrid, in the run that produced the
+        # figure this was built to explain) -- exactly the years where natural
+        # attrition alone outpaces the falling REMIND target.
+        # -----------------------------------------------------------------------
+        fig, (ax_raw, ax_applied) = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
+        for i, drivetrain in enumerate(drivetrains_present):
+            color = colors[i % len(colors)]
+            rb = summary_by_drv[drivetrain]["inflow_raw_by_year_band"]
+            ab = summary_by_drv[drivetrain]["inflow_applied_by_year_band"]
+            # Same t0-skip display fix as Plot 1 above -- row 0 is always exactly 0.0.
+            ax_raw.plot(rb["years"][1:], rb["median"][1:], color=color, linewidth=1.6, label=drivetrain)
+            ax_raw.fill_between(rb["years"][1:], rb["p2_5"][1:], rb["p97_5"][1:], color=color, alpha=0.2)
+            ax_applied.plot(ab["years"][1:], ab["median"][1:], color=color, linewidth=1.6, label=drivetrain)
+            ax_applied.fill_between(ab["years"][1:], ab["p2_5"][1:], ab["p97_5"][1:], color=color, alpha=0.2)
+
+        ax_raw.axhline(0, color="black", linewidth=0.8)
+        ax_raw.set_title(
+            f"Monte Carlo: RAW residual inflow (target \u2212 remaining_total, can be negative), "
+            f"median + P2.5-P97.5 band (n={n_draws:,})",
+            fontsize=11,
+        )
+        ax_raw.set_ylabel("Inflow [million/year]")
+        ax_raw.grid(True, linestyle="--", alpha=0.3)
+        ax_raw.spines["top"].set_visible(False)
+        ax_raw.spines["right"].set_visible(False)
+        ax_raw.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+
+        ax_applied.axhline(0, color="black", linewidth=0.8)
+        ax_applied.set_title(
+            "Monte Carlo: APPLIED inflow (what was actually simulated, floored at 0 per draw), "
+            "median + P2.5-P97.5 band",
+            fontsize=11,
+        )
+        ax_applied.set_xlabel("Year")
+        ax_applied.set_ylabel("Inflow [million/year]")
+        ax_applied.grid(True, linestyle="--", alpha=0.3)
+        ax_applied.spines["top"].set_visible(False)
+        ax_applied.spines["right"].set_visible(False)
+        ax_applied.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+
+        plt.tight_layout(rect=[0, 0, 0.85, 1])
+        fig_path_raw_vs_applied = fig_dir / "02_monte_carlo_inflow_raw_vs_applied.png"
+        fig.savefig(fig_path_raw_vs_applied, dpi=150, bbox_inches="tight")
+        print(f"Saved diagnostic plot: {fig_path_raw_vs_applied}")
 
         # -----------------------------------------------------------------------
         # Plot 2: cumulative-by-2070 histograms, one per drivetrain -- "what's the

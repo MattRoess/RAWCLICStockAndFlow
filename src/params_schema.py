@@ -223,9 +223,9 @@ class StockFlowParams:
     # drift out of sync.
 
     lifetime_by_drv: dict[str, WeibullLifetime] = field(default_factory=lambda: {
-        "Hybrid": WeibullLifetime(3.0, 9.0),
+        "Hybrid": WeibullLifetime(3.0, 13.0),
         "PHEV":   WeibullLifetime(3.0, 9.0),
-        "HEV":    WeibullLifetime(3.0, 9.0),
+        "HEV":    WeibullLifetime(3.0, 13.0),
         "BEV":    WeibullLifetime(3.0, 13.0),
         "Liquids": WeibullLifetime(3.0, 13.0),
         "Petrol": WeibullLifetime(3.0, 13.0),
@@ -250,6 +250,28 @@ class StockFlowParams:
         "Hybrid": 0.08, "Liquids": 0.08,
         "FCEV": 0.08,   # PLACEHOLDER, not a verified real value.
         "Gases": 0.08,  # PLACEHOLDER, not a verified real value.
+    })
+
+    # [NEW] Previously only ever computed IMPLICITLY as
+    # `1 - unknown_whereabouts_share - export_share_by_drv` inside
+    # `disaggregation.compute_collected_export_unknown_shares` -- now an explicit
+    # point estimate in its own right, so it can carry its own Monte Carlo spread
+    # (`collected_share_relative_spread` below) instead of silently absorbing
+    # whatever the other two happen to sample. Values below are exactly
+    # `1 - unknown_whereabouts_share[drv] - export_share_by_drv[drv]` for every
+    # drivetrain -- numerically identical to the old implicit remainder, so the
+    # DETERMINISTIC (non-MC) path is byte-identical to before this change. What
+    # changes is only how Monte Carlo treats the three shares (see
+    # `*_share_relative_spread` below): none of the three is a privileged
+    # "remainder" that absorbs the other two's sampling noise -- collected, export,
+    # and unknown_whereabouts are all measured/estimated with their OWN
+    # uncertainty, and are sampled independently then normalized to sum to 1.
+    collected_share_by_drv: dict[str, float] = field(default_factory=lambda: {
+        "BEV": 0.88,
+        "HEV": 0.49, "PHEV": 0.49, "Diesel": 0.49, "Petrol": 0.49,
+        "Hybrid": 0.49, "Liquids": 0.49,
+        "FCEV": 0.49,   # PLACEHOLDER, matches export_share_by_drv's own placeholder note.
+        "Gases": 0.49,  # PLACEHOLDER, matches export_share_by_drv's own placeholder note.
     })
 
     negative_inflow_policy: str = "report_only"
@@ -363,7 +385,24 @@ class StockFlowParams:
     # .scale_lambda`, the Monte Carlo spread around it updates automatically, with no
     # separate value to keep in sync.
     lifetime_scale_lambda_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
-        drv: 0.15 for drv in ALL_DRIVETRAINS
+        # PLACEHOLDER values -- every drivetrain wrapped in AsymmetricSpread(lower,
+        # upper) rather than a plain float, so per-drivetrain asymmetry is a one-line
+        # edit here (change lower/upper independently) instead of a type change.
+        # lower=upper=0.15 for every entry below is numerically IDENTICAL to the old
+        # flat `0.15` float default -- this is a mechanical type conversion, not yet a
+        # real asymmetric belief about any drivetrain's lifetime. Tune lower/upper
+        # per drivetrain once real uncertainty ranges are available (e.g. "BEVs are
+        # unlikely to die much earlier than expected, but could plausibly last
+        # noticeably longer" -> lower=0.10, upper=0.25).
+        "Hybrid":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "PHEV":     AsymmetricSpread(lower=0.25, upper=0.40),
+        "HEV":      AsymmetricSpread(lower=0.25, upper=0.40),
+        "BEV":      AsymmetricSpread(lower=0.25, upper=0.40),
+        "Liquids":  AsymmetricSpread(lower=0.25, upper=0.40),
+        "Petrol":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "Diesel":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "Gases":    AsymmetricSpread(lower=0.25, upper=0.40),
+        "FCEV":     AsymmetricSpread(lower=0.25, upper=0.40),
     })
     # Used to build Triangular(point*(1-lower), point, point*(1+upper)) around
     # lifetime_by_drv[drv].scale_lambda -- `lower=upper=<the float>` when a plain float
@@ -376,15 +415,125 @@ class StockFlowParams:
     # PLACEHOLDER default (15%, symmetric) -- tune per drivetrain once real uncertainty
     # ranges (e.g. a survival-curve fit's own confidence interval) are available.
 
-    unknown_whereabouts_share_std: dict[str, float] = field(default_factory=lambda: {
-        drv: 0.05 for drv in ALL_DRIVETRAINS
+    # [FIXED, replaces unknown_whereabouts_share_std/export_share_std below] Was:
+    # two independent Normal(point, std, clip 0..1) spreads, with `collected_share`
+    # computed as whatever's left over (`1 - unknown - export`) -- meaning
+    # `collected_share` had NO uncertainty of its own, and silently absorbed both
+    # other shares' sampling noise. That was backwards: `collected` and `export`
+    # are the two MEASURED quantities (collection statistics, trade statistics),
+    # each with real uncertainty; `unknown_whereabouts` is itself an ESTIMATE, not
+    # a clean residual computed from a known total (total outflow itself is a
+    # model output of the lifetime survival curve, not independently measured
+    # either). None of the three has a privileged "remainder" status -- all three
+    # now get their OWN Triangular spread (same `float | AsymmetricSpread`
+    # convention as `lifetime_scale_lambda_relative_spread` above), sampled
+    # independently, then NORMALIZED per draw so they sum to exactly 1 (see
+    # `disaggregation.compute_collected_export_unknown_shares`). PLACEHOLDER
+    # magnitudes below (15%, symmetric) -- tune per drivetrain once real
+    # uncertainty ranges (e.g. from the underlying collection/trade statistics'
+    # own confidence intervals) are available.
+    #
+    # NOT MODELED (a known, flagged simplification, not silently ignored): these
+    # three shares were historically part of how the LIFETIME parameters
+    # themselves were back-calculated, so a real correlation between
+    # `lifetime_scale_lambda_relative_spread` draws and these three shares'
+    # draws likely exists. Sampled independently here (different spawn_key,
+    # same as before this change) for lack of the historical calibration data
+    # needed to model that correlation properly.
+    collected_share_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
+        # PLACEHOLDER values, but now DIFFERENTIATED (not flat 0.15 for everyone) --
+        # tight, since this is the MEASURED quantity (collection statistics).
+        # BEV: newer market, fewer years of collection-statistics history -> a bit
+        # less tight than the mature ICE/Hybrid group. FCEV/Gases: same "not a
+        # verified real value" caveat as their point estimates above -- widest of
+        # the three groups, reflecting that even less is actually known about them.
+        "BEV":     0.08,
+        "HEV":     0.05, "PHEV": 0.05, "Hybrid": 0.05,
+        "Diesel":  0.05, "Petrol": 0.05, "Liquids": 0.05,
+        "FCEV":    0.15,  # PLACEHOLDER, not a verified real value.
+        "Gases":   0.15,  # PLACEHOLDER, not a verified real value.
     })
-    # Used to build Normal(point, std, clip 0..1) around unknown_whereabouts_share[drv].
+    export_share_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
+        # Same grouping logic as collected_share_relative_spread above, but export
+        # (trade statistics) is somewhat noisier than collection statistics in
+        # general, hence slightly wider than the corresponding collected_share
+        # entry in every group.
+        "BEV":     0.15,
+        "HEV":     0.10, "PHEV": 0.10, "Hybrid": 0.10,
+        "Diesel":  0.10, "Petrol": 0.10, "Liquids": 0.10,
+        "FCEV":    0.20,  # PLACEHOLDER, not a verified real value.
+        "Gases":   0.20,  # PLACEHOLDER, not a verified real value.
+    })
+    unknown_whereabouts_share_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
+        # Deliberately the WIDEST of the three, per the reasoning behind this
+        # field's existence: unknown_whereabouts is an ESTIMATE, not a measurement
+        # -- and this is only the RESIDUAL spread (on top of the lifetime coupling
+        # below, which already adds substantial extra uncertainty of its own). Also
+        # given asymmetric upper > lower, reflecting that underestimating "how much
+        # we don't know" is a more common failure mode than overestimating it.
+        "BEV":     AsymmetricSpread(lower=0.20, upper=0.35),
+        "HEV":     AsymmetricSpread(lower=0.20, upper=0.35),
+        "PHEV":    AsymmetricSpread(lower=0.20, upper=0.35),
+        "Hybrid":  AsymmetricSpread(lower=0.20, upper=0.35),
+        "Diesel":  AsymmetricSpread(lower=0.20, upper=0.35),
+        "Petrol":  AsymmetricSpread(lower=0.20, upper=0.35),
+        "Liquids": AsymmetricSpread(lower=0.20, upper=0.35),
+        "FCEV":    AsymmetricSpread(lower=0.30, upper=0.50),  # PLACEHOLDER, not a verified real value.
+        "Gases":   AsymmetricSpread(lower=0.30, upper=0.50),  # PLACEHOLDER, not a verified real value.
+    })
+    # collected_share_relative_spread / export_share_relative_spread: used to build
+    # Triangular(point*(1-lower), point, point*(1+upper)) around their own point
+    # estimate (collected_share_by_drv[drv] / export_share_by_drv[drv]) -- `lower=
+    # upper=<float>` for symmetric (the default here), or `AsymmetricSpread(lower=...,
+    # upper=...)` per drivetrain, exactly like the lifetime spread above.
+    #
+    # unknown_whereabouts_share_relative_spread: [CHANGED MEANING] no longer built
+    # around the flat point estimate `unknown_whereabouts_share[drv]` directly --
+    # this drivetrain's `scale_lambda` draw (from stage 02) first shifts the
+    # CENTER via `unknown_share_lifetime_coupling_k` below, and THIS spread is the
+    # RESIDUAL Triangular noise layered around that shifted center (whatever
+    # uncertainty in "unknown" isn't already explained by that draw's own lifetime
+    # outcome). See `03_01_flowdriven.py`'s Monte Carlo block for the exact
+    # formula. Since part of unknown_share's total uncertainty is now explained by
+    # the lifetime coupling rather than sampled directly here, this residual
+    # spread being similar in magnitude to collected/export's own spread does NOT
+    # mean unknown's TOTAL uncertainty is similar to theirs -- the coupling term
+    # adds substantially more spread on top for any drivetrain with a wide
+    # lifetime spread.
 
-    export_share_std: dict[str, float] = field(default_factory=lambda: {
-        drv: 0.02 for drv in ALL_DRIVETRAINS
+    # [NEW] Couples this drivetrain's `scale_lambda` Monte Carlo draw (stage 02) to
+    # `unknown_whereabouts_share`'s central tendency for that SAME draw, per your
+    # own reasoning: a shorter-than-point-estimate lifetime draw implies MORE total
+    # outflow than collected+export alone explain, so the inferred "unknown" gap
+    # should be LARGER for that draw, not independent of it. Formula (see
+    # `03_01_flowdriven.py`):
+    #     rel_dev = (scale_lambda_draw - scale_lambda_point) / scale_lambda_point
+    #     unknown_share_center = unknown_whereabouts_share[drv] * (1 - k * rel_dev)
+    # `rel_dev < 0` (shorter-than-point lifetime draw) with `k > 0` makes
+    # `unknown_share_center > unknown_whereabouts_share[drv]` -- larger unknown
+    # share for a shorter-lifetime draw, matching the direction of your reasoning.
+    # `k = 0` recovers the OLD (pre-coupling) behavior exactly -- unknown_share
+    # centered on its own flat point estimate, `scale_lambda` fully independent.
+    # PLACEHOLDER (k=1.0 for every drivetrain, i.e. a 10% shorter lifetime draw
+    # shifts the center ~10% higher, before the residual Triangular noise and
+    # final normalization) -- this is a genuine modeling assumption with no
+    # first-principles derivation available; tune per drivetrain once you have a
+    # real basis for the coupling strength (e.g. from however "unknown" was
+    # historically inferred when the lifetime parameters were originally
+    # calibrated).
+    unknown_share_lifetime_coupling_k: dict[str, float] = field(default_factory=lambda: {
+        # Same k=1.0 baseline as before for the mature ICE/Hybrid/BEV group.
+        # FCEV/Gases get a STRONGER coupling (1.5) -- with so little else known
+        # about these drivetrains (see their placeholder point estimates and
+        # widest-of-all spreads above), leaning more heavily on "shorter lifetime
+        # implies more unexplained outflow" is more defensible than pretending
+        # scale_lambda and unknown_share are independent for them.
+        "BEV":     1.0,
+        "HEV":     1.0, "PHEV": 1.0, "Hybrid": 1.0,
+        "Diesel":  1.0, "Petrol": 1.0, "Liquids": 1.0,
+        "FCEV":    1.5,  # PLACEHOLDER, not a verified real value.
+        "Gases":   1.5,  # PLACEHOLDER, not a verified real value.
     })
-    # Used to build Normal(point, std, clip 0..1) around export_share_by_drv[drv].
 
     def validate(self) -> list[str]:
         issues: list[str] = []
@@ -403,15 +552,25 @@ class StockFlowParams:
                 issues.append(f"stock_flow.lifetime_scale_lambda_relative_spread['{drv}'] = {spread} must be >= 0.")
 
         for name, mapping in (
-            ("unknown_whereabouts_share_std", self.unknown_whereabouts_share_std),
-            ("export_share_std", self.export_share_std),
+            ("collected_share_relative_spread", self.collected_share_relative_spread),
+            ("export_share_relative_spread", self.export_share_relative_spread),
+            ("unknown_whereabouts_share_relative_spread", self.unknown_whereabouts_share_relative_spread),
         ):
             missing = lifetime_drvs - set(mapping)
             if missing:
                 issues.append(f"stock_flow.{name} is missing drivetrains present in lifetime_by_drv: {sorted(missing)}.")
             for drv, spread in mapping.items():
-                if spread < 0:
+                if isinstance(spread, AsymmetricSpread):
+                    issues += spread.validate(field_name=f"stock_flow.{name}['{drv}']")
+                elif spread < 0:
                     issues.append(f"stock_flow.{name}['{drv}'] = {spread} must be >= 0.")
+
+        missing_k = lifetime_drvs - set(self.unknown_share_lifetime_coupling_k)
+        if missing_k:
+            issues.append(
+                f"stock_flow.unknown_share_lifetime_coupling_k is missing drivetrains "
+                f"present in lifetime_by_drv: {sorted(missing_k)}."
+            )
 
         if self.negative_inflow_policy not in {"report_only", "clip_to_target"}:
             issues.append(
@@ -455,6 +614,7 @@ class StockFlowParams:
         for name, mapping in (
             ("export_share_by_drv", self.export_share_by_drv),
             ("unknown_whereabouts_share", self.unknown_whereabouts_share),
+            ("collected_share_by_drv", self.collected_share_by_drv),
         ):
             missing = lifetime_drvs - set(mapping)
             if missing:
@@ -462,6 +622,24 @@ class StockFlowParams:
             for drv, share in mapping.items():
                 if share is not None and not (0.0 <= share <= 1.0):
                     issues.append(f"stock_flow.{name}['{drv}'] = {share} is outside [0, 1].")
+
+        # [NEW] The three point estimates are supposed to sum to 1 per drivetrain --
+        # this isn't ENFORCED at sample time any more (they're independently sampled
+        # and normalized, see disaggregation.compute_collected_export_unknown_shares),
+        # so a typo'd point estimate here would previously be silently corrected by
+        # that normalization at every draw without ever surfacing as an error. Catch
+        # it here instead, at the point estimate level, where it's actually a mistake.
+        for drv in lifetime_drvs:
+            total = (
+                self.collected_share_by_drv.get(drv, 0.0)
+                + self.export_share_by_drv.get(drv, 0.0)
+                + self.unknown_whereabouts_share.get(drv, 0.0)
+            )
+            if abs(total - 1.0) > 1e-6:
+                issues.append(
+                    f"stock_flow: collected_share_by_drv['{drv}'] + export_share_by_drv['{drv}'] + "
+                    f"unknown_whereabouts_share['{drv}'] = {total}, expected 1.0."
+                )
 
         missing_override = lifetime_drvs - set(self.lifetime_override_by_drv)
         if missing_override:
@@ -714,7 +892,7 @@ class AdjustedFlowsParams:
             # segment-mix data stays fully deterministic. Not yet set for the other four
             # segment-mix scenarios (BEV_A_F, BEV_JA_JF, BEV_large, BEV_small) -- BAU is
             # a deliberate pilot; extend the same pattern to those once this is verified.
-            inflow_segment_share_spread=AsymmetricSpread(lower=0.10, upper=0.15),
+            inflow_segment_share_spread=AsymmetricSpread(lower=0.20, upper=0.40),
         ),
         "BEV_only": ScenarioSpec(
             name="BEV_only",

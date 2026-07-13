@@ -954,6 +954,19 @@ def run_flow_driven_model_with_outflow_disaggregation(
        applied to EVERY drivetrain/segment's inflow uniformly from that year onward.
        Currently `1.0` (no-op) everywhere it's called.
 
+    5. **[FIXED] Inflow is floored at 0 before being added to any cohort**:
+       `inflow_map`/`inflow_col` is typically stage 02's raw residual
+       (`matrices_by_key`'s flows_df["inflow"]), which can be negative in years just
+       before a drivetrain's `hard_zero_inflow_from_year` cutoff (see
+       stockflow_model.py's `_run_cohort_recurrence` docstring -- that raw value is
+       deliberately preserved there for diagnostics). This function used to add that
+       raw value directly to a cohort's stock; a negative value would silently
+       SUBTRACT from a single vintage's cohort, producing a spurious dip in total
+       outflow the following year(s) once that cohort's hazard was applied. The raw
+       value is still what gets RECORDED in `flows_rows["inflow"]` (same "always show
+       the raw residual" convention as stage 02) -- only what gets added to a
+       cohort's stock is floored.
+
     CONFIRMED DEAD PARAMETERS (accepted in the signature, never read in the function
     body below): `export_r_by_drv`, `age_bins`, `export_rate`, `export_total_by_year`,
     `segment_shares_by_drv`, `allowed_export_segments`. See the module docstring at the
@@ -1072,13 +1085,30 @@ def run_flow_driven_model_with_outflow_disaggregation(
             if t >= stock_modifier_start_year:
                 inflow_t *= stock_modifier_2027
 
+            # [FIXED] `inflow_t` here is stage 02's raw, possibly-negative residual
+            # (matrices_by_key's flows_df["inflow"] -- see stockflow_model.py's
+            # `_run_cohort_recurrence`, which deliberately preserves the raw residual
+            # for diagnostics, e.g. in the years just before a drivetrain's
+            # hard_zero_inflow_from_year cutoff). Stage 02's OWN recurrence always
+            # floors this at 0 (`inflow_applied = max(inflow_raw, 0.0)`) before
+            # adding it to cohort_state -- this function was missing that same floor,
+            # so a negative raw residual got SUBTRACTED from a single vintage
+            # cohort's stock here, producing an artificial one-cohort depletion whose
+            # effect shows up as a sharp, spurious dip in total outflow the following
+            # year(s) once that cohort's hazard is applied (self-corrects once other
+            # cohorts dominate the sum again). `inflow_t` itself (raw) is still what
+            # gets recorded in `flows_rows["inflow"]` below, matching stage 02's own
+            # "always show the raw residual" diagnostic convention -- only what gets
+            # ADDED to a cohort changes.
+            inflow_applied_t = max(inflow_t, 0.0)
+
             if outflow_timing == "post_inflow":
                 stock_base = stock_start.copy()
                 for j, tau in enumerate(cohort_years):
                     if tau > t:
                         continue
                     if tau == t:
-                        stock_base[j] += inflow_t
+                        stock_base[j] += inflow_applied_t
 
                 ages_base = (t - cohort_years).astype(int)
                 active = cohort_years <= t
@@ -1121,7 +1151,7 @@ def run_flow_driven_model_with_outflow_disaggregation(
             if outflow_timing != "post_inflow":
                 for j, tau in enumerate(cohort_years):
                     if tau == t:
-                        stock_end[j] += inflow_t
+                        stock_end[j] += inflow_applied_t
                         break
 
             flows_rows.append(
@@ -1236,11 +1266,36 @@ def run_flow_driven_model_monte_carlo(
     lifetime_by_drv: dict,
     unknown_whereabouts_share: dict[str, float],
     export_share_by_drivetrain: dict[str, float],
+    # [NEW] Previously implicit (share_c/"collected" was always `1 - export -
+    # unknown`, no uncertainty of its own -- see cohort_flow_mc.py's
+    # normalize_three_shares). Now required, matching params_schema.py's
+    # StockFlowParams.collected_share_by_drv.
+    collected_share_by_drivetrain: dict[str, float],
     starting_stock_by_cohort_lookup: dict[tuple, dict[int, float]] | None = None,
     n_draws: int = 1,
-    lifetime_scale_lambda_relative_spread: dict[str, float] | float | None = None,
-    unknown_whereabouts_share_std: dict[str, float] | None = None,
-    export_share_std: dict[str, float] | None = None,
+    # A single float (symmetric), a (lower, upper) tuple/list, any object exposing
+    # `.lower`/`.upper` (e.g. `params_schema.AsymmetricSpread`), a dict of any of
+    # those keyed by drivetrain, or None (no uncertainty) -- passed straight through
+    # to `cohort_flow_mc.run_cohort_flow_monte_carlo`'s parameter of the same name.
+    # See that function's `resolve_lifetime_spread`/`as_spread_pair` for the exact
+    # resolution rules.
+    lifetime_scale_lambda_relative_spread: "_cohort_flow_mc._SpreadSpec" = None,
+    # [FIXED, replaces unknown_whereabouts_share_std/export_share_std] Was two
+    # independent Normal-std spreads with collected_share as a no-uncertainty
+    # remainder. Now three Triangular spreads (same `_SpreadSpec` convention as
+    # lifetime_scale_lambda_relative_spread), matching params_schema.py's
+    # collected_share_relative_spread / export_share_relative_spread /
+    # unknown_whereabouts_share_relative_spread.
+    collected_share_relative_spread: "_cohort_flow_mc._SpreadSpec" = None,
+    export_share_relative_spread: "_cohort_flow_mc._SpreadSpec" = None,
+    unknown_whereabouts_share_relative_spread: "_cohort_flow_mc._SpreadSpec" = None,
+    # [NEW] Couples unknown_whereabouts_share's center to each draw's own
+    # scale_lambda outcome -- see cohort_flow_mc.py's share_b_lifetime_coupling_k_
+    # by_entity docstring, and params_schema.py's
+    # StockFlowParams.unknown_share_lifetime_coupling_k. `None`/0 (default) means
+    # no coupling, unknown_whereabouts_share centered on its own flat point
+    # estimate like the other two shares.
+    unknown_share_lifetime_coupling_k: dict[str, float] | float | None = None,
     year_col: str = "year",
     inflow_col: str = "value",
     group_cols: list[str] | None = None,
@@ -1270,11 +1325,11 @@ def run_flow_driven_model_monte_carlo(
     run_cohort_flow_monte_carlo` for the full model description and
     uncertainty conventions -- this function just maps this project's
     drivetrain-keyed parameter dicts onto that generic API
-    (`entity_key_col="Drive Train"`, `share_a="export"`, `share_b="unknown"`)
-    and translates `stock_modifier_2027` into the engine's generic
-    `period_inflow_multiplier` ({year: multiplier} for every year >=
-    `stock_modifier_start_year`, a real parameter, default 2027 -- not a
-    hardcoded literal, matching the fix applied to the scalar function).
+    (`entity_key_col="Drive Train"`, `share_a="export"`, `share_b="unknown"`,
+    `share_c="collected"`) and translates `stock_modifier_2027` into the
+    engine's generic `period_inflow_multiplier` ({year: multiplier} for every
+    year >= `stock_modifier_start_year`, a real parameter, default 2027 -- not
+    a hardcoded literal, matching the fix applied to the scalar function).
 
     `output_periods`: list of `(start_year, end_year)` inclusive ranges to
     report cumulative flows/inflow/stock for -- see `cohort_flow_mc.
@@ -1312,12 +1367,15 @@ def run_flow_driven_model_monte_carlo(
         lifetime_by_entity=lifetime_by_drv,
         share_a_by_entity=export_share_by_drivetrain,
         share_b_by_entity=unknown_whereabouts_share,
-        share_a_name="export", share_b_name="unknown",
+        share_c_by_entity=collected_share_by_drivetrain,
+        share_a_name="export", share_b_name="unknown", share_c_name="collected",
         starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup,
         n_draws=n_draws,
         lifetime_scale_lambda_relative_spread_by_entity=lifetime_scale_lambda_relative_spread,
-        share_a_std_by_entity=export_share_std,
-        share_b_std_by_entity=unknown_whereabouts_share_std,
+        share_a_relative_spread_by_entity=export_share_relative_spread,
+        share_b_relative_spread_by_entity=unknown_whereabouts_share_relative_spread,
+        share_c_relative_spread_by_entity=collected_share_relative_spread,
+        share_b_lifetime_coupling_k_by_entity=unknown_share_lifetime_coupling_k,
         year_col=year_col, inflow_col=inflow_col,
         outflow_timing=outflow_timing,
         lifetime_change_by_entity=lifetime_change_by_drv,
@@ -1355,6 +1413,7 @@ def run_flow_driven_model_monte_carlo(
     for drv_draws in result.get("entity_draws", {}).values():
         drv_draws["export"] = drv_draws["share_a"]
         drv_draws["unknown"] = drv_draws["share_b"]
+        drv_draws["collected"] = drv_draws["share_c"]
 
     result["eu_total"] = dict(result["total"])
 

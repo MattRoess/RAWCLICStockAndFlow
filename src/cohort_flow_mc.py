@@ -74,7 +74,7 @@ UNCERTAINTY CONVENTION
     entity -- a "general" scenario, e.g. "assume 15% lifetime uncertainty
     across the board") OR as a dict keyed by entity (a "specific" scenario,
     e.g. "BEV lifetime is far more uncertain than Diesel's"). See
-    `_resolve_lifetime_spread`/`_as_spread_pair`.
+    `resolve_lifetime_spread`/`as_spread_pair`.
   - Destination shares vary per draw via `monte_carlo.Normal(point, std)`
     clipped to [0, 1] -- matches `params_schema.py`'s `unknown_whereabouts_
     share_std` / `export_share_std` convention. If two shares for the same
@@ -147,7 +147,7 @@ import src.monte_carlo as _monte_carlo
 # None (no uncertainty). Left as `Any`-ish rather than a precise Union since
 # the "object with .lower/.upper" branch is intentionally duck-typed -- this
 # module deliberately doesn't import params_schema.AsymmetricSpread itself
-# (stays product-agnostic). See `_resolve_lifetime_spread`/`_as_spread_pair`.
+# (stays product-agnostic). See `resolve_lifetime_spread`/`as_spread_pair`.
 _SpreadSpec = Any
 
 
@@ -185,7 +185,7 @@ def _resolve_entity_param(
     sampling code path runs -- only which value(s) they pass in.
 
     Used for SYMMETRIC parameters only (e.g. share stds). For the lifetime
-    spread, which can be asymmetric, see `_resolve_lifetime_spread` below.
+    spread, which can be asymmetric, see `resolve_lifetime_spread` below.
     """
     if value is None:
         return default
@@ -194,8 +194,16 @@ def _resolve_entity_param(
     return float(value)
 
 
-def _as_spread_pair(value) -> tuple[float, float]:
+def as_spread_pair(value) -> tuple[float, float]:
     """
+    [PUBLIC, shared] Promoted from a private (`_`-prefixed) helper to a public one:
+    originally only used internally by this module's own `run_cohort_flow_monte_carlo`,
+    now ALSO imported directly by `02_stockdriven.py` for stage 02's lifetime sampling
+    -- one shared implementation of "how do we turn a spread spec into Triangular
+    bounds", rather than stage 02 re-deriving the same symmetric-only formula
+    separately (which is what it did before this change, and which silently couldn't
+    handle `AsymmetricSpread` -- see fix log).
+
     Normalize a single spread value into a (lower, upper) pair.
 
     A symmetric spread was never actually required by the Triangular
@@ -220,14 +228,14 @@ def _as_spread_pair(value) -> tuple[float, float]:
     return (float(value), float(value))
 
 
-def _resolve_lifetime_spread(
+def resolve_lifetime_spread(
     value, entity: str, default: tuple[float, float] = (0.0, 0.0)
 ) -> tuple[float, float]:
     """
     Resolve the lifetime relative-spread specification for one entity into a
     `(lower_spread, upper_spread)` pair. Same general/per-entity dual mode as
     `_resolve_entity_param`, but each resolved value can ALSO be asymmetric
-    (see `_as_spread_pair`):
+    (see `as_spread_pair`):
       - `None` -> `default` (no uncertainty)
       - a single float `s`, or an asymmetric spread object/tuple, applied
         uniformly to every entity (a "general" scenario)
@@ -240,11 +248,11 @@ def _resolve_lifetime_spread(
     if isinstance(value, dict):
         if entity not in value:
             return default
-        return _as_spread_pair(value[entity])
-    return _as_spread_pair(value)
+        return as_spread_pair(value[entity])
+    return as_spread_pair(value)
 
 
-def _sample_relative_triangular_scale(
+def sample_relative_triangular_scale(
     point: float, lower_spread: float, upper_spread: float, n_draws: int, rng: np.random.Generator
 ) -> np.ndarray:
     """
@@ -281,19 +289,64 @@ def _sample_relative_triangular_scale(
     return _monte_carlo.Triangular(low=low, mode=float(point), high=high).sample(rng, n=n_draws)
 
 
-def _sample_clipped_normal(
-    point: float, std: float, n_draws: int, rng: np.random.Generator,
-    clip_min: float = 0.0, clip_max: float = 1.0,
+def normalize_three_shares(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    [NEW] Normalizes three non-negative arrays to sum to exactly 1, elementwise.
+    Generic three-way analog of the vehicle pipeline's `disaggregation.
+    compute_collected_export_unknown_shares` -- deliberately duplicated rather
+    than imported, since THIS module is product-agnostic (see module docstring)
+    and `disaggregation.py` is vehicle-pipeline-specific; this is the shared
+    engine's own version of the same idea; replaces the old two-share-plus-
+    remainder approach (`share_a`/`share_b` sampled, third bucket = `1 - a - b`),
+    which gave `share_c`/`"collected"` no uncertainty of its own.
+
+    Each input clipped to >= 0 first (guards a stray negative Triangular tail
+    draw). If all three are <= 0 for a given entry, that entry is forced to
+    `(0, 0, 0)` instead of dividing by zero, with a count printed.
+    """
+    a = np.clip(np.asarray(a, dtype=float), 0.0, None)
+    b = np.clip(np.asarray(b, dtype=float), 0.0, None)
+    c = np.clip(np.asarray(c, dtype=float), 0.0, None)
+    total = a + b + c
+    zero_total = total <= 0.0
+    if np.any(zero_total):
+        print(
+            f"NOTE: {int(np.sum(zero_total))}/{np.size(total)} entries had all three "
+            f"shares <= 0 after clipping -- set to (0, 0, 0) instead of dividing by zero."
+        )
+    safe_total = np.where(zero_total, 1.0, total)
+    a_out = np.where(zero_total, 0.0, a / safe_total)
+    b_out = np.where(zero_total, 0.0, b / safe_total)
+    c_out = np.where(zero_total, 0.0, c / safe_total)
+    return a_out, b_out, c_out
+
+
+def sample_relative_triangular_scale_varying_center(
+    rng: np.random.Generator, center_draws: np.ndarray, lower_spread: float, upper_spread: float,
 ) -> np.ndarray:
     """
-    Sample Normal(point, std), clipped to [clip_min, clip_max], via this
-    project's own `monte_carlo.Normal` class. `std<=0` or `n_draws==1`
-    short-circuits to a point mass at `point` -- same reasoning as
-    `_sample_relative_triangular_scale` above.
+    [NEW, promoted from 03_01_flowdriven.py's local `_sample_coupled_residual_
+    triangular` -- now shared, since this engine also needs it] Per-draw-VARYING-
+    center Triangular sampling. Unlike `sample_relative_triangular_scale` (one
+    fixed point shared by every draw), each draw here gets its OWN center
+    (`center_draws[i]`), with residual Triangular noise layered around THAT
+    value -- used for a share whose central tendency is itself a function of
+    another per-draw quantity (e.g. `share_b`'s coupling to that entity's own
+    `scale_lambda` draw below), not a single flat point estimate.
+
+    `center_draws` should already be elementwise positive; floored defensively
+    at 1% of each draw's own center as a safety net, same convention as
+    `sample_relative_triangular_scale`.
+
+    `numpy.random.Generator.triangular(left, mode, right)` broadcasts array
+    arguments natively -- one call, not a per-draw Python loop.
     """
-    if std <= 0 or n_draws == 1:
-        return np.full(n_draws, float(point), dtype=float)
-    return _monte_carlo.Normal(mean=float(point), std=float(std), clip_min=clip_min, clip_max=clip_max).sample(rng, n=n_draws)
+    center = np.asarray(center_draws, dtype=float)
+    if lower_spread <= 0 and upper_spread <= 0:
+        return center.copy()
+    low = np.maximum(center * (1.0 - lower_spread), center * 0.01)
+    high = center * (1.0 + upper_spread)
+    return rng.triangular(low, center, high)
 
 
 def run_cohort_flow_monte_carlo(
@@ -306,17 +359,41 @@ def run_cohort_flow_monte_carlo(
     lifetime_by_entity: dict[str, dict[str, float]],
     share_a_by_entity: dict[str, float],
     share_b_by_entity: dict[str, float],
+    share_c_by_entity: dict[str, float],
     share_a_name: str = "export",
     share_b_name: str = "unknown",
+    share_c_name: str = "collected",
     starting_stock_by_cohort_lookup: dict[tuple, dict[int, float]] | None = None,
     n_draws: int = 1,
     # Each value (top-level or per-entity within the dict) may be a plain float
     # (symmetric spread), a (lower, upper) tuple/list, or any object exposing
     # `.lower`/`.upper` (e.g. `params_schema.AsymmetricSpread`) -- see
-    # `_resolve_lifetime_spread`/`_as_spread_pair`.
+    # `resolve_lifetime_spread`/`as_spread_pair`.
     lifetime_scale_lambda_relative_spread_by_entity: _SpreadSpec = None,
-    share_a_std_by_entity: dict[str, float] | None = None,
-    share_b_std_by_entity: dict[str, float] | None = None,
+    # [FIXED, replaces share_a_std_by_entity/share_b_std_by_entity] Was: two
+    # independent Normal(point, std, clip 0..1) spreads for share_a/share_b, with
+    # share_c ("collected" by default) computed as whatever's left over
+    # (`1 - a - b`) -- meaning share_c had NO uncertainty of its own. Now all
+    # THREE shares get their own Triangular spread (same `_SpreadSpec` convention
+    # as the lifetime spread above), sampled independently, then NORMALIZED per
+    # draw so they sum to exactly 1 (see `normalize_three_shares`) -- no
+    # privileged remainder share.
+    share_a_relative_spread_by_entity: _SpreadSpec = None,
+    share_b_relative_spread_by_entity: _SpreadSpec = None,
+    share_c_relative_spread_by_entity: _SpreadSpec = None,
+    # [NEW] Optional coupling: shifts share_b's CENTER for a given draw based on
+    # THAT SAME draw's scale_lambda outcome, before the residual Triangular noise
+    # above is layered on top. `{entity: k}` (or a single float applied to every
+    # entity, or missing/None -- default 0.0 = no coupling, fully backward
+    # compatible with share_b sampled around its own flat point estimate).
+    # Formula: `rel_dev = (scale_lambda_draw - scale_lambda_point) /
+    # scale_lambda_point; share_b_center = share_b_point * (1 - k * rel_dev)`.
+    # This is deliberately NOT product-specific despite the vehicle pipeline's
+    # own "shorter lifetime -> more unexplained outflow" motivation for it --
+    # any product where one share's magnitude is believed to move with the
+    # entity's own lifetime uncertainty can use it, hence living in the generic
+    # engine rather than only in `flowdriven_model.py`'s wrapper.
+    share_b_lifetime_coupling_k_by_entity: dict[str, float] | float | None = None,
     year_col: str = "year",
     inflow_col: str = "value",
     outflow_timing: str = "post_inflow",
@@ -339,12 +416,15 @@ def run_cohort_flow_monte_carlo(
 
     Each period's attrition ("out_survival" = total retiring cohort members)
     is split into three named outcomes: `share_a_name` (default "export"),
-    `share_b_name` (default "unknown"), and an implicit third residual bucket
-    always named "collected" (= 1 - share_a - share_b). This matches the
-    3-way collected/export/unknown-whereabouts split used by the vehicle
-    pipeline today; a product with a different residual-flow name should
-    still call the third bucket "collected" in the returned arrays (it is the
-    generic "everything else" bucket, not vehicle-specific).
+    `share_b_name` (default "unknown"), and `share_c_name` (default
+    "collected") -- ALL THREE explicitly sampled and independently uncertain
+    (see `share_a_relative_spread_by_entity`/etc. below), normalized to sum to
+    1 per draw via `normalize_three_shares`. [CHANGED] `share_c`/"collected"
+    used to be an IMPLICIT remainder (`1 - share_a - share_b`, no uncertainty
+    of its own) -- now a first-class sampled input like the other two. This
+    matches the 3-way collected/export/unknown-whereabouts split used by the
+    vehicle pipeline today; a product with a different residual-flow name
+    should still pass its own name via `share_c_name`.
 
     `period_inflow_multiplier`: optional {year: multiplier} dict applied
     flatly to that year's inflow for every entity/group (e.g. the vehicle
@@ -426,6 +506,7 @@ def run_cohort_flow_monte_carlo(
               "scale_lambda": np.ndarray (n_draws,),
               "share_a": np.ndarray (n_draws,),
               "share_b": np.ndarray (n_draws,),
+              "share_c": np.ndarray (n_draws,),
           }, ...},
         }
     """
@@ -434,10 +515,14 @@ def run_cohort_flow_monte_carlo(
 
     if starting_stock_by_cohort_lookup is None:
         starting_stock_by_cohort_lookup = {}
-    if share_a_std_by_entity is None:
-        share_a_std_by_entity = {}
-    if share_b_std_by_entity is None:
-        share_b_std_by_entity = {}
+    if share_a_relative_spread_by_entity is None:
+        share_a_relative_spread_by_entity = {}
+    if share_b_relative_spread_by_entity is None:
+        share_b_relative_spread_by_entity = {}
+    if share_c_relative_spread_by_entity is None:
+        share_c_relative_spread_by_entity = {}
+    if share_b_lifetime_coupling_k_by_entity is None:
+        share_b_lifetime_coupling_k_by_entity = {}
     if period_inflow_multiplier is None:
         period_inflow_multiplier = {}
     if inflow_draws_by_group is None:
@@ -491,22 +576,46 @@ def run_cohort_flow_monte_carlo(
         if entity not in entity_draw_cache:
             shape_k_point = float(lifetime_by_entity[entity]["shape_k"])
             scale_lambda_point = float(lifetime_by_entity[entity]["scale_lambda"])
-            lower_spread, upper_spread = _resolve_lifetime_spread(
+            lower_spread, upper_spread = resolve_lifetime_spread(
                 lifetime_scale_lambda_relative_spread_by_entity, entity, default=(0.0, 0.0)
             )
-            a_point = float(share_a_by_entity[entity])
-            a_std = float(share_a_std_by_entity.get(entity, 0.0))
-            b_point = float(share_b_by_entity[entity])
-            b_std = float(share_b_std_by_entity.get(entity, 0.0))
 
             entity_seed = ss.spawn(1)[0]
             rng = np.random.default_rng(entity_seed)
 
-            scale_lambda_draws_full = _sample_relative_triangular_scale(
+            scale_lambda_draws_full = sample_relative_triangular_scale(
                 scale_lambda_point, lower_spread, upper_spread, n_draws, rng
             )
-            a_draws_full = _sample_clipped_normal(a_point, a_std, n_draws, rng)
-            b_draws_full = _sample_clipped_normal(b_point, b_std, n_draws, rng)
+
+            # [FIXED, replaces two independent _sample_clipped_normal calls +
+            # implicit "c = 1 - a - b" remainder] share_a and share_c are sampled
+            # independently via Triangular, each around its OWN point estimate.
+            # share_b is coupled to THIS entity's own scale_lambda draw (see
+            # share_b_lifetime_coupling_k_by_entity docstring above) before its
+            # own residual Triangular noise is layered on top -- k=0 (the default
+            # when not supplied) recovers a flat-centered Triangular exactly like
+            # share_a/share_c. All three are then normalized to sum to 1.
+            a_point = float(share_a_by_entity[entity])
+            a_lower, a_upper = resolve_lifetime_spread(share_a_relative_spread_by_entity, entity, default=(0.0, 0.0))
+            a_draws_raw = sample_relative_triangular_scale(a_point, a_lower, a_upper, n_draws, rng)
+
+            c_point = float(share_c_by_entity[entity])
+            c_lower, c_upper = resolve_lifetime_spread(share_c_relative_spread_by_entity, entity, default=(0.0, 0.0))
+            c_draws_raw = sample_relative_triangular_scale(c_point, c_lower, c_upper, n_draws, rng)
+
+            b_point = float(share_b_by_entity[entity])
+            b_lower, b_upper = resolve_lifetime_spread(share_b_relative_spread_by_entity, entity, default=(0.0, 0.0))
+            if isinstance(share_b_lifetime_coupling_k_by_entity, dict):
+                coupling_k = float(share_b_lifetime_coupling_k_by_entity.get(entity, 0.0))
+            else:
+                coupling_k = float(share_b_lifetime_coupling_k_by_entity or 0.0)
+            rel_dev = (scale_lambda_draws_full - scale_lambda_point) / scale_lambda_point
+            b_center_draws = np.clip(b_point * (1.0 - coupling_k * rel_dev), 1e-6, None)
+            b_draws_raw = sample_relative_triangular_scale_varying_center(rng, b_center_draws, b_lower, b_upper)
+
+            a_draws_full, b_draws_full, c_draws_full = normalize_three_shares(
+                a_draws_raw, b_draws_raw, c_draws_raw
+            )
 
             override = None
             if (
@@ -526,19 +635,16 @@ def run_cohort_flow_monte_carlo(
                     "scale_lambda_draws_full": override_scale_lambda_draws_full,
                 }
 
-            # Rescale a+b if their sum exceeds 1 for any draw (preserves ratio).
-            share_sum = a_draws_full + b_draws_full
-            over = share_sum > 1.0
-            if np.any(over):
-                scale_down = np.where(over, 1.0 / share_sum, 1.0)
-                a_draws_full = a_draws_full * scale_down
-                b_draws_full = b_draws_full * scale_down
+            # [REMOVED] Old "rescale a+b if sum > 1" safety clamp -- no longer
+            # needed, `normalize_three_shares` above already guarantees all
+            # three (not just two) sum to exactly 1 for every draw.
 
             entity_draw_cache[entity] = {
                 "shape_k_point": shape_k_point,
                 "scale_lambda_draws_full": scale_lambda_draws_full,
                 "a_draws_full": a_draws_full,
                 "b_draws_full": b_draws_full,
+                "c_draws_full": c_draws_full,
                 "override": override,
             }
 
@@ -547,6 +653,7 @@ def run_cohort_flow_monte_carlo(
         scale_lambda_draws_full = ec["scale_lambda_draws_full"]
         a_draws_full = ec["a_draws_full"]
         b_draws_full = ec["b_draws_full"]
+        c_draws_full = ec["c_draws_full"]
         override = ec["override"]
 
         year_inflow_map = dict(zip(sub[year_col], sub[inflow_col]))
@@ -628,6 +735,7 @@ def run_cohort_flow_monte_carlo(
             scale_lambda_draws = scale_lambda_draws_full[chunk_start:chunk_end]
             a_draws = a_draws_full[chunk_start:chunk_end]
             b_draws = b_draws_full[chunk_start:chunk_end]
+            c_draws = c_draws_full[chunk_start:chunk_end]
             shape_k_draws = np.full(d, shape_k_point, dtype=float)
 
             if override is not None:
@@ -658,6 +766,20 @@ def run_cohort_flow_monte_carlo(
                     inflow_t_draws = np.full(d, inflow_t_scalar, dtype=float)
                 if t in period_inflow_multiplier:
                     inflow_t_draws = inflow_t_draws * float(period_inflow_multiplier[t])
+                # [FIXED] `year_inflow_map` is sourced from stage 02's raw, possibly-
+                # negative residual (`matrices_by_key`'s flows_df["inflow"] -- see
+                # stockflow_model.py's `_run_cohort_recurrence`, which deliberately
+                # keeps the raw residual visible for diagnostics near a drivetrain's
+                # hard_zero_inflow_from_year cutoff). Stage 02's OWN recurrence always
+                # floors this at 0 before adding to cohort state; this engine was
+                # missing that same floor, so a negative-residual year got SUBTRACTED
+                # from a single vintage cohort's stock here too -- same root cause as
+                # the scalar `run_flow_driven_model_with_outflow_disaggregation`,
+                # fixed there for the same reason. Floored here, once, before either
+                # the stock update below OR `cum_inflow_by_period` accumulation, so
+                # both are consistent (unlike the scalar function, this engine has no
+                # separate raw-residual diagnostic field to preserve).
+                inflow_t_draws = np.maximum(inflow_t_draws, 0.0)
 
                 if outflow_timing == "post_inflow":
                     stock_base = stock_start.copy()
@@ -686,7 +808,7 @@ def run_cohort_flow_monte_carlo(
 
                 out_a = out_surv * a_draws[:, None]
                 out_b = out_surv * b_draws[:, None]
-                out_collected = out_surv * (1.0 - a_draws - b_draws)[:, None]
+                out_collected = out_surv * c_draws[:, None]
 
                 out_surv_sum = out_surv.sum(axis=1)
                 out_a_sum = out_a.sum(axis=1)
@@ -796,6 +918,7 @@ def run_cohort_flow_monte_carlo(
             "scale_lambda": ec["scale_lambda_draws_full"],
             "share_a": ec["a_draws_full"],
             "share_b": ec["b_draws_full"],
+            "share_c": ec["c_draws_full"],
         }
         for entity, ec in entity_draw_cache.items()
     }
@@ -805,5 +928,6 @@ def run_cohort_flow_monte_carlo(
         "total": total,
         "share_a_name": share_a_name,
         "share_b_name": share_b_name,
+        "share_c_name": share_c_name,
         "entity_draws": entity_draws,
     }

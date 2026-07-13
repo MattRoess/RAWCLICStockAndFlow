@@ -199,6 +199,18 @@ def _run_cohort_recurrence(
     # drivetrain); diverges only in override years, where inflow_by_year becomes 0
     # but this array still shows what the residual formula would have implied.
     inflow_pre_hard_zero_override_by_year = np.zeros((n_t, n_draws), dtype=float)
+    # [NEW] The actually-applied per-draw inflow -- always >= 0 by construction
+    # (`inflow_applied = max(inflow_raw, 0)` under "report_only", or the
+    # clip_to_target/hard_zero equivalent). Distinct from `inflow_by_year` above,
+    # which deliberately keeps showing the RAW (possibly negative) residual so a
+    # negative-inflow year is never hidden -- this array is for callers that want
+    # "what the model actually simulated" (e.g. a Monte Carlo uncertainty band over
+    # time, which should never show negative inflow since no draw's simulated inflow
+    # ever went negative) rather than the raw diagnostic signal. `cumulative_inflow`
+    # already sums exactly this per-year quantity -- this array is what makes that
+    # consistent with a per-year breakdown, instead of only being derivable from the
+    # (raw-residual) `inflow_by_year`.
+    inflow_applied_by_year = np.zeros((n_t, n_draws), dtype=float)
 
     if negative_inflow_policy not in ("report_only", "clip_to_target"):
         raise ValueError(
@@ -212,6 +224,7 @@ def _run_cohort_recurrence(
         outflow_surv_t_tau = np.zeros_like(stock_t_tau)
         inflow_t = np.zeros((n_t, n_draws), dtype=float)
         inflow_pre_hard_zero_override_t = np.zeros((n_t, n_draws), dtype=float)
+        inflow_applied_t = np.zeros((n_t, n_draws), dtype=float)
         outflow_surv_t = np.zeros((n_t, n_draws), dtype=float)
         outflow_excess_t = np.zeros((n_t, n_draws), dtype=float)
         outflow_total_t = np.zeros((n_t, n_draws), dtype=float)
@@ -327,6 +340,7 @@ def _run_cohort_recurrence(
 
         inflow_by_year[i_t] = inflow_applied if hard_zero_active else inflow_raw
         inflow_pre_hard_zero_override_by_year[i_t] = inflow_raw
+        inflow_applied_by_year[i_t] = inflow_applied
         out_survival_by_year[i_t] = this_year_total_outflow
 
         if keep_full_history:
@@ -336,6 +350,7 @@ def _run_cohort_recurrence(
             outflow_surv_t_tau[i_t] = year_out_tau
             inflow_t[i_t] = inflow_applied if hard_zero_active else inflow_raw
             inflow_pre_hard_zero_override_t[i_t] = inflow_raw
+            inflow_applied_t[i_t] = inflow_applied
             outflow_surv_t[i_t] = this_year_out_survival
             outflow_excess_t[i_t] = excess_outflow
             outflow_total_t[i_t] = this_year_total_outflow
@@ -346,6 +361,7 @@ def _run_cohort_recurrence(
         "t": t,
         "inflow_by_year": inflow_by_year,
         "inflow_pre_hard_zero_override_by_year": inflow_pre_hard_zero_override_by_year,
+        "inflow_applied_by_year": inflow_applied_by_year,
         "out_survival_by_year": out_survival_by_year,
         # [FIXED] `stock_t` (the prescribed target -- deterministic, identical for
         # every draw regardless of lifetime uncertainty; see module docstring in
@@ -362,6 +378,7 @@ def _run_cohort_recurrence(
             "tau_back": tau_back,
             "stock_t_tau": stock_t_tau, "outflow_surv_t_tau": outflow_surv_t_tau,
             "inflow_t": inflow_t, "inflow_pre_hard_zero_override_t": inflow_pre_hard_zero_override_t,
+            "inflow_applied_t": inflow_applied_t,
             "outflow_surv_t": outflow_surv_t,
             "outflow_excess_t": outflow_excess_t, "outflow_total_t": outflow_total_t,
         })
@@ -502,11 +519,19 @@ def run_cohort_survival_monte_carlo(
     Returns {"cumulative_inflow": (n_draws,), "cumulative_out_survival": (n_draws,),
     "t": (n_years,), "inflow_by_year": (n_years, n_draws),
     "inflow_pre_hard_zero_override_by_year": (n_years, n_draws) -- [NEW] the raw
-    residual before any override, always present, "out_survival_by_year":
-    (n_years, n_draws), "stock_t": (n_years,) -- the prescribed target, deterministic,
-    identical regardless of draw}. See `monte_carlo.sum_by_period()` for turning
-    "inflow_by_year"/"out_survival_by_year" into cumulative sums over an arbitrary
-    (start_year, end_year) window without needing a full per-cohort history.
+    residual before any override, always present,
+    "inflow_applied_by_year": (n_years, n_draws) -- [NEW] the actually-simulated
+    per-draw inflow, always >= 0 (this is what "cumulative_inflow" sums over years).
+    Prefer THIS over "inflow_by_year" for anything that should never show a
+    negative value (e.g. a per-year Monte Carlo uncertainty band) -- "inflow_by_year"
+    deliberately still shows the raw, possibly-negative residual in years where no
+    hard_zero override is active, so a negative-inflow year is never silently hidden
+    from diagnostics; it is NOT the same thing as "what the model actually did".
+    "out_survival_by_year": (n_years, n_draws), "stock_t": (n_years,) -- the
+    prescribed target, deterministic, identical regardless of draw}. See
+    `monte_carlo.sum_by_period()` for turning "inflow_applied_by_year"/
+    "out_survival_by_year" into cumulative sums over an arbitrary (start_year,
+    end_year) window without needing a full per-cohort history.
     """
     return _run_cohort_recurrence(
         stock_series=stock_series, model_end_year=model_end_year, drivetrain=drivetrain,

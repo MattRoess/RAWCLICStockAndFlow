@@ -91,9 +91,46 @@ import src.flowdriven_model as fdm  # type: ignore
 import src.disaggregation as disagg  # type: ignore
 import src.artifacts as artifacts  # type: ignore
 from src.monte_carlo import (  # type: ignore
-    Normal, summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
+    summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
 )
 from src.stockflow_model import build_backcast_state, run_cohort_survival_monte_carlo  # type: ignore
+# [NEW] Shared with 02_stockdriven.py and cohort_flow_mc.py's own internal use --
+# same asymmetric-spread resolution + Triangular-bounds logic, reused here for the
+# collected/export/unknown_whereabouts share sampling (see the Monte Carlo block
+# below): each of the three is now independently sampled via Triangular using its
+# own params_schema.py spread, then normalized to sum to 1 (disaggregation.
+# compute_collected_export_unknown_shares), rather than two independent Normal
+# draws with the third as a leftover remainder.
+from src.cohort_flow_mc import resolve_lifetime_spread, sample_relative_triangular_scale  # type: ignore
+
+
+def _sample_coupled_residual_triangular(
+    rng: np.random.Generator, center_draws: np.ndarray, lower_spread: float, upper_spread: float,
+) -> np.ndarray:
+    """
+    [NEW] Per-draw-VARYING-center Triangular sampling. Unlike `sample_relative_
+    triangular_scale` (one fixed point shared by every draw), each draw here gets
+    its OWN center (`center_draws[i]`), with the residual Triangular noise layered
+    around THAT value -- used for `unknown_whereabouts_share`, whose center is
+    first shifted per-draw by that same draw's `scale_lambda` outcome (see the
+    lifetime<->unknown coupling in the Monte Carlo block below) before this
+    residual noise is added on top.
+
+    `center_draws` must already be elementwise positive (or effectively zero) --
+    floored defensively at 1% of each draw's own center, same safety convention as
+    `sample_relative_triangular_scale`'s single-point version, to guard against a
+    center that a large coupling shift pushed to near-zero.
+
+    `numpy.random.Generator.triangular(left, mode, right)` broadcasts array
+    arguments natively -- no `size=` needed when left/mode/right already have the
+    target shape, so this is one call, not a per-draw Python loop.
+    """
+    center = np.asarray(center_draws, dtype=float)
+    if lower_spread <= 0 and upper_spread <= 0:
+        return center.copy()
+    low = np.maximum(center * (1.0 - lower_spread), center * 0.01)
+    high = center * (1.0 + upper_spread)
+    return rng.triangular(low, center, high)
 
 load_many = artifacts.load_many
 save_many = artifacts.save_many
@@ -327,6 +364,7 @@ def main() -> dict[str, Any]:
     # when `matrices_by_key` was first built in `02_stockdriven.py`.
     matrices_by_key, unknown_whereabouts_share = split_outflows_collected_unknown_export(
         matrices_by_key=matrices_by_key,
+        collected_share=p02.collected_share_by_drv,
         unknown_whereabouts_share=unknown_whereabouts_share,
         export_share=export_share_by_drivetrain,
     )
@@ -655,20 +693,71 @@ def main() -> dict[str, Any]:
 
                 # --- cumulative (2070-total) split, using stage 02's saved arrays ---
                 cumulative_out_survival = mc_stage02[drivetrain]["cumulative_out_survival"]
+                # [MOVED UP] Previously fetched again, separately, in the per-YEAR
+                # block below -- now fetched once here and reused both for the
+                # lifetime<->unknown_share coupling immediately below AND the
+                # per-year regeneration further down, so there's exactly one
+                # source of this draw within the loop, not two.
+                scale_lambda_draws = mc_stage02[drivetrain]["scale_lambda"]
+                base_scale_lambda = p02.lifetime_by_drv[drivetrain].scale_lambda
 
-                uw_point = unknown_whereabouts_share[drivetrain]
-                uw_std = p02.unknown_whereabouts_share_std[drivetrain]
-                uw_draws = Normal(uw_point, uw_std, clip_min=0.0, clip_max=1.0).sample(rng, n=n_draws)
+                # [FIXED, corrected domain understanding] Was: `unknown_whereabouts_
+                # share` and `export_share` sampled independently via Normal(point,
+                # std, clip 0..1), with `collected_share` computed as whatever's
+                # left over (1 - unknown - export) -- treating collected as having
+                # NO uncertainty of its own. That's backwards: collected and export
+                # are MEASURED (collection statistics, trade statistics) with their
+                # own real uncertainty; unknown_whereabouts is itself an ESTIMATE,
+                # not a residual from a known total (total outflow is a model
+                # output of the lifetime survival curve, not independently
+                # measured). None of the three is a privileged remainder -- all
+                # three are now sampled independently via Triangular (their own
+                # point estimate + `params_schema.py`'s AsymmetricSpread-capable
+                # relative spread, same convention as `lifetime_scale_lambda_
+                # relative_spread`), then NORMALIZED to sum to exactly 1
+                # (`disaggregation.compute_collected_export_unknown_shares`).
+                coll_point = p02.collected_share_by_drv[drivetrain]
+                coll_lower, coll_upper = resolve_lifetime_spread(
+                    p02.collected_share_relative_spread, drivetrain, default=(0.0, 0.0)
+                )
+                coll_draws_raw = sample_relative_triangular_scale(coll_point, coll_lower, coll_upper, n_draws, rng)
 
                 exp_point = export_share_by_drivetrain.get(drivetrain, 0.0)
-                exp_std = p02.export_share_std.get(drivetrain, 0.0)
-                exp_draws = Normal(exp_point, exp_std, clip_min=0.0, clip_max=1.0).sample(rng, n=n_draws)
+                exp_lower, exp_upper = resolve_lifetime_spread(
+                    p02.export_share_relative_spread, drivetrain, default=(0.0, 0.0)
+                )
+                exp_draws_raw = sample_relative_triangular_scale(exp_point, exp_lower, exp_upper, n_draws, rng)
 
-                sensitivity_input_draws[f"{drivetrain}_scale_lambda"] = mc_stage02[drivetrain]["scale_lambda"]
-                sensitivity_input_draws[f"{drivetrain}_unknown_share"] = uw_draws
-                sensitivity_input_draws[f"{drivetrain}_export_share"] = exp_draws
+                # [NEW] Lifetime <-> unknown_share coupling, per your own reasoning:
+                # a shorter-than-point-estimate scale_lambda draw implies MORE
+                # total outflow than collected+export alone explain, so that
+                # draw's inferred "unknown" gap should be LARGER, not sampled
+                # independently of the lifetime outcome. `rel_dev < 0` (shorter
+                # lifetime) with `k > 0` (params_schema.py's
+                # `unknown_share_lifetime_coupling_k`) pushes the center ABOVE the
+                # flat point estimate for that draw. `k = 0` recovers the old
+                # (pre-coupling) behavior exactly. The residual Triangular noise
+                # (`unknown_whereabouts_share_relative_spread`) is layered around
+                # this SHIFTED, per-draw center, not around the flat point
+                # estimate -- see `_sample_coupled_residual_triangular` above.
+                uw_point = unknown_whereabouts_share[drivetrain]
+                coupling_k = p02.unknown_share_lifetime_coupling_k[drivetrain]
+                rel_dev = (scale_lambda_draws - base_scale_lambda) / base_scale_lambda
+                uw_center_draws = np.clip(uw_point * (1.0 - coupling_k * rel_dev), 1e-6, None)
+                uw_lower, uw_upper = resolve_lifetime_spread(
+                    p02.unknown_whereabouts_share_relative_spread, drivetrain, default=(0.0, 0.0)
+                )
+                uw_draws_raw = _sample_coupled_residual_triangular(rng, uw_center_draws, uw_lower, uw_upper)
 
-                unk_share, exp_share, coll_share = disagg.compute_collected_export_unknown_shares(uw_draws, exp_draws)
+                coll_share, exp_share, unk_share = disagg.compute_collected_export_unknown_shares(
+                    coll_draws_raw, exp_draws_raw, uw_draws_raw,
+                )
+
+                sensitivity_input_draws[f"{drivetrain}_scale_lambda"] = scale_lambda_draws
+                sensitivity_input_draws[f"{drivetrain}_collected_share"] = coll_share
+                sensitivity_input_draws[f"{drivetrain}_export_share"] = exp_share
+                sensitivity_input_draws[f"{drivetrain}_unknown_share"] = unk_share
+
                 per_drivetrain_mc[drivetrain] = {
                     "cumulative_collected": cumulative_out_survival * coll_share,
                     "cumulative_export": cumulative_out_survival * exp_share,
@@ -676,14 +765,13 @@ def main() -> dict[str, Any]:
                 }
 
                 # --- per-YEAR split, regenerated from the SAME scale_lambda draws ---
-                scale_lambda_draws = mc_stage02[drivetrain]["scale_lambda"]
                 base_shape_k = p02.lifetime_by_drv[drivetrain].shape_k
                 stock_series = pd.to_numeric(stock_dict[("EUR", drivetrain)]["stock"], errors="coerce").fillna(0.0)
                 stock_series.index = stock_series.index.astype(int)
                 stock_series = stock_series.sort_index()
                 backcast = build_backcast_state(
                     stock_series=stock_series, model_end_year=model_end_year_02,
-                    shape_k=base_shape_k, scale_lambda=p02.lifetime_by_drv[drivetrain].scale_lambda,
+                    shape_k=base_shape_k, scale_lambda=base_scale_lambda,
                     init_max_age=init_max_age,
                 )
                 result_02 = run_cohort_survival_monte_carlo(
@@ -736,11 +824,18 @@ def main() -> dict[str, Any]:
                 }
 
                 # --- [NEW] period-based summaries for this drivetrain ---
-                # `inflow_by_year` was already computed by `run_cohort_survival_monte_
-                # carlo` above (same call, no extra simulation) but previously
-                # discarded here -- now actually used, giving "cumulative input" at
-                # 03_01 too, not just at stage 02.
-                inflow_period_sums = sum_by_period(result_02["inflow_by_year"], result_02["t"], output_periods)
+                # `inflow_applied_by_year` was already computed by
+                # `run_cohort_survival_monte_carlo` above (same call, no extra
+                # simulation) but previously discarded here -- now actually used,
+                # giving "cumulative input" at 03_01 too, not just at stage 02.
+                # [FIXED] Was `result_02["inflow_by_year"]` -- the RAW, possibly-
+                # negative residual (see stockflow_model.py's `_run_cohort_
+                # recurrence` docstring), which disagreed with stage 02's own
+                # `cumulative_inflow` (built from the floored `inflow_applied`) in
+                # any period containing a negative-residual year, and could even
+                # make this stage's reported period inflow negative. Same fix as
+                # `02_stockdriven.py`.
+                inflow_period_sums = sum_by_period(result_02["inflow_applied_by_year"], result_02["t"], output_periods)
                 collected_period_sums = sum_by_period(collected_by_year, result_02["t"], output_periods)
                 export_period_sums = sum_by_period(export_by_year, result_02["t"], output_periods)
                 unknown_period_sums = sum_by_period(unknown_by_year, result_02["t"], output_periods)
