@@ -769,7 +769,13 @@ def run_adjusted_scenario(
             lifetime_change_by_drv=lifetime_change_by_drv, stock_modifier_2027=stock_modifier_2027,
             stock_modifier_start_year=stock_modifier_start_year, output_periods=output_periods,
             inflow_draws_by_group=inflow_draws_by_group_drivetrain,
-            seed=mc_seed_by_drivetrain, chunk_size=mc_chunk_size, collect_per_year=False,
+            # [CHANGED] collect_per_year=True -- this by-drivetrain re-simulation
+            # is only 5 groups (not 12 segments x drivetrain), so the added memory
+            # cost (n_draws x n_years x 5 metrics x 5 groups) is affordable even at
+            # 200,000 draws. This is what makes a genuine per-year 95% uncertainty
+            # band possible for inflow/outflow/export/unknown/collected, not just a
+            # single cumulative-period number -- see the plotting section below.
+            seed=mc_seed_by_drivetrain, chunk_size=mc_chunk_size, collect_per_year=True,
             verbose=True, progress_label=f"{scenario_name} [by_drivetrain]",
         )
         print(f"[{scenario_name}] Monte Carlo run (by-drivetrain) done in {time.time() - t_start_mc_drv:.1f}s")
@@ -1215,8 +1221,63 @@ def main() -> dict[str, Any]:
 
     A4_LANDSCAPE_INCHES = (11.69, 8.27)
     flows_drivetrains = ("BEV", "Diesel", "Petrol", "PHEV", "HEV")
+
+    # -------------------------------------------------------------------------
+    # [NEW] Shared helpers for 95% Monte Carlo bands on the flows figures below.
+    # Source: the "by_drivetrain" INDEPENDENT re-simulation inside each scenario's
+    # own `mc` result (see run_adjusted_scenario's docstring) -- only 5 groups
+    # (Region x Drive Train), not 12 segments, so collect_per_year=True on that
+    # specific call (changed above) is affordable even at 200,000 draws. This is
+    # a genuinely separate simulation from the deterministic tracker-based lines
+    # `plot_flows_split_collected_unknown_from_tracker` draws (same scenario
+    # assumptions, but not literally the same computation) -- band width reflects
+    # this scenario's own lifetime/share Monte Carlo uncertainty, not a formal
+    # error bar around the exact deterministic line.
+    # -------------------------------------------------------------------------
+    def _mc_per_year_band(mc_result, region, drv, field):
+        """
+        (years, median, p2_5, p97_5) for one field ("per_year_inflow" /
+        "per_year_survival" / "per_year_a" / "per_year_b" / "per_year_collected")
+        of one drivetrain's by-drivetrain MC re-simulation, or None if Monte
+        Carlo wasn't run / this drivetrain has no entry (e.g. zero vehicles in
+        this scenario).
+        """
+        if not mc_result or "by_drivetrain" not in mc_result:
+            return None
+        group = mc_result["by_drivetrain"].get((region, drv))
+        if group is None or field not in group:
+            return None
+        arr = group[field]  # (n_draws, n_years)
+        p2_5, median, p97_5 = np.percentile(arr, [2.5, 50, 97.5], axis=0)
+        return group["years"], median, p2_5, p97_5
+
+    def _plot_series_with_band(ax, years, median, p2_5, p97_5, color, label=None):
+        ax.plot(years, median, color=color, linewidth=2, label=label)
+        ax.fill_between(years, p2_5, p97_5, color=color, alpha=0.2, linewidth=0)
+
+    # -------------------------------------------------------------------------
+    # [CHANGED, this round -- confirmed with the user] Combined multi-drivetrain
+    # overview, ONE FULL A4-LANDSCAPE PNG PER ACTIVE SCENARIO. Deterministic
+    # solid/dashed lines UNCHANGED (plot_flows_split_collected_unknown_from_
+    # tracker, as before); NEW: a semi-transparent 95% band per drivetrain,
+    # per series (inflow, total outflow), from the by-drivetrain MC
+    # re-simulation, layered underneath.
+    # -------------------------------------------------------------------------
     for scenario_name in active_scenario_names:
+        mc_result = scenario_results_all[scenario_name]["mc"]
         fig, ax = plt.subplots(figsize=A4_LANDSCAPE_INCHES)
+
+        for drv in flows_drivetrains:
+            color = plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333")
+            inflow_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_inflow")
+            outflow_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_survival")
+            for band in (inflow_band, outflow_band):
+                if band is None:
+                    continue
+                years_b, _median, p2_5, p97_5 = band
+                mask = (years_b >= 1990) & (years_b <= 2070)
+                ax.fill_between(years_b[mask], p2_5[mask], p97_5[mask], color=color, alpha=0.15, linewidth=0, zorder=1)
+
         plot_flows_split_collected_unknown_from_tracker(
             tracker_keyed=tracker_keyed_by_scenario[scenario_name],
             region=materials_region,
@@ -1236,9 +1297,11 @@ def main() -> dict[str, Any]:
             plt.Line2D([0], [0], color="black", lw=2, linestyle="-"),
             plt.Line2D([0], [0], color="black", lw=2, linestyle="--"),
         ]
+        band_handle = [plt.Line2D([0], [0], color="#888888", lw=8, alpha=0.3)] if mc_result else []
+        band_label = ["95% MC band (by-drivetrain)"] if mc_result else []
         ax.legend(
-            drv_handles + style_handles,
-            list(flows_drivetrains) + ["Inflow", "Total outflow"],
+            drv_handles + style_handles + band_handle,
+            list(flows_drivetrains) + ["Inflow", "Total outflow"] + band_label,
             loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False,
         )
         plt.tight_layout(rect=[0, 0, 0.82, 1])
@@ -1248,39 +1311,118 @@ def main() -> dict[str, Any]:
         print(f"Saved diagnostic plot: {fig_path}")
 
     # -----------------------------------------------------------------------
-    # [NEW, this round -- confirmed with the user] Detailed per-drivetrain inflow
-    # figures, 1975-2070: for EVERY active scenario, one separate figure per
-    # drivetrain (BEV/HEV/PHEV/Diesel/Petrol), summed over segments. Uses `inflow_
-    # by_scenario[name]` -- the same resolved (post drivetrain/segment-share-tweak
-    # and phase-out, if any) inflow every scenario's own simulation run above
-    # actually used, not a re-derivation.
+    # [CHANGED, this round -- confirmed with the user] Inflow keeps its own
+    # single-series figure (unchanged). The four SEPARATE outflow figures
+    # (total/collected/export/unknown) are replaced by ONE combined breakdown
+    # figure per drivetrain: collected/export/unknown stacked (median only --
+    # their own 95% bands don't fit legibly once combined at this scale, e.g.
+    # export's ~0.4-0.55M band is invisible against a ~25M-scale total), with
+    # total outflow's own median + 95% band drawn on top (that ONE band does
+    # fit -- comparable scale to the stack itself).
     # -----------------------------------------------------------------------
     for scenario_name in active_scenario_names:
-        inflow_scn = inflow_by_scenario[scenario_name]
-        inflow_by_year_drv = (
-            inflow_scn[inflow_scn["Region"] == materials_region]
-            .groupby(["Drive Train", "year"], as_index=False)["value"].sum()
+        mc_result = scenario_results_all[scenario_name]["mc"]
+
+        # Deterministic fallback source: the scenario's own resolved flows_df
+        # (post drivetrain/segment-share-tweak and phase-out, if any), summed
+        # over Segment.
+        flows_scn = scenario_results_all[scenario_name]["flows_df"]
+        flows_by_year_drv = (
+            flows_scn[flows_scn["Region"] == materials_region]
+            .groupby(["Drive Train", "year"], as_index=False)[
+                ["inflow", "out_survival", "out_collected", "out_export", "out_unknown"]
+            ].sum()
         )
+
         for drv in flows_drivetrains:
-            d = inflow_by_year_drv[
-                (inflow_by_year_drv["Drive Train"] == drv)
-                & (inflow_by_year_drv["year"] >= 1975)
-                & (inflow_by_year_drv["year"] <= 2070)
+            d = flows_by_year_drv[
+                (flows_by_year_drv["Drive Train"] == drv)
+                & (flows_by_year_drv["year"] >= 1975)
+                & (flows_by_year_drv["year"] <= 2070)
             ].sort_values("year")
-            if d.empty:
+
+            # --- Inflow: unchanged, own figure ---
+            inflow_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_inflow")
+            if d.empty and inflow_band is None:
                 print(f"Skipped inflow figure: no data for scenario={scenario_name!r}, drivetrain={drv!r}.")
+            else:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                color = plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333")
+                if inflow_band is not None:
+                    years_b, median, p2_5, p97_5 = inflow_band
+                    mask = (years_b >= 1975) & (years_b <= 2070)
+                    _plot_series_with_band(ax, years_b[mask], median[mask], p2_5[mask], p97_5[mask], color)
+                    n_draws_band = mc_result["by_drivetrain"][(materials_region, drv)]["per_year_inflow"].shape[0]
+                    ax.set_title(f"{scenario_name} / {drv}: inflow, 1975-2070 (median + 95% MC band, n={n_draws_band:,})", fontsize=11)
+                elif not d.empty:
+                    ax.plot(d["year"], d["inflow"], color=color, linewidth=2)
+                    ax.set_title(f"{scenario_name} / {drv}: inflow, 1975-2070", fontsize=12)
+                ax.set_xlabel("Year")
+                ax.set_ylabel("Inflow [million/year]")
+                ax.grid(True, linestyle="--", alpha=0.3)
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+                plt.tight_layout()
+                fig_path = fig_dir / f"03_02_inflow_{scenario_name}_{drv}.png"
+                fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"Saved diagnostic plot: {fig_path}")
+
+            # --- Outflow breakdown: ONE combined figure ---
+            total_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_survival")
+            collected_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_collected")
+            export_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_a")
+            unknown_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_b")
+
+            if d.empty and total_band is None:
+                print(f"Skipped outflow breakdown figure: no data for scenario={scenario_name!r}, drivetrain={drv!r}.")
                 continue
+
             fig, ax = plt.subplots(figsize=(10, 6))
             color = plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333")
-            ax.plot(d["year"], d["value"], color=color, linewidth=2)
-            ax.set_title(f"{scenario_name} / {drv}: inflow, 1975-2070", fontsize=12)
+            stack_colors = {"Collected": "#2E86AB", "Export": "#E67E22", "Unknown whereabouts": "#8E44AD"}
+
+            if collected_band is not None and export_band is not None and unknown_band is not None:
+                years_b = collected_band[0]
+                mask = (years_b >= 1975) & (years_b <= 2070)
+                years_plot = years_b[mask]
+                collected_med = collected_band[1][mask]
+                export_med = export_band[1][mask]
+                unknown_med = unknown_band[1][mask]
+                ax.stackplot(
+                    years_plot, collected_med, export_med, unknown_med,
+                    labels=["Collected", "Export", "Unknown whereabouts"],
+                    colors=[stack_colors["Collected"], stack_colors["Export"], stack_colors["Unknown whereabouts"]],
+                    alpha=0.55,
+                )
+            elif not d.empty:
+                years_plot = d["year"].to_numpy()
+                ax.stackplot(
+                    years_plot, d["out_collected"], d["out_export"], d["out_unknown"],
+                    labels=["Collected", "Export", "Unknown whereabouts"],
+                    colors=[stack_colors["Collected"], stack_colors["Export"], stack_colors["Unknown whereabouts"]],
+                    alpha=0.55,
+                )
+
+            if total_band is not None:
+                years_b, median, p2_5, p97_5 = total_band
+                mask = (years_b >= 1975) & (years_b <= 2070)
+                ax.plot(years_b[mask], median[mask], color="black", linewidth=2.2, label="Total outflow (median)", zorder=5)
+                ax.fill_between(years_b[mask], p2_5[mask], p97_5[mask], color="black", alpha=0.15, linewidth=0, zorder=4, label="Total outflow 95% MC band")
+                n_draws_band = mc_result["by_drivetrain"][(materials_region, drv)]["per_year_survival"].shape[0]
+                ax.set_title(f"{scenario_name} / {drv}: outflow breakdown, 1975-2070 (n={n_draws_band:,})", fontsize=11)
+            elif not d.empty:
+                ax.plot(d["year"], d["out_survival"], color="black", linewidth=2.2, label="Total outflow")
+                ax.set_title(f"{scenario_name} / {drv}: outflow breakdown, 1975-2070", fontsize=12)
+
             ax.set_xlabel("Year")
-            ax.set_ylabel("Inflow [million/year]")
+            ax.set_ylabel("Outflow [million/year]")
             ax.grid(True, linestyle="--", alpha=0.3)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-            plt.tight_layout()
-            fig_path = fig_dir / f"03_02_inflow_{scenario_name}_{drv}.png"
+            ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
+            plt.tight_layout(rect=[0, 0, 0.78, 1])
+            fig_path = fig_dir / f"03_02_outflow_breakdown_{scenario_name}_{drv}.png"
             fig.savefig(fig_path, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"Saved diagnostic plot: {fig_path}")

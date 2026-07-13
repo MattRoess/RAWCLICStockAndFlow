@@ -493,6 +493,7 @@ def run_cohort_flow_monte_carlo(
               "per_year_a":         np.ndarray (n_draws, n_years),
               "per_year_b":         np.ndarray (n_draws, n_years),
               "per_year_collected": np.ndarray (n_draws, n_years),
+              "per_year_inflow":    np.ndarray (n_draws, n_years),  # [NEW]
           }, ...},
           "total": {  # summed across all group keys, same shape as one group's result
               "cumulative_survival": np.ndarray (n_draws,), ...,
@@ -719,6 +720,13 @@ def run_cohort_flow_monte_carlo(
             per_year_a = np.zeros((n_draws, n_years), dtype=float)
             per_year_b = np.zeros((n_draws, n_years), dtype=float)
             per_year_collected = np.zeros((n_draws, n_years), dtype=float)
+            # [NEW] Per-year INFLOW draws -- previously only survival/a/b/collected
+            # were tracked here; inflow itself (per draw, per year) was only
+            # available as a PERIOD total (cumulative_inflow), never as a full
+            # per-year series. Needed for a genuine "inflow with an uncertainty
+            # band over time" plot, matching what was already possible for
+            # outflow/export/unknown/collected.
+            per_year_inflow = np.zeros((n_draws, n_years), dtype=float)
 
         n_chunks = -(-n_draws // chunk_size)  # ceil division
 
@@ -835,6 +843,7 @@ def run_cohort_flow_monte_carlo(
                     per_year_a[chunk_start:chunk_end, yi] = out_a_sum
                     per_year_b[chunk_start:chunk_end, yi] = out_b_sum
                     per_year_collected[chunk_start:chunk_end, yi] = out_collected_sum
+                    per_year_inflow[chunk_start:chunk_end, yi] = inflow_t_draws
 
                 stock_prev = stock_end
 
@@ -868,6 +877,7 @@ def run_cohort_flow_monte_carlo(
                     "per_year_a": per_year_a,
                     "per_year_b": per_year_b,
                     "per_year_collected": per_year_collected,
+                    "per_year_inflow": per_year_inflow,
                 }
             )
         by_group[lookup_key] = group_result

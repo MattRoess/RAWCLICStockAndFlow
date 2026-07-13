@@ -1214,7 +1214,7 @@ class MaterialsParams:
     #   "both"             -- compute both of the above.
     # One of "period", "annual", "both" (validated).
 
-    materials_mc_n_draws: int = 20_000
+    materials_mc_n_draws: int = 200_000
     # [NEW] Number of Monte Carlo draws for the MATERIALS-stage combination (vehicle-
     # count bootstrap x composition bootstrap). Deliberately INDEPENDENT of
     # `monte_carlo.n_draws` (stage 03_02's own resolution, 200,000 by default) -- since
