@@ -1183,20 +1183,39 @@ class MaterialsParams:
     # `04_01_materials.py`).
 
     histogram_sheet_names_by_drv: dict[str, list[str]] = field(default_factory=lambda: {
-        "Petrol": ["componentCarPetrol_1", "componentCarPetrol_2"],
-        "Diesel": ["componentCarDiesel_1", "componentCarDiesel_2"],
+        "Petrol": ["componentCarPetrol"],
+        "Diesel": ["componentCarDiesel"],
         "BEV": ["componentCarBEV"],
         "HEV": ["componentCarHEV"],
         "PHEV": ["componentCarPHEV"],
     })
-    # [NEW] Explicit sheet-name mapping, NOT inferred from a naming pattern --
-    # some drivetrains' histogram data is split across multiple sheets (Excel's
-    # per-sheet row limit), with no guarantee that split follows a consistent
-    # numbering scheme as more time points get added. `Other` is deliberately
-    # absent (out of scope, matches `drivetrains` below). Extend this dict
-    # yourself as more sheets appear (e.g. once resolution moves to annual and a
-    # drivetrain needs a 3rd/4th sheet) -- no code change needed, just add the
-    # sheet name(s) here. Keys are validated against `drivetrains` below.
+    # [FIXED, this round -- was a real bug, not a stable design] Petrol/Diesel used
+    # to list EXACT numbered sheet names here (e.g. "componentCarPetrol_1",
+    # "componentCarPetrol_2") because, at the time this was first written, the
+    # histogram workbook had just started splitting each drivetrain across multiple
+    # sheets (Excel's per-sheet row limit) and nothing auto-discovered siblings yet
+    # -- this was a manual stopgap to get past the original crash, using whichever
+    # sheets existed at that moment. It silently went stale: the workbook later grew
+    # to 5 sheets per drivetrain (still growing as data densifies toward annual
+    # resolution), but this list was never updated, so 3 of Petrol's/Diesel's 5
+    # sheets' worth of REAL data (including all of JA-JF and "standard" for both)
+    # was silently never read -- found via the user manually opening the workbook
+    # and spotting real data on a sheet the pipeline was ignoring.
+    #
+    # 04_01_carcomposition.py's `_stream_histogram_sheets` now auto-discovers the
+    # FULL sibling family for any requested name, whether that name is a bare prefix
+    # (as used here now, matching BEV/HEV/PHEV) or a specific numbered sheet -- so
+    # this field no longer needs to track an exact, fragile sheet count at all. Bare
+    # prefixes are used for every drivetrain now specifically so this field can never
+    # again silently under-specify the real sheet count the way it just did.
+    #
+    # TODO(cleanup): once this auto-discovery behavior has been running in
+    # production for a while and is trusted, consider whether this field is worth
+    # keeping as a dict at all, vs. just deriving "componentCar{drivetrain}" as a
+    # bare prefix directly from `drivetrains` below with no separate mapping to
+    # maintain. Left as an explicit dict for now (not collapsed automatically) since
+    # removing it is a design simplification to make deliberately, not a fix to
+    # rush through here.
 
     material_mc_time_resolution: str = "period"
     # [NEW] Controls what vehicle-count granularity the Monte Carlo materials
