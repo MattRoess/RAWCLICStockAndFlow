@@ -2086,6 +2086,359 @@ def plot_material_mass_by_year_per_segment(
         period-total mass array for that segment, summed across all
         materials/components for this drivetrain.
     """
+def _scenario_color_map(scenario_names: list[str]) -> dict[str, Any]:
+    """[NEW] Consistent color per scenario across every cross-scenario comparison
+    plot in this module (trajectory lines, boxplots, PDFs) -- the same scenario
+    always gets the same color, using matplotlib's default 'tab10' cycle."""
+    cmap = plt.get_cmap("tab10")
+    return {name: cmap(i % 10) for i, name in enumerate(scenario_names)}
+
+
+def plot_scenario_comparison_boxplot_and_pdf(
+    by_scenario_draws: dict[str, np.ndarray],
+    title: str,
+    xlabel: str,
+    fig_path_boxplot: Path,
+    fig_path_pdf: Path,
+    colors: dict[str, Any] | None = None,
+) -> None:
+    """
+    [NEW] Cross-scenario comparison of one (drivetrain, flow, headline period) total
+    mass distribution -- one box (boxplot figure) / one KDE curve (PDF figure) per
+    scenario, e.g. BAU vs stock_lower. Same two-file convention (boxplot PNG + PDF/
+    density PNG) as 03_02_adjustedflows.py's cross-scenario comparison figures,
+    reimplemented locally here (uses this module's own `_gaussian_kde_curve`, no
+    cross-file dependency -- same convention already used for that function).
+
+    Parameters
+    ----------
+    by_scenario_draws : scenario_name -> (n_draws,) mass array [kg]. n_draws may
+        differ between scenarios (independent bootstraps) -- each scenario's own
+        array length is used as-is.
+    title : shared title for both figures
+    xlabel : e.g. "Total mass [t]"
+    fig_path_boxplot, fig_path_pdf : output paths
+    colors : optional scenario -> color map (see `_scenario_color_map`); built
+        fresh from `by_scenario_draws`'s keys if not given
+    """
+    scenario_names = list(by_scenario_draws.keys())
+    if not scenario_names:
+        print(f"[plot_scenario_comparison_boxplot_and_pdf] no scenarios to plot -- skipping {fig_path_boxplot.name}.")
+        return
+    colors = colors or _scenario_color_map(scenario_names)
+    draws_t = {name: np.asarray(draws, dtype=float) / KG_PER_TONNE for name, draws in by_scenario_draws.items()}
+
+    fig, ax = plt.subplots(figsize=(max(5, 1.8 * len(scenario_names)), 6))
+    bp = ax.boxplot(
+        [draws_t[name] for name in scenario_names],
+        labels=scenario_names, showfliers=False, patch_artist=True, widths=0.5,
+    )
+    for patch, name in zip(bp["boxes"], scenario_names):
+        patch.set_facecolor(colors[name])
+        patch.set_alpha(0.6)
+    ax.set_ylabel(xlabel)
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+    fig_path_boxplot.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_path_boxplot, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    for name in scenario_names:
+        grid, density = _gaussian_kde_curve(draws_t[name])
+        ax.plot(grid, density, color=colors[name], linewidth=1.6, label=name)
+        ax.fill_between(grid, density, color=colors[name], alpha=0.2)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Probability density")
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+    plt.tight_layout()
+    fig_path_pdf.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_path_pdf, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_total_mass_by_year_scenario_comparison(
+    mass_by_year_by_scenario: dict[str, pd.DataFrame],
+    headline_draws_by_scenario: dict[str, np.ndarray],
+    drivetrain: str,
+    title: str,
+    fig_path: Path,
+    colors: dict[str, Any] | None = None,
+) -> None:
+    """
+    [NEW] Cross-scenario trajectory comparison: total mass by year (summed across
+    every segment/material) for ONE drivetrain, one line per scenario (e.g. BAU vs
+    stock_lower), plus a small KDE panel showing each scenario's headline-period
+    total mass distribution -- same "separate panel, not overlaid band" reasoning
+    as `_plot_mass_by_year_stacked` (year-by-year values and the period-cumulative
+    MC total are on different scales).
+
+    Parameters
+    ----------
+    mass_by_year_by_scenario : scenario_name -> that scenario's `mass_by_year_
+        tables[flow]` DataFrame (columns include at least year, drivetrain, mass)
+    headline_draws_by_scenario : scenario_name -> (n_draws,) headline-period total
+        mass array [kg] for this drivetrain (summed across segment/component/
+        material); scenarios with no data for this drivetrain may be omitted
+    drivetrain, title, fig_path : as elsewhere
+    colors : optional scenario -> color map; built fresh if not given
+    """
+    scenario_names = list(mass_by_year_by_scenario.keys())
+    colors = colors or _scenario_color_map(scenario_names)
+
+    fig = plt.figure(figsize=(13, 6))
+    gs = fig.add_gridspec(1, 2, width_ratios=[2.2, 1])
+    ax1 = fig.add_subplot(gs[0])
+    any_data = False
+    for name in scenario_names:
+        df = mass_by_year_by_scenario[name]
+        df = df[df["drivetrain"] == drivetrain]
+        if df.empty:
+            continue
+        by_year = df.groupby("year")["mass"].sum().sort_index() / KG_PER_TONNE
+        ax1.plot(by_year.index, by_year.values, color=colors[name], linewidth=1.8, label=name)
+        any_data = True
+    if not any_data:
+        print(f"[plot_total_mass_by_year_scenario_comparison] no data for drivetrain={drivetrain!r} -- skipping {fig_path.name}.")
+        plt.close(fig)
+        return
+    ax1.set_xlabel("Year")
+    ax1.set_ylabel("Mass [t]")
+    ax1.set_title(title, fontsize=12)
+    ax1.grid(True, linestyle="--", alpha=0.3)
+    ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+    ax1.legend(frameon=False)
+
+    ax2 = fig.add_subplot(gs[1])
+    for name in scenario_names:
+        draws = headline_draws_by_scenario.get(name)
+        if draws is None or len(draws) == 0:
+            continue
+        grid, density = _gaussian_kde_curve(np.asarray(draws, dtype=float) / KG_PER_TONNE)
+        ax2.plot(grid, density, color=colors[name], linewidth=1.4)
+        ax2.fill_between(grid, density, color=colors[name], alpha=0.2)
+    ax2.set_title("Headline-period total (MC)", fontsize=9)
+    ax2.set_xlabel("Mass [t]")
+    ax2.set_yticks([])
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+    ax2.spines["left"].set_visible(False)
+
+    plt.tight_layout()
+    fig_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_material_breakdown_scenario_comparison(
+    mc_draws_by_scenario: dict[str, dict[tuple, np.ndarray]],
+    drivetrain: str,
+    title: str,
+    fig_path: Path,
+    top_n: int = 10,
+    colors: dict[str, Any] | None = None,
+) -> None:
+    """
+    [NEW] Per-material mass breakdown, grouped bars: for ONE drivetrain, the top_n
+    materials by mass (ranked by the largest scenario's median), one bar group per
+    material, one bar per scenario within each group -- median as bar height, P2.5-
+    P97.5 MC range as the error bar. Same visual convention as
+    `plot_standard_vs_segments_comparison`, generalized from 2 fixed categories
+    (segment-sum vs standard) to N scenarios and to materials instead of
+    drivetrains on the x-axis.
+
+    Parameters
+    ----------
+    mc_draws_by_scenario : scenario_name -> one (period, flow) entry of
+        `mc_draws_tables`, i.e. dict keyed by (drivetrain, segment, components,
+        material) -> (n_draws,) mass array [kg]
+    drivetrain : which drivetrain to plot (function filters + aggregates to this)
+    title, fig_path : as elsewhere
+    top_n : how many materials to show, ranked by the largest scenario's median
+        total mass for this drivetrain
+    colors : optional scenario -> color map; built fresh if not given
+    """
+    scenario_names = list(mc_draws_by_scenario.keys())
+    colors = colors or _scenario_color_map(scenario_names)
+
+    by_scenario_material: dict[str, dict[str, np.ndarray]] = {name: {} for name in scenario_names}
+    for name in scenario_names:
+        for (drv, _seg, _comp, mat), draws in mc_draws_by_scenario[name].items():
+            if drv != drivetrain:
+                continue
+            acc = by_scenario_material[name].get(mat)
+            by_scenario_material[name][mat] = draws if acc is None else acc + draws
+
+    all_materials: set[str] = set()
+    for d in by_scenario_material.values():
+        all_materials.update(d.keys())
+    if not all_materials:
+        print(f"[plot_material_breakdown_scenario_comparison] no data for drivetrain={drivetrain!r} -- skipping {fig_path.name}.")
+        return
+
+    def _material_rank_value(mat: str) -> float:
+        medians = []
+        for name in scenario_names:
+            draws = by_scenario_material[name].get(mat)
+            if draws is not None and len(draws) > 0:
+                medians.append(np.median(draws))
+        return max(medians) if medians else 0.0
+
+    ranked_materials = sorted(all_materials, key=_material_rank_value, reverse=True)[:top_n]
+
+    n_mat = len(ranked_materials)
+    n_scen = len(scenario_names)
+    x = np.arange(n_mat)
+    width = 0.8 / max(n_scen, 1)
+
+    fig, ax = plt.subplots(figsize=(max(9, 1.4 * n_mat), 6))
+    for i, name in enumerate(scenario_names):
+        medians, lo, hi = [], [], []
+        for mat in ranked_materials:
+            draws = by_scenario_material[name].get(mat)
+            if draws is not None and len(draws) > 0:
+                d_t = draws / KG_PER_TONNE
+                p_lo, p_mid, p_hi = np.percentile(d_t, [2.5, 50, 97.5])
+            else:
+                p_lo = p_mid = p_hi = 0.0
+            medians.append(p_mid); lo.append(p_lo); hi.append(p_hi)
+        medians = np.array(medians); lo = np.array(lo); hi = np.array(hi)
+        offset = (i - (n_scen - 1) / 2) * width
+        ax.bar(
+            x + offset, medians, width, label=name, color=colors[name],
+            yerr=[np.clip(medians - lo, 0, None), np.clip(hi - medians, 0, None)],
+            capsize=3, error_kw={"linewidth": 1.0},
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(ranked_materials, rotation=45, ha="right")
+    ax.set_ylabel("Total mass [t]")
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
+
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
+    fig_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_scenario_delta_by_drivetrain_and_material(
+    mc_draws_by_scenario: dict[str, dict[tuple, np.ndarray]],
+    baseline_scenario: str,
+    comparison_scenario: str,
+    drivetrains: list[str],
+    title: str,
+    fig_path: Path,
+    top_n_materials: int = 8,
+) -> None:
+    """
+    [NEW] Single diverging bar chart: for each drivetrain, percent change in total
+    mass from `baseline_scenario` to `comparison_scenario`
+    ((comparison - baseline) / baseline), computed on Monte Carlo MEDIANS -- one bar
+    per drivetrain (aggregated across every segment/material), plus, for the
+    `top_n_materials` biggest materials overall (ranked by baseline total mass), one
+    additional bar per (drivetrain, material) pair showing where within that
+    drivetrain the change concentrates. Negative (reduction) and positive (increase)
+    bars are colored differently -- makes "where does `comparison_scenario` actually
+    save or add material relative to `baseline_scenario`" visible at a glance,
+    rather than left implied by two separate bars/boxes elsewhere.
+
+    Parameters
+    ----------
+    mc_draws_by_scenario : scenario_name -> one (period, flow) entry of
+        `mc_draws_tables`, keyed by (drivetrain, segment, components, material) ->
+        (n_draws,) mass array [kg]
+    baseline_scenario, comparison_scenario : which two scenarios to compare (percent
+        change is baseline -> comparison); must both be keys of
+        `mc_draws_by_scenario`
+    drivetrains : which drivetrains to include, in this order
+    title, fig_path : as elsewhere
+    top_n_materials : how many materials (ranked by baseline total mass, summed
+        across all drivetrains) to break out individually; 0 disables the
+        material-level bars, showing only the per-drivetrain totals
+    """
+    if baseline_scenario not in mc_draws_by_scenario or comparison_scenario not in mc_draws_by_scenario:
+        print(f"[plot_scenario_delta_by_drivetrain_and_material] baseline "
+              f"{baseline_scenario!r} or comparison {comparison_scenario!r} not in "
+              f"mc_draws_by_scenario ({list(mc_draws_by_scenario)}) -- skipping {fig_path.name}.")
+        return
+
+    baseline_draws = mc_draws_by_scenario[baseline_scenario]
+    comparison_draws = mc_draws_by_scenario[comparison_scenario]
+
+    def _median_by(draws_dict: dict[tuple, np.ndarray], drivetrain: str, material: str | None = None) -> float:
+        total = None
+        for (drv, _seg, _comp, mat), draws in draws_dict.items():
+            if drv != drivetrain:
+                continue
+            if material is not None and mat != material:
+                continue
+            total = draws.copy() if total is None else total + draws
+        return float(np.median(total)) if total is not None else 0.0
+
+    labels: list[str] = []
+    pct_changes: list[float] = []
+
+    for drv in drivetrains:
+        base_val = _median_by(baseline_draws, drv)
+        comp_val = _median_by(comparison_draws, drv)
+        if base_val > 0:
+            labels.append(f"{drv} (total)")
+            pct_changes.append(100.0 * (comp_val - base_val) / base_val)
+
+    if top_n_materials > 0:
+        material_totals: dict[tuple[str, str], float] = {}
+        for (drv, _seg, _comp, mat), draws in baseline_draws.items():
+            if drv not in drivetrains:
+                continue
+            key = (drv, mat)
+            material_totals[key] = material_totals.get(key, 0.0) + float(np.median(draws))
+        ranked = sorted(material_totals.items(), key=lambda kv: kv[1], reverse=True)[:top_n_materials]
+        for (drv, mat), _base_total in ranked:
+            base_val = _median_by(baseline_draws, drv, mat)
+            comp_val = _median_by(comparison_draws, drv, mat)
+            if base_val > 0:
+                labels.append(f"{drv} / {mat}")
+                pct_changes.append(100.0 * (comp_val - base_val) / base_val)
+
+    if not labels:
+        print(f"[plot_scenario_delta_by_drivetrain_and_material] nothing to plot -- skipping {fig_path.name}.")
+        return
+
+    order = np.argsort(pct_changes)
+    labels = [labels[i] for i in order]
+    pct_changes = [pct_changes[i] for i in order]
+    colors_bar = ["#C0392B" if v >= 0 else "#2980B9" for v in pct_changes]
+
+    fig, ax = plt.subplots(figsize=(9, max(4, 0.35 * len(labels) + 1.5)))
+    y = np.arange(len(labels))
+    ax.barh(y, pct_changes, color=colors_bar)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel(f"% change, {baseline_scenario} -> {comparison_scenario} (MC median)")
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    plt.tight_layout()
+    fig_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_standard_vs_segments_comparison(
     mc_draws_segments: dict[tuple, np.ndarray],
     mc_draws_standard: dict[tuple, np.ndarray],
@@ -2461,6 +2814,82 @@ def main() -> dict[str, Any]:
             "mc_draws_tables_standard": mc_draws_tables_standard,
         }
         print(f"  Scenario {scenario_name} done in {time.time() - t_start_scenario:.1f}s.")
+
+
+    # -------------------------------------------------------------------------------
+    # [NEW] Cross-scenario comparison plots: only meaningful with 2+ active
+    # scenarios (e.g. BAU + stock_lower). For each (flow, drivetrain): (a) total
+    # mass-by-year trajectory, one line per scenario, with a headline-period MC
+    # density panel; (b) a boxplot + PDF pair comparing headline-period total mass
+    # distributions across scenarios.
+    # -------------------------------------------------------------------------------
+    if len(active_scenario_names) > 1:
+        print(f"\n{'-' * 76}\nCross-scenario comparison plots ({len(active_scenario_names)} scenarios)\n{'-' * 76}")
+        scenario_colors = _scenario_color_map(list(active_scenario_names))
+        for flow in sorted(FLOW_VALUES_IN_SCOPE):
+            mass_by_year_by_scenario = {
+                name: all_outputs[name]["mass_by_year_tables"][flow] for name in active_scenario_names
+            }
+            for drivetrain in p04.drivetrains:
+                headline_draws_by_scenario: dict[str, np.ndarray] = {}
+                for name in active_scenario_names:
+                    mc_draws = all_outputs[name]["mc_draws_tables"][(headline_period, flow)]
+                    total = np.zeros(n_draws, dtype=float)
+                    found = False
+                    for (drv, _seg, _comp, _mat), draws in mc_draws.items():
+                        if drv == drivetrain:
+                            total = total + draws
+                            found = True
+                    if found:
+                        headline_draws_by_scenario[name] = total
+
+                plot_total_mass_by_year_scenario_comparison(
+                    mass_by_year_by_scenario, headline_draws_by_scenario, drivetrain,
+                    title=f"{flow}: total mass by year across scenarios -- {drivetrain}",
+                    fig_path=fig_dir / f"04_01_scenario_comparison_mass_by_year_{flow}_{drivetrain}.png",
+                    colors=scenario_colors,
+                )
+
+                if len(headline_draws_by_scenario) > 1:
+                    plot_scenario_comparison_boxplot_and_pdf(
+                        headline_draws_by_scenario,
+                        title=f"{flow}: {drivetrain} total mass across scenarios, "
+                              f"{headline_period[0]}-{headline_period[1]}",
+                        xlabel="Total mass [t]",
+                        fig_path_boxplot=fig_dir / f"04_01_scenario_comparison_boxplot_{flow}_{drivetrain}.png",
+                        fig_path_pdf=fig_dir / f"04_01_scenario_comparison_pdf_{flow}_{drivetrain}.png",
+                        colors=scenario_colors,
+                    )
+
+        # [NEW] Material breakdown (grouped bars) + percent-change delta plots.
+        for flow in sorted(FLOW_VALUES_IN_SCOPE):
+            mc_draws_by_scenario_flow = {
+                name: all_outputs[name]["mc_draws_tables"][(headline_period, flow)] for name in active_scenario_names
+            }
+            for drivetrain in p04.drivetrains:
+                plot_material_breakdown_scenario_comparison(
+                    mc_draws_by_scenario_flow, drivetrain,
+                    title=f"{flow}: material breakdown across scenarios -- {drivetrain}, "
+                          f"{headline_period[0]}-{headline_period[1]}",
+                    fig_path=fig_dir / f"04_01_scenario_comparison_materials_{flow}_{drivetrain}.png",
+                    colors=scenario_colors,
+                )
+
+            baseline_scenario = "BAU" if "BAU" in active_scenario_names else active_scenario_names[0]
+            for comparison_scenario in active_scenario_names:
+                if comparison_scenario == baseline_scenario:
+                    continue
+                plot_scenario_delta_by_drivetrain_and_material(
+                    mc_draws_by_scenario_flow, baseline_scenario, comparison_scenario,
+                    list(p04.drivetrains),
+                    title=f"{flow}: % change {baseline_scenario} -> {comparison_scenario}, "
+                          f"{headline_period[0]}-{headline_period[1]}",
+                    fig_path=fig_dir / f"04_01_scenario_comparison_delta_{flow}_{baseline_scenario}_vs_{comparison_scenario}.png",
+                )
+        print(f"  Saved material-breakdown and delta comparison plots to {fig_dir}")
+        print(f"  Saved cross-scenario comparison plots to {fig_dir}")
+    else:
+        print("\nOnly one active scenario -- skipping cross-scenario comparison plots.")
 
     print(f"\n{'=' * 76}\nAll scenarios done in {time.time() - t_start_main:.1f}s.")
     print("Saved (per-scenario, unregistered):", saved_paths)
