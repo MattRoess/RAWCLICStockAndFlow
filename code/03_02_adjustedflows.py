@@ -1503,6 +1503,9 @@ def main() -> dict[str, Any]:
     if monte_carlo_enabled:
         n_draws = n_draws_mc
         eu_total_cumulative_collected_by_scenario_period: dict[tuple[str, tuple[int, int]], np.ndarray] = {}
+        # [NEW] Per (scenario, drivetrain, period) -- feeds the new per-drivetrain,
+        # cross-scenario comparison figure below.
+        drivetrain_collected_by_scenario_period: dict[tuple[str, str, tuple[int, int]], np.ndarray] = {}
         summary_mc: dict[str, dict] = {}
         sensitivity_by_scenario: dict[str, "pd.DataFrame"] = {}
         # Headline period for sensitivity analysis (one output at a time, by design
@@ -1566,6 +1569,9 @@ def main() -> dict[str, Any]:
                         drv_period_result, f"{scenario_name}__{period_label}__{drivetrain}", summary_mc
                     )
                     collected_by_drivetrain[drivetrain] = drv_period_result["cumulative_collected"]
+                    drivetrain_collected_by_scenario_period[(scenario_name, drivetrain, period)] = (
+                        drv_period_result["cumulative_collected"]
+                    )
 
                     # [NEW] Independent by-drivetrain re-simulation, if this scenario's
                     # `mc` has one (see `run_adjusted_scenario`'s docstring) -- summarized
@@ -1723,6 +1729,29 @@ def main() -> dict[str, Any]:
             fig_path_mc = fig_dir / f"03_02_monte_carlo_scenario_comparison_{period_label}.png"
             fig.savefig(fig_path_mc, dpi=150, bbox_inches="tight")
             print(f"Saved diagnostic plot: {fig_path_mc}")
+
+        # [NEW] Per-drivetrain, cross-scenario comparison: for EACH drivetrain, ALL
+        # active scenarios side by side. Only meaningful once 2+ scenarios are active.
+        for (start, end) in params.monte_carlo.output_periods:
+            period = (start, end)
+            period_label = f"{start}-{end}"
+            for drivetrain in ("BEV", "HEV", "PHEV", "Diesel", "Petrol"):
+                by_scenario = {
+                    scenario_name: drivetrain_collected_by_scenario_period[(scenario_name, drivetrain, period)]
+                    for scenario_name in scenario_names_all
+                    if (scenario_name, drivetrain, period) in drivetrain_collected_by_scenario_period
+                }
+                if len(by_scenario) <= 1:
+                    continue
+                plot_group_comparison_boxplot_and_pdf(
+                    by_scenario,
+                    title=f"{drivetrain}: cumulative collected across scenarios, {period_label}",
+                    xlabel="Cumulative collected [million vehicles]",
+                    ylabel="Cumulative collected [million vehicles]",
+                    fig_path_boxplot=fig_dir / f"03_02_monte_carlo_scenario_comparison_by_drivetrain_{drivetrain}_{period_label}_boxplot.png",
+                    fig_path_pdf=fig_dir / f"03_02_monte_carlo_scenario_comparison_by_drivetrain_{drivetrain}_{period_label}_pdf.png",
+                )
+            print(f"Saved per-drivetrain cross-scenario comparison figures: {period_label}")
 
     return {**saved_inflow_mix_scenarios, **saved_other_scenarios}
 

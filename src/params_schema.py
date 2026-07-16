@@ -875,7 +875,7 @@ class AdjustedFlowsParams:
     # SIMULATED (and its tracker/Monte Carlo output produced) if "BAU" is itself
     # included here. Use `active_scenario_names()` below to resolve this field --
     # don't re-implement the None-vs-tuple logic at the call site.
-    scenarios_to_run: tuple[str, ...] | None = ("BAU",)
+    scenarios_to_run: tuple[str, ...] | None = ("BAU", "stock_lower")
 
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
         "BAU": ScenarioSpec(
