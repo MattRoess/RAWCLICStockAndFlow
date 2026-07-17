@@ -31,10 +31,9 @@ stage's final block only AGGREGATES the 11 already-computed per-scenario
 results into summary stats and the comparison plot.
 
 Uncertainty spreads come from `params.stock_flow` (`lifetime_scale_lambda_
-relative_spread`, `collected_share_relative_spread`, `export_share_relative_
-spread`, `unknown_whereabouts_share_relative_spread`, `unknown_share_lifetime_
-coupling_k`) -- the SAME fields stage 02 already uses, nothing hardcoded here.
-`scale_lambda` is sampled from a TRIANGULAR distribution, `Triangular(point*(1-spread),
+relative_spread`, `unknown_whereabouts_share_std`, `export_share_std`) --
+the SAME fields stage 02 already uses, nothing hardcoded here. `scale_lambda`
+is sampled from a TRIANGULAR distribution, `Triangular(point*(1-spread),
 point, point*(1+spread))` -- matching `params_schema.py`'s own documented
 convention for lifetime uncertainty (NOT Normal, unlike the two share
 parameters below). The SAME per-draw multiplier carries through a scenario's
@@ -167,7 +166,6 @@ from src.monte_carlo import summarize_distribution, sensitivity_correlations, pl
 load_many = artifacts.load_many
 save_many = artifacts.save_many
 plot_flows_split_collected_unknown_all_trackers = plotting.plot_flows_split_collected_unknown_all_trackers
-plot_flows_split_collected_unknown_from_tracker = plotting.plot_flows_split_collected_unknown_from_tracker
 
 
 # ---------------------------------------------------------------------------
@@ -542,26 +540,9 @@ def run_adjusted_scenario(
     monte_carlo_enabled: bool = False,
     n_draws: int = 0,
     lifetime_scale_lambda_relative_spread: dict[str, float] | float | None = None,
-    # [NEW] collected_share was previously implicit -- now required.
-    collected_share_by_drivetrain: dict[str, float] | None = None,
-    # [FIXED, replaces unknown_whereabouts_share_std/export_share_std -- these
-    # StockFlowParams fields no longer exist] Now three Triangular spreads
-    # (same `_SpreadSpec` convention as lifetime_scale_lambda_relative_spread)
-    # plus the lifetime<->unknown coupling coefficient.
-    collected_share_relative_spread: dict[str, float] | float | None = None,
-    export_share_relative_spread: dict[str, float] | float | None = None,
-    unknown_whereabouts_share_relative_spread: dict[str, float] | float | None = None,
-    unknown_share_lifetime_coupling_k: dict[str, float] | float | None = None,
+    unknown_whereabouts_share_std: dict[str, float] | None = None,
+    export_share_std: dict[str, float] | None = None,
     mc_seed: int | np.random.SeedSequence | None = None,
-    # [NEW] Unmutated clone of `mc_seed` (same entropy + spawn_key, built by main()
-    # BEFORE `mc_seed` is spawned from at all -- see main()'s `mc_scenario_seeds_
-    # drivetrain` construction) -- required whenever `monte_carlo_enabled=True`.
-    # Used ONLY for the independent by-drivetrain re-simulation below, so that its
-    # sampled per-drivetrain lifetime/export/unknown draws are IDENTICAL to the
-    # ones the segment-level Monte Carlo run above used (same entity, same draws,
-    # just not split into segments) -- letting the two results be compared without
-    # the comparison being confounded by independently-resampled randomness.
-    mc_seed_by_drivetrain: int | np.random.SeedSequence | None = None,
     mc_chunk_size: int = 20_000,
     output_periods: list[tuple[int, int]] | None = None,
     # [NEW] Precomputed per-draw future segment-share inflow overrides for this
@@ -625,23 +606,6 @@ def run_adjusted_scenario(
     deterministic inflow. See `sample_future_segment_share_inflow_draws`'s docstring
     for exactly how it's built, and `cohort_flow_mc.py`'s "PER-DRAW INFLOW OVERRIDE"
     module docstring section for how the engine consumes it.
-
-    [NEW] By-drivetrain independent re-simulation (`mc["by_drivetrain"]`, only when
-    `monte_carlo_enabled=True`): alongside the 12-segment-per-drivetrain Monte Carlo
-    result above, this ALSO runs the exact same flow-driven Monte Carlo engine a
-    second time, directly at (Region, Drive Train) granularity -- its own starting
-    stock read straight from `matrices_by_key` (bypassing the base-year segment-share
-    split entirely -- see `build_stock_by_drivetrain_at_base_year`), and its own
-    inflow (`inflow_df` summed over Segment, which exactly reconstructs the pre-split
-    per-drivetrain total, since segment shares always sum to 1 after the base-year
-    0/0 guard fix in `build_stock_by_segment_at_base_year`). This is a genuine second
-    simulation, NOT a post-hoc sum of the segment-level result -- `main()` separately
-    also sums the 12 segments (via `_sum_period_results`, unchanged, existing logic)
-    so the two can be compared side by side: since `mc_seed_by_drivetrain` reproduces
-    IDENTICAL per-drivetrain entity draws as the segment-level run, any difference
-    between "independent by_drivetrain result" and "segment-sum" is attributable only
-    to the base-year segment-mix assumption (uniform segment split across cohort
-    vintages), not to different random draws.
     """
     if lifetime_change_by_drv is None:
         lifetime_change_by_drv = {}
@@ -696,14 +660,11 @@ def run_adjusted_scenario(
             lifetime_by_drv=mapped_inputs["lifetime_by_drv"],
             unknown_whereabouts_share=unknown_whereabouts_share,
             export_share_by_drivetrain=export_share_by_drivetrain,
-            collected_share_by_drivetrain=collected_share_by_drivetrain,
             starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup,
             n_draws=n_draws,
             lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
-            collected_share_relative_spread=collected_share_relative_spread,
-            export_share_relative_spread=export_share_relative_spread,
-            unknown_whereabouts_share_relative_spread=unknown_whereabouts_share_relative_spread,
-            unknown_share_lifetime_coupling_k=unknown_share_lifetime_coupling_k,
+            unknown_whereabouts_share_std=unknown_whereabouts_share_std,
+            export_share_std=export_share_std,
             group_cols=["Region", "Drive Train", "Segment"], outflow_timing="post_inflow",
             lifetime_change_by_drv=lifetime_change_by_drv, stock_modifier_2027=stock_modifier_2027,
             stock_modifier_start_year=stock_modifier_start_year, output_periods=output_periods,
@@ -713,81 +674,48 @@ def run_adjusted_scenario(
         )
         print(f"[{scenario_name}] Monte Carlo run done in {time.time() - t_start_mc:.1f}s")
 
-        # ---------------------------------------------------------------------------
-        # [NEW] Independent by-drivetrain re-simulation -- see docstring section above.
-        # ---------------------------------------------------------------------------
-        if mc_seed_by_drivetrain is None:
-            raise ValueError(
-                f"[{scenario_name}] monte_carlo_enabled=True but mc_seed_by_drivetrain "
-                "was not supplied -- required for the independent by-drivetrain "
-                "re-simulation (see run_adjusted_scenario docstring)."
-            )
-
-        inflow_df_drivetrain = (
-            inflow_df.groupby(["Region", "Drive Train", "year"], as_index=False)["value"].sum()
-        )
-
-        stock_by_drivetrain_base = fdm.build_stock_by_drivetrain_at_base_year(
-            matrices_by_key=matrices_by_key, region="EUR", base_year=base_year,
-            allowed_drivetrains=("BEV", "HEV", "PHEV", "Diesel", "Petrol"),
-        )
-        starting_stock_by_cohort_lookup_drivetrain = fdm.build_starting_stock_by_cohort_lookup(
-            stock_by_drivetrain_base, group_cols=["Region", "Drive Train"],
-        )
-
-        # If this scenario carries per-draw future segment-share inflow overrides
-        # (e.g. BAU's `inflow_segment_share_spread`), aggregate them to drivetrain
-        # level too (sum the same per-draw arrays across a drivetrain's segments,
-        # for the SAME draw index) -- so the independent re-simulation's inflow is
-        # genuinely the same per-draw realization as the segment-level run's, not a
-        # fixed/deterministic total.
-        inflow_draws_by_group_drivetrain = None
-        if inflow_draws_by_group is not None:
-            inflow_draws_by_group_drivetrain = {}
-            for (grp_region, grp_drv, _grp_seg), year_draws in inflow_draws_by_group.items():
-                drv_key = (grp_region, grp_drv)
-                acc = inflow_draws_by_group_drivetrain.setdefault(drv_key, {})
-                for yr, arr in year_draws.items():
-                    acc[yr] = acc[yr] + arr if yr in acc else arr.copy()
-
-        print(f"[{scenario_name}] Monte Carlo run (by-drivetrain, independent re-simulation): {n_draws:,} draws...")
-        t_start_mc_drv = time.time()
-        mc_result_by_drivetrain = fdm.run_flow_driven_model_monte_carlo(
-            df=inflow_df_drivetrain, years=years, t_end=int(years.max()),
-            lifetime_by_drv=mapped_inputs["lifetime_by_drv"],
-            unknown_whereabouts_share=unknown_whereabouts_share,
-            export_share_by_drivetrain=export_share_by_drivetrain,
-            collected_share_by_drivetrain=collected_share_by_drivetrain,
-            starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup_drivetrain,
-            n_draws=n_draws,
-            lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
-            collected_share_relative_spread=collected_share_relative_spread,
-            export_share_relative_spread=export_share_relative_spread,
-            unknown_whereabouts_share_relative_spread=unknown_whereabouts_share_relative_spread,
-            unknown_share_lifetime_coupling_k=unknown_share_lifetime_coupling_k,
-            group_cols=["Region", "Drive Train"], outflow_timing="post_inflow",
-            lifetime_change_by_drv=lifetime_change_by_drv, stock_modifier_2027=stock_modifier_2027,
-            stock_modifier_start_year=stock_modifier_start_year, output_periods=output_periods,
-            inflow_draws_by_group=inflow_draws_by_group_drivetrain,
-            # [CHANGED] collect_per_year=True -- this by-drivetrain re-simulation
-            # is only 5 groups (not 12 segments x drivetrain), so the added memory
-            # cost (n_draws x n_years x 5 metrics x 5 groups) is affordable even at
-            # 200,000 draws. This is what makes a genuine per-year 95% uncertainty
-            # band possible for inflow/outflow/export/unknown/collected, not just a
-            # single cumulative-period number -- see the plotting section below.
-            seed=mc_seed_by_drivetrain, chunk_size=mc_chunk_size, collect_per_year=True,
-            verbose=True, progress_label=f"{scenario_name} [by_drivetrain]",
-        )
-        print(f"[{scenario_name}] Monte Carlo run (by-drivetrain) done in {time.time() - t_start_mc_drv:.1f}s")
-        mc_result["by_drivetrain"] = mc_result_by_drivetrain["by_group"]
-
     flows_new = results["flows_df"].copy()
     outflow_surv_new = results["outflow_surv_df"].copy()
     outflow_exp_new = results["outflow_exp_df"].copy()
     outflow_unknown_new = results["outflow_unknown_df"].copy()
 
+    # [FIXED, this round -- REAL BUG, found via cross-checking 04_01's "inflow: total
+    # mass by year across scenarios" plot against mc_stage03_02_summary for the
+    # stock_lower scenario] This USED to be `inflow_df.copy()` -- the scenario's RAW,
+    # PRE-stock_modifier input. But `flowdriven_model.py`'s
+    # `run_flow_driven_model_with_outflow_disaggregation` (the deterministic call just
+    # above, whose output is `results`/`flows_new`) applies `stock_modifier_2027` AS AN
+    # INFLOW MULTIPLIER internally (`inflow_t *= stock_modifier_2027` for
+    # `t >= stock_modifier_start_year` -- see that function's own docstring, point 4,
+    # and the line `flows_rows.append({..., "inflow": inflow_t, ...})`) -- that IS the
+    # mechanism by which `stock_lower` (stock_modifier_2027=0.8) produces a lower
+    # stock: fewer new vehicles registered from 2027 onward, not a post-hoc stock-only
+    # adjustment. `flows_new` (`results["flows_df"]`) already correctly carries this
+    # modifier-adjusted inflow in its own "inflow" column -- it was computed right
+    # above, then simply never used for `inflow_segments`, while the RAW pre-modifier
+    # `inflow_df` was used instead. That silently threw away the modifier's effect on
+    # every downstream artifact built from `inflow_segments` (`tracker`/`tracker_keyed`,
+    # and therefore 04_01's year-by-year inflow-mass plots), even though the actual
+    # simulated stock/outflow (correctly using the modifier) and the separate Monte
+    # Carlo summary (`mc_stage03_02_summary`, via `period_inflow_multiplier` in
+    # `cohort_flow_mc.py` -- also correctly modifier-adjusted) both diverged from BAU
+    # as intended. Confirmed with real data: `tracker_keyed_BAU` and
+    # `tracker_keyed_stock_lower`'s inflow were byte-identical for EVERY drivetrain
+    # (wrong -- stock_lower's stock_modifier_2027=0.8 should reduce inflow from 2027
+    # onward), while `mc_stage03_02_summary`'s cumulative_inflow mean for stock_lower
+    # was ~20% below BAU's for every drivetrain (correct). Building `inflow_segments`
+    # from `flows_new` instead makes the deterministic/tracker path consistent with
+    # both the model's own internal simulation AND the Monte Carlo summary -- the same
+    # single source of truth (`results["flows_df"]`) every OTHER disaggregated_new
+    # entry below already correctly uses (outflow_coll/exp/unk_segments all derive from
+    # `results[...]`, never from a raw pre-simulation input) -- inflow_segments was the
+    # one inconsistent entry, not by design, just an oversight.
+    inflow_segments_new = flows_new.rename(columns={"inflow": "value"})[
+        ["Region", "Drive Train", "Segment", "year", "value"]
+    ].copy()
+
     disaggregated_new = {
-        "inflow_segments": inflow_df.copy(),
+        "inflow_segments": inflow_segments_new,
         "outflow_coll_segments": (
             outflow_surv_new.copy().assign(
                 value=lambda d: d["out_survival"] * (1.0 - d["Drive Train"].map(unknown_whereabouts_share).fillna(0.0).clip(0.0, 1.0))
@@ -927,10 +855,6 @@ def main() -> dict[str, Any]:
 
     export_share_by_drivetrain_base = dict(p02.export_share_by_drv)
     unknown_whereabouts_share_base = dict(p02.unknown_whereabouts_share)
-    # [NEW] collected_share was previously implicit (always `1 - export -
-    # unknown`, no uncertainty of its own) -- now required explicitly, matching
-    # params_schema.py's StockFlowParams.collected_share_by_drv.
-    collected_share_by_drivetrain_base = dict(p02.collected_share_by_drv)
     # NOTE: unlike 03_01 (which pulls `unknown_whereabouts_share` from
     # `fdm.build_p02_mapped_inputs(...)["unknown_whereabouts_share"]`), this notebook
     # reads it DIRECTLY off `p02` with no mapping step. If `build_p02_mapped_inputs`
@@ -965,29 +889,18 @@ def main() -> dict[str, Any]:
     # Monte Carlo setup -- genuine lifetime + share uncertainty, re-simulated per
     # scenario via the vectorized engine (see `run_adjusted_scenario`'s
     # `monte_carlo_enabled` docstring). Uncertainty spreads come from
-    # `p02.lifetime_scale_lambda_relative_spread` / `p02.collected_share_
-    # relative_spread` / `p02.export_share_relative_spread` / `p02.unknown_
-    # whereabouts_share_relative_spread` / `p02.unknown_share_lifetime_
-    # coupling_k` -- same `params_schema.py` fields stage 02 already uses,
-    # nothing hardcoded here. `params.monte_carlo.enabled` is
+    # `p02.lifetime_scale_lambda_relative_spread` / `p02.unknown_whereabouts_
+    # share_std` / `p02.export_share_std` -- same `params_schema.py` fields
+    # stage 02 already uses, nothing hardcoded here. `params.monte_carlo.enabled` is
     # shared across stages 02/03_01/03_02 by design -- narrow a run with
     # `scenarios_to_run` above rather than toggling MC off here, so 02/03_01 keep
     # running Monte Carlo as usual.
     # -----------------------------------------------------------------------
-    # [FIXED, replaces unknown_whereabouts_share_std/export_share_std -- these
-    # fields no longer exist on StockFlowParams] Uncertainty spreads now come
-    # from `p02.collected_share_relative_spread` / `p02.export_share_relative_
-    # spread` / `p02.unknown_whereabouts_share_relative_spread` (Triangular, not
-    # Normal), plus `p02.unknown_share_lifetime_coupling_k` -- same
-    # `params_schema.py` fields stage 02/03_01 already use, nothing hardcoded
-    # here.
     monte_carlo_enabled = params.monte_carlo.enabled
     n_draws_mc = params.monte_carlo.n_draws if monte_carlo_enabled else 0
     lifetime_scale_lambda_relative_spread = dict(p02.lifetime_scale_lambda_relative_spread)
-    collected_share_relative_spread_mc = dict(p02.collected_share_relative_spread)
-    export_share_relative_spread_mc = dict(p02.export_share_relative_spread)
-    unknown_whereabouts_share_relative_spread_mc = dict(p02.unknown_whereabouts_share_relative_spread)
-    unknown_share_lifetime_coupling_k_mc = dict(p02.unknown_share_lifetime_coupling_k)
+    unknown_whereabouts_share_std_mc = dict(p02.unknown_whereabouts_share_std)
+    export_share_std_mc = dict(p02.export_share_std)
     mc_chunk_size = params.monte_carlo.chunk_size
 
     # Independent seed stream per scenario, spawn_key=(2,) -- matches this stage's
@@ -999,21 +912,6 @@ def main() -> dict[str, Any]:
     scenario_names_all = active_scenario_names
     mc_seed_seq = np.random.SeedSequence(params.monte_carlo.seed, spawn_key=(2,))
     mc_scenario_seeds = dict(zip(scenario_names_all, mc_seed_seq.spawn(len(scenario_names_all))))
-
-    # [NEW] For the by_drivetrain independent re-simulation (see run_adjusted_
-    # scenario's docstring): one UNMUTATED clone per scenario of its own seed above,
-    # built with the identical (entropy, spawn_key) pair -- NOT the same live object
-    # -- captured here, BEFORE `mc_scenario_seeds[name]` is spawned from at all. Any
-    # `.spawn()` call made on the original below (the segment-share draw, if this
-    # scenario has one, then the engine's own 5 per-drivetrain entity spawns inside
-    # `run_adjusted_scenario`) is mirrored on this clone in the SAME order (see the
-    # segment-share-draw block just below), so the two seeds' spawn counters stay
-    # aligned and the independent by_drivetrain run gets IDENTICAL per-drivetrain
-    # entity draws to the segment-level run.
-    mc_scenario_seeds_drivetrain = {
-        name: np.random.SeedSequence(entropy=seed.entropy, spawn_key=seed.spawn_key, pool_size=seed.pool_size)
-        for name, seed in mc_scenario_seeds.items()
-    }
 
     # -----------------------------------------------------------------------
     # Take 03_01's baseline inflow (by DRIVETRAIN + SEGMENT) as this notebook's starting point
@@ -1073,22 +971,6 @@ def main() -> dict[str, Any]:
 
         export_share_scn = {**export_share_by_drivetrain_base, **spec.export_share_overrides}
         unknown_whereabouts_scn = {**unknown_whereabouts_share_base, **spec.unknown_whereabouts_share_overrides}
-        # [NEW] collected_share has no ScenarioSpec override field of its own (only
-        # export_share_overrides/unknown_whereabouts_share_overrides exist) -- for
-        # scenarios that DO override export/unknown (losses_zero, losses_high),
-        # collected_share_by_drivetrain_base would no longer sum to 1 with THIS
-        # scenario's export/unknown point estimates. Re-derived as the remainder
-        # for each scenario's own export/unknown values -- byte-identical to
-        # collected_share_by_drivetrain_base for every scenario that doesn't
-        # override either (the base values already sum to 1 by construction, see
-        # StockFlowParams.validate()). The MC layer still gives this its own
-        # independent Triangular uncertainty around whatever this point estimate
-        # turns out to be (see collected_share_relative_spread below) -- this is
-        # only fixing the CENTER, not removing collected's own uncertainty.
-        collected_share_scn = {
-            drv: max(0.0, 1.0 - export_share_scn[drv] - unknown_whereabouts_scn[drv])
-            for drv in collected_share_by_drivetrain_base
-        }
         lifetime_change_scn = {
             drv: {"start_year": c.start_year, "shape_k": c.shape_k, "scale_lambda": c.scale_lambda}
             for drv, c in spec.lifetime_change_by_drv.items()
@@ -1122,11 +1004,6 @@ def main() -> dict[str, Any]:
             and spec.inflow_segment_shares_final is not None
         ):
             segment_share_seed = mc_scenario_seeds[name].spawn(1)[0]
-            # [NEW] Mirror this spawn on the by_drivetrain clone too (discarded --
-            # only used to keep its spawn counter aligned with the original's), so
-            # the 5 per-drivetrain entity spawns that happen later, inside
-            # run_adjusted_scenario, land on the SAME child indices on both seeds.
-            _ = mc_scenario_seeds_drivetrain[name].spawn(1)[0]
             segment_share_rng = np.random.default_rng(segment_share_seed)
             scenario_inflow_years = np.arange(
                 int(inflow_by_scenario[name]["year"].min()),
@@ -1160,13 +1037,8 @@ def main() -> dict[str, Any]:
             lifetime_change_by_drv=lifetime_change_scn,
             monte_carlo_enabled=monte_carlo_enabled, n_draws=n_draws_mc,
             lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
-            collected_share_by_drivetrain=collected_share_scn,
-            collected_share_relative_spread=collected_share_relative_spread_mc,
-            export_share_relative_spread=export_share_relative_spread_mc,
-            unknown_whereabouts_share_relative_spread=unknown_whereabouts_share_relative_spread_mc,
-            unknown_share_lifetime_coupling_k=unknown_share_lifetime_coupling_k_mc,
-            mc_seed=mc_scenario_seeds[name],
-            mc_seed_by_drivetrain=mc_scenario_seeds_drivetrain[name],
+            unknown_whereabouts_share_std=unknown_whereabouts_share_std_mc,
+            export_share_std=export_share_std_mc, mc_seed=mc_scenario_seeds[name],
             mc_chunk_size=mc_chunk_size, output_periods=params.monte_carlo.output_periods,
             inflow_draws_by_group=inflow_draws_for_scenario,
         )
@@ -1203,229 +1075,22 @@ def main() -> dict[str, Any]:
     print("Saved lifetime/loss/stock scenario artifacts (C6 fix):", saved_other_scenarios)
 
     # -----------------------------------------------------------------------
-    # [CHANGED, this round -- confirmed with the user] Diagnostic plot: inflow/
-    # outflow split, ONE FULL A4-LANDSCAPE PNG PER ACTIVE SCENARIO -- previously a
-    # single multi-scenario grid figure (`plot_flows_split_collected_unknown_all_
-    # trackers`, all scenarios crammed into small subplots). Now one full-page
-    # figure per scenario (`03_02_flows_<scenario>.png`), starting at 1990 (not
-    # 2015), using the already-fixed drivetrain-colored `plot_flows_split_
-    # collected_unknown_from_tracker` (solid=inflow, dashed=total outflow, one
-    # color per drivetrain -- see plotting.py's module docstring). With
-    # `scenarios_to_run=None` now auto-detecting whatever is live in `params_
-    # schema.py`'s `scenarios` dict (see AdjustedFlowsParams), this loop
-    # automatically produces exactly one PNG per active scenario -- no count to
-    # keep in sync here.
+    # Diagnostic plot: inflow/outflow split, ALL 11 scenarios at once -- integrated
+    # here (not a separate script), since this is exactly the step where every
+    # scenario's tracker is available. This is also the most direct visual
+    # confirmation that the C6 fix actually produced 5 genuinely different scenarios,
+    # not 5 more silent copies of BAU.
     # -----------------------------------------------------------------------
     fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
-
-    A4_LANDSCAPE_INCHES = (11.69, 8.27)
-    flows_drivetrains = ("BEV", "Diesel", "Petrol", "PHEV", "HEV")
-
-    # -------------------------------------------------------------------------
-    # [NEW] Shared helpers for 95% Monte Carlo bands on the flows figures below.
-    # Source: the "by_drivetrain" INDEPENDENT re-simulation inside each scenario's
-    # own `mc` result (see run_adjusted_scenario's docstring) -- only 5 groups
-    # (Region x Drive Train), not 12 segments, so collect_per_year=True on that
-    # specific call (changed above) is affordable even at 200,000 draws. This is
-    # a genuinely separate simulation from the deterministic tracker-based lines
-    # `plot_flows_split_collected_unknown_from_tracker` draws (same scenario
-    # assumptions, but not literally the same computation) -- band width reflects
-    # this scenario's own lifetime/share Monte Carlo uncertainty, not a formal
-    # error bar around the exact deterministic line.
-    # -------------------------------------------------------------------------
-    def _mc_per_year_band(mc_result, region, drv, field):
-        """
-        (years, median, p2_5, p97_5) for one field ("per_year_inflow" /
-        "per_year_survival" / "per_year_a" / "per_year_b" / "per_year_collected")
-        of one drivetrain's by-drivetrain MC re-simulation, or None if Monte
-        Carlo wasn't run / this drivetrain has no entry (e.g. zero vehicles in
-        this scenario).
-        """
-        if not mc_result or "by_drivetrain" not in mc_result:
-            return None
-        group = mc_result["by_drivetrain"].get((region, drv))
-        if group is None or field not in group:
-            return None
-        arr = group[field]  # (n_draws, n_years)
-        p2_5, median, p97_5 = np.percentile(arr, [2.5, 50, 97.5], axis=0)
-        return group["years"], median, p2_5, p97_5
-
-    def _plot_series_with_band(ax, years, median, p2_5, p97_5, color, label=None):
-        ax.plot(years, median, color=color, linewidth=2, label=label)
-        ax.fill_between(years, p2_5, p97_5, color=color, alpha=0.2, linewidth=0)
-
-    # -------------------------------------------------------------------------
-    # [CHANGED, this round -- confirmed with the user] Combined multi-drivetrain
-    # overview, ONE FULL A4-LANDSCAPE PNG PER ACTIVE SCENARIO. Deterministic
-    # solid/dashed lines UNCHANGED (plot_flows_split_collected_unknown_from_
-    # tracker, as before); NEW: a semi-transparent 95% band per drivetrain,
-    # per series (inflow, total outflow), from the by-drivetrain MC
-    # re-simulation, layered underneath.
-    # -------------------------------------------------------------------------
-    for scenario_name in active_scenario_names:
-        mc_result = scenario_results_all[scenario_name]["mc"]
-        fig, ax = plt.subplots(figsize=A4_LANDSCAPE_INCHES)
-
-        for drv in flows_drivetrains:
-            color = plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333")
-            inflow_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_inflow")
-            outflow_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_survival")
-            for band in (inflow_band, outflow_band):
-                if band is None:
-                    continue
-                years_b, _median, p2_5, p97_5 = band
-                mask = (years_b >= 1990) & (years_b <= 2070)
-                ax.fill_between(years_b[mask], p2_5[mask], p97_5[mask], color=color, alpha=0.15, linewidth=0, zorder=1)
-
-        plot_flows_split_collected_unknown_from_tracker(
-            tracker_keyed=tracker_keyed_by_scenario[scenario_name],
-            region=materials_region,
-            drivetrains=flows_drivetrains,
-            year_min=1990,
-            year_max=2070,
-            ax=ax,
-        )
-        ax.set_title(scenario_name, fontsize=13)
-        ax.set_xlabel("Year")
-        ax.set_ylabel("Vehicles [million]")
-        drv_handles = [
-            plt.Line2D([0], [0], color=plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333"), lw=2)
-            for drv in flows_drivetrains
-        ]
-        style_handles = [
-            plt.Line2D([0], [0], color="black", lw=2, linestyle="-"),
-            plt.Line2D([0], [0], color="black", lw=2, linestyle="--"),
-        ]
-        band_handle = [plt.Line2D([0], [0], color="#888888", lw=8, alpha=0.3)] if mc_result else []
-        band_label = ["95% MC band (by-drivetrain)"] if mc_result else []
-        ax.legend(
-            drv_handles + style_handles + band_handle,
-            list(flows_drivetrains) + ["Inflow", "Total outflow"] + band_label,
-            loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False,
-        )
-        plt.tight_layout(rect=[0, 0, 0.82, 1])
-        fig_path = fig_dir / f"03_02_flows_{scenario_name}.png"
-        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved diagnostic plot: {fig_path}")
-
-    # -----------------------------------------------------------------------
-    # [CHANGED, this round -- confirmed with the user] Inflow keeps its own
-    # single-series figure (unchanged). The four SEPARATE outflow figures
-    # (total/collected/export/unknown) are replaced by ONE combined breakdown
-    # figure per drivetrain: collected/export/unknown stacked (median only --
-    # their own 95% bands don't fit legibly once combined at this scale, e.g.
-    # export's ~0.4-0.55M band is invisible against a ~25M-scale total), with
-    # total outflow's own median + 95% band drawn on top (that ONE band does
-    # fit -- comparable scale to the stack itself).
-    # -----------------------------------------------------------------------
-    for scenario_name in active_scenario_names:
-        mc_result = scenario_results_all[scenario_name]["mc"]
-
-        # Deterministic fallback source: the scenario's own resolved flows_df
-        # (post drivetrain/segment-share-tweak and phase-out, if any), summed
-        # over Segment.
-        flows_scn = scenario_results_all[scenario_name]["flows_df"]
-        flows_by_year_drv = (
-            flows_scn[flows_scn["Region"] == materials_region]
-            .groupby(["Drive Train", "year"], as_index=False)[
-                ["inflow", "out_survival", "out_collected", "out_export", "out_unknown"]
-            ].sum()
-        )
-
-        for drv in flows_drivetrains:
-            d = flows_by_year_drv[
-                (flows_by_year_drv["Drive Train"] == drv)
-                & (flows_by_year_drv["year"] >= 1975)
-                & (flows_by_year_drv["year"] <= 2070)
-            ].sort_values("year")
-
-            # --- Inflow: unchanged, own figure ---
-            inflow_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_inflow")
-            if d.empty and inflow_band is None:
-                print(f"Skipped inflow figure: no data for scenario={scenario_name!r}, drivetrain={drv!r}.")
-            else:
-                fig, ax = plt.subplots(figsize=(10, 6))
-                color = plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333")
-                if inflow_band is not None:
-                    years_b, median, p2_5, p97_5 = inflow_band
-                    mask = (years_b >= 1975) & (years_b <= 2070)
-                    _plot_series_with_band(ax, years_b[mask], median[mask], p2_5[mask], p97_5[mask], color)
-                    n_draws_band = mc_result["by_drivetrain"][(materials_region, drv)]["per_year_inflow"].shape[0]
-                    ax.set_title(f"{scenario_name} / {drv}: inflow, 1975-2070 (median + 95% MC band, n={n_draws_band:,})", fontsize=11)
-                elif not d.empty:
-                    ax.plot(d["year"], d["inflow"], color=color, linewidth=2)
-                    ax.set_title(f"{scenario_name} / {drv}: inflow, 1975-2070", fontsize=12)
-                ax.set_xlabel("Year")
-                ax.set_ylabel("Inflow [million/year]")
-                ax.grid(True, linestyle="--", alpha=0.3)
-                ax.spines["top"].set_visible(False)
-                ax.spines["right"].set_visible(False)
-                plt.tight_layout()
-                fig_path = fig_dir / f"03_02_inflow_{scenario_name}_{drv}.png"
-                fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-                plt.close(fig)
-                print(f"Saved diagnostic plot: {fig_path}")
-
-            # --- Outflow breakdown: ONE combined figure ---
-            total_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_survival")
-            collected_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_collected")
-            export_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_a")
-            unknown_band = _mc_per_year_band(mc_result, materials_region, drv, "per_year_b")
-
-            if d.empty and total_band is None:
-                print(f"Skipped outflow breakdown figure: no data for scenario={scenario_name!r}, drivetrain={drv!r}.")
-                continue
-
-            fig, ax = plt.subplots(figsize=(10, 6))
-            color = plotting.DRIVETRAIN_LINE_COLORS.get(drv, "#333333")
-            stack_colors = {"Collected": "#2E86AB", "Export": "#E67E22", "Unknown whereabouts": "#8E44AD"}
-
-            if collected_band is not None and export_band is not None and unknown_band is not None:
-                years_b = collected_band[0]
-                mask = (years_b >= 1975) & (years_b <= 2070)
-                years_plot = years_b[mask]
-                collected_med = collected_band[1][mask]
-                export_med = export_band[1][mask]
-                unknown_med = unknown_band[1][mask]
-                ax.stackplot(
-                    years_plot, collected_med, export_med, unknown_med,
-                    labels=["Collected", "Export", "Unknown whereabouts"],
-                    colors=[stack_colors["Collected"], stack_colors["Export"], stack_colors["Unknown whereabouts"]],
-                    alpha=0.55,
-                )
-            elif not d.empty:
-                years_plot = d["year"].to_numpy()
-                ax.stackplot(
-                    years_plot, d["out_collected"], d["out_export"], d["out_unknown"],
-                    labels=["Collected", "Export", "Unknown whereabouts"],
-                    colors=[stack_colors["Collected"], stack_colors["Export"], stack_colors["Unknown whereabouts"]],
-                    alpha=0.55,
-                )
-
-            if total_band is not None:
-                years_b, median, p2_5, p97_5 = total_band
-                mask = (years_b >= 1975) & (years_b <= 2070)
-                ax.plot(years_b[mask], median[mask], color="black", linewidth=2.2, label="Total outflow (median)", zorder=5)
-                ax.fill_between(years_b[mask], p2_5[mask], p97_5[mask], color="black", alpha=0.15, linewidth=0, zorder=4, label="Total outflow 95% MC band")
-                n_draws_band = mc_result["by_drivetrain"][(materials_region, drv)]["per_year_survival"].shape[0]
-                ax.set_title(f"{scenario_name} / {drv}: outflow breakdown, 1975-2070 (n={n_draws_band:,})", fontsize=11)
-            elif not d.empty:
-                ax.plot(d["year"], d["out_survival"], color="black", linewidth=2.2, label="Total outflow")
-                ax.set_title(f"{scenario_name} / {drv}: outflow breakdown, 1975-2070", fontsize=12)
-
-            ax.set_xlabel("Year")
-            ax.set_ylabel("Outflow [million/year]")
-            ax.grid(True, linestyle="--", alpha=0.3)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
-            plt.tight_layout(rect=[0, 0, 0.78, 1])
-            fig_path = fig_dir / f"03_02_outflow_breakdown_{scenario_name}_{drv}.png"
-            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"Saved diagnostic plot: {fig_path}")
+    fig_path = fig_dir / "03_02_flows_all_scenarios.png"
+    plot_flows_split_collected_unknown_all_trackers(
+        tracker_keyed_by_scenario=tracker_keyed_by_scenario,
+        region=materials_region,
+        show=False,
+        save_path=fig_path,
+    )
+    print(f"Saved diagnostic plot: {fig_path}")
 
     # -----------------------------------------------------------------------
     # Monte Carlo (opt-in via params.monte_carlo.enabled, default False -- does not
@@ -1503,9 +1168,6 @@ def main() -> dict[str, Any]:
     if monte_carlo_enabled:
         n_draws = n_draws_mc
         eu_total_cumulative_collected_by_scenario_period: dict[tuple[str, tuple[int, int]], np.ndarray] = {}
-        # [NEW] Per (scenario, drivetrain, period) -- feeds the new per-drivetrain,
-        # cross-scenario comparison figure below.
-        drivetrain_collected_by_scenario_period: dict[tuple[str, str, tuple[int, int]], np.ndarray] = {}
         summary_mc: dict[str, dict] = {}
         sensitivity_by_scenario: dict[str, "pd.DataFrame"] = {}
         # Headline period for sensitivity analysis (one output at a time, by design
@@ -1530,7 +1192,6 @@ def main() -> dict[str, Any]:
                 input_draws[f"{entity}_scale_lambda"] = draws["scale_lambda"]
                 input_draws[f"{entity}_export_share"] = draws["export"]
                 input_draws[f"{entity}_unknown_share"] = draws["unknown"]
-                input_draws[f"{entity}_collected_share"] = draws["collected"]
             output_for_sensitivity = mc["eu_total"]["periods"][headline_period]["cumulative_collected"]
             sensitivity_by_scenario[scenario_name] = sensitivity_correlations(input_draws, output_for_sensitivity)
 
@@ -1552,12 +1213,6 @@ def main() -> dict[str, Any]:
                 # exactly the same `drv_period_result`/`g["periods"][period]` values
                 # `_summarize_period_result` already computes on, not a re-derivation.
                 collected_by_drivetrain: dict[str, np.ndarray] = {}
-                # [NEW] Same shape as collected_by_drivetrain above, but from the
-                # independent by-drivetrain re-simulation (mc["by_drivetrain"]) instead
-                # of the segment-sum -- feeds the second "5 drivetrains, direct" boxplot
-                # + KDE comparison figure below, for a visual same-scenario cross-check
-                # against the existing segment-sum comparison figure.
-                collected_by_drivetrain_direct: dict[str, np.ndarray] = {}
                 collected_by_segment_within_drivetrain: dict[str, dict[str, np.ndarray]] = {}
 
                 for drivetrain in drivetrains_present:
@@ -1569,34 +1224,6 @@ def main() -> dict[str, Any]:
                         drv_period_result, f"{scenario_name}__{period_label}__{drivetrain}", summary_mc
                     )
                     collected_by_drivetrain[drivetrain] = drv_period_result["cumulative_collected"]
-                    drivetrain_collected_by_scenario_period[(scenario_name, drivetrain, period)] = (
-                        drv_period_result["cumulative_collected"]
-                    )
-
-                    # [NEW] Independent by-drivetrain re-simulation, if this scenario's
-                    # `mc` has one (see `run_adjusted_scenario`'s docstring) -- summarized
-                    # under the SAME `{scenario}__{period}__{drivetrain}` prefix as the
-                    # segment-sum above, PLUS a `__direct` suffix, so the two are saved
-                    # side by side in `summary_mc` for direct comparison: `..__{drivetrain}
-                    # __cumulative_collected` (segment-sum, existing) vs.
-                    # `..__{drivetrain}__direct__cumulative_collected` (independent resim,
-                    # new). A mismatch beyond Monte Carlo noise would flag that the base-
-                    # year segment-mix assumption (uniform split across cohort vintages,
-                    # see `build_stock_by_segment_at_base_year`'s docstring) has a real
-                    # effect for that drivetrain/period.
-                    by_drivetrain_direct = mc.get("by_drivetrain")
-                    if by_drivetrain_direct is not None:
-                        direct_group_key = ("EUR", drivetrain)
-                        direct_group = by_drivetrain_direct.get(direct_group_key)
-                        if direct_group is not None:
-                            _summarize_period_result(
-                                direct_group["periods"][period],
-                                f"{scenario_name}__{period_label}__{drivetrain}__direct",
-                                summary_mc,
-                            )
-                            collected_by_drivetrain_direct[drivetrain] = (
-                                direct_group["periods"][period]["cumulative_collected"]
-                            )
 
                     # Segment level: individual (drivetrain, segment) groups, no further summing.
                     segment_values: dict[str, np.ndarray] = {}
@@ -1633,25 +1260,6 @@ def main() -> dict[str, Any]:
                         ylabel="Cumulative collected [million vehicles]",
                         fig_path_boxplot=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_boxplot.png",
                         fig_path_pdf=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_pdf.png",
-                    )
-
-                # [NEW] Second, additional comparison figure: the SAME 5-drivetrain
-                # comparison, but built from the independent by-drivetrain
-                # re-simulation (mc["by_drivetrain"]) instead of the 12-segment sum
-                # above -- same entity draws (seed clone), same inputs, just not split
-                # into segments. Distinct filename ("_direct_") so it sits alongside the
-                # segment-sum figure above without overwriting it; put the two side by
-                # side to see whether the base-year uniform-segment-mix assumption
-                # visibly shifts any drivetrain's distribution.
-                if len(collected_by_drivetrain_direct) > 1:
-                    plot_group_comparison_boxplot_and_pdf(
-                        collected_by_drivetrain_direct,
-                        title=f"{scenario_name}: cumulative collected by drivetrain (independent re-simulation, "
-                              f"not segment-sum), {period_label}",
-                        xlabel="Cumulative collected [million vehicles]",
-                        ylabel="Cumulative collected [million vehicles]",
-                        fig_path_boxplot=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_direct_{scenario_name}_{period_label}_boxplot.png",
-                        fig_path_pdf=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_direct_{scenario_name}_{period_label}_pdf.png",
                     )
 
                 for drivetrain, segment_values in collected_by_segment_within_drivetrain.items():
@@ -1729,29 +1337,6 @@ def main() -> dict[str, Any]:
             fig_path_mc = fig_dir / f"03_02_monte_carlo_scenario_comparison_{period_label}.png"
             fig.savefig(fig_path_mc, dpi=150, bbox_inches="tight")
             print(f"Saved diagnostic plot: {fig_path_mc}")
-
-        # [NEW] Per-drivetrain, cross-scenario comparison: for EACH drivetrain, ALL
-        # active scenarios side by side. Only meaningful once 2+ scenarios are active.
-        for (start, end) in params.monte_carlo.output_periods:
-            period = (start, end)
-            period_label = f"{start}-{end}"
-            for drivetrain in ("BEV", "HEV", "PHEV", "Diesel", "Petrol"):
-                by_scenario = {
-                    scenario_name: drivetrain_collected_by_scenario_period[(scenario_name, drivetrain, period)]
-                    for scenario_name in scenario_names_all
-                    if (scenario_name, drivetrain, period) in drivetrain_collected_by_scenario_period
-                }
-                if len(by_scenario) <= 1:
-                    continue
-                plot_group_comparison_boxplot_and_pdf(
-                    by_scenario,
-                    title=f"{drivetrain}: cumulative collected across scenarios, {period_label}",
-                    xlabel="Cumulative collected [million vehicles]",
-                    ylabel="Cumulative collected [million vehicles]",
-                    fig_path_boxplot=fig_dir / f"03_02_monte_carlo_scenario_comparison_by_drivetrain_{drivetrain}_{period_label}_boxplot.png",
-                    fig_path_pdf=fig_dir / f"03_02_monte_carlo_scenario_comparison_by_drivetrain_{drivetrain}_{period_label}_pdf.png",
-                )
-            print(f"Saved per-drivetrain cross-scenario comparison figures: {period_label}")
 
     return {**saved_inflow_mix_scenarios, **saved_other_scenarios}
 

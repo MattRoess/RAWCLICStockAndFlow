@@ -1369,7 +1369,7 @@ class MonteCarloParams:
     # is bounded by `chunk_size x n_cohorts`, not `n_draws x n_cohorts`. A generic,
     # cross-stage performance knob (not a model assumption), centralized here rather
     # than hardcoded as a function default in any one engine.
-    chunk_size: int = 20_000
+    chunk_size: int = 200_000
 
     # [NEW, moved here from being 03_02-only] Which (start_year, end_year) INCLUSIVE
     # year-ranges to report Monte Carlo results for -- cumulative flows, cumulative

@@ -148,6 +148,7 @@ BUILD PROGRESS (step by step, per user's request to test alongside):
 
 from __future__ import annotations
 
+import gc
 import sys
 import time
 from pathlib import Path
@@ -1126,13 +1127,43 @@ def bootstrap_mixed_composition_draws(
                 print(f"  ... {n_groups_done:,} groups bootstrapped ({elapsed:.1f}s elapsed, "
                       f"{n_groups_done / max(elapsed, 1e-9):,.0f} groups/s)", flush=True)
 
-            out = np.empty(n_draws, dtype=float)
+            # [FIXED, this round -- REAL DATA-CORRECTNESS BUG, found via
+            # diagnose_outlier_source.py against the real project data] This MUST be
+            # np.zeros, not np.empty. np.empty does NOT zero-initialize the array --
+            # it hands back whatever bytes already happened to be sitting in that
+            # block of memory. Below, when a cohort year has NO histogram rows for
+            # this (components, material) group (`year_bins.empty` -- completely
+            # normal: many materials, e.g. magnesium, simply were not used/measured
+            # in every model year), the old code did `continue` and never wrote
+            # anything into those draw positions. Reading an unwritten np.empty
+            # position returns uninitialized memory -- usually 0.0 (a freshly-zeroed
+            # OS page) but sometimes leftover garbage bit patterns that decode as
+            # absurd floats (1e14-1e17 kg). This is EXACTLY the bug the user found in
+            # the real output of diagnose_outlier_source.py: calMagnesium /
+            # calculatePt / calculatePd / calculateLa / calculateCe groups showing
+            # median=0 kg (physically correct -- most draws' assigned year genuinely
+            # has no composition data for that material) together with a max value
+            # 5-8 orders of magnitude above the rest of the distribution
+            # (uninitialized-memory garbage, not a real physical value). Treating "no
+            # composition data for this material in this draw's assigned year" as a
+            # mass contribution of EXACTLY ZERO is the physically correct default
+            # (it matches the many legitimately-zero draws already being produced
+            # correctly elsewhere) -- np.zeros makes that the actual guaranteed
+            # behavior instead of accidentally reading garbage RAM the ~0.001%-1% of
+            # the time the OS handed back a non-zero page.
+            out = np.zeros(n_draws, dtype=float)
+            n_missing_year_draws = 0
             for y in years:
                 cnt = counts[y]
                 if cnt == 0:
                     continue
                 year_bins = grp[grp["year"] == y].sort_values("bin_lower")
                 if year_bins.empty:
+                    # No composition histogram for this material in this cohort
+                    # year. These draws are already 0 (out is zero-initialized) --
+                    # counted here only so the diagnostic below can report it
+                    # instead of staying silent about it, as the old code did.
+                    n_missing_year_draws += cnt
                     continue
                 out[masks[y]] = _bootstrap_from_bins(
                     year_bins["bin_lower"].to_numpy(dtype=float),
@@ -1140,6 +1171,17 @@ def bootstrap_mixed_composition_draws(
                     year_bins["frequency"].to_numpy(dtype=float),
                     cnt, rng,
                 )
+            if verbose and n_missing_year_draws == n_draws:
+                # Every single draw for this group had no composition data at all in
+                # its assigned cohort year -- the whole group is legitimately
+                # all-zero mass (material not present for this drivetrain/segment/
+                # component at all). Printed once per such group so this is visible
+                # in the log, not silently invisible as before.
+                print(f"  [bootstrap_mixed_composition_draws] NOTE: "
+                      f"(drivetrain={drivetrain!r}, segment={segment!r}, "
+                      f"components={components!r}, material={material!r}) has NO "
+                      f"composition data in ANY of its assigned cohort years -- all "
+                      f"{n_draws:,} draws are 0 (material not present for this group).")
             mixed[(drivetrain, segment, components, material)] = out
 
     if verbose:
@@ -2094,6 +2136,46 @@ def _scenario_color_map(scenario_names: list[str]) -> dict[str, Any]:
     return {name: cmap(i % 10) for i, name in enumerate(scenario_names)}
 
 
+def _extract_cross_scenario_summary(
+    mc_draws_tables: dict[tuple, dict[tuple, np.ndarray]],
+) -> dict[str, dict[tuple, np.ndarray]]:
+    """
+    [NEW -- fixes a real OOM crash] Reduces the FULL (drivetrain, segment,
+    components, material)-keyed MC mass draws for ONE FLOW -- 8.35 GB at this
+    project's real numbers (5,602 groups x 200,000 draws x 8 bytes) -- down to
+    just what the cross-scenario comparison plots need: totals per (period, flow,
+    drivetrain), and per (period, flow, drivetrain, material), both summed across
+    segment and components. Called once per (scenario, flow), right after that
+    flow's own diagnostic plots are made, so the full-resolution draws can then be
+    dropped from memory before the next flow (or scenario) starts -- this is what
+    bounds peak memory to roughly ONE flow's draws at a time, for the whole run,
+    regardless of how many scenarios or flows are active.
+
+    Parameters
+    ----------
+    mc_draws_tables : one flow's `{(period, flow): {(drv,seg,comp,mat): draws}}`
+        (the 12-segment path's MC mass draws, as built by
+        `combine_flow_and_composition_draws`)
+
+    Returns
+    -------
+    {"by_drivetrain": {(period, flow, drivetrain): (n_draws,) array},
+     "by_material": {(period, flow, drivetrain, material): (n_draws,) array}}
+    Each array is a fresh copy/sum, independent of the input arrays -- so the
+    caller can safely `del` the original `mc_draws_tables` right after this call
+    without affecting anything returned here.
+    """
+    by_drivetrain: dict[tuple, np.ndarray] = {}
+    by_material: dict[tuple, np.ndarray] = {}
+    for (period, flow), draws_dict in mc_draws_tables.items():
+        for (drv, _seg, _comp, mat), draws in draws_dict.items():
+            dk = (period, flow, drv)
+            by_drivetrain[dk] = draws.copy() if dk not in by_drivetrain else by_drivetrain[dk] + draws
+            mk = (period, flow, drv, mat)
+            by_material[mk] = draws.copy() if mk not in by_material else by_material[mk] + draws
+    return {"by_drivetrain": by_drivetrain, "by_material": by_material}
+
+
 def plot_scenario_comparison_boxplot_and_pdf(
     by_scenario_draws: dict[str, np.ndarray],
     title: str,
@@ -2131,7 +2213,7 @@ def plot_scenario_comparison_boxplot_and_pdf(
     fig, ax = plt.subplots(figsize=(max(5, 1.8 * len(scenario_names)), 6))
     bp = ax.boxplot(
         [draws_t[name] for name in scenario_names],
-        labels=scenario_names, showfliers=False, patch_artist=True, widths=0.5,
+        tick_labels=scenario_names, showfliers=False, patch_artist=True, widths=0.5,
     )
     for patch, name in zip(bp["boxes"], scenario_names):
         patch.set_facecolor(colors[name])
@@ -2655,16 +2737,28 @@ def main() -> dict[str, Any]:
 
         scenario_rng = np.random.default_rng(scenario_seeds[scenario_name])
 
+        # [CHANGED, this round -- bounded-memory redesign, see module docstring] Only
+        # SMALL, scalar (point-estimate) tables accumulate across the whole scenario
+        # now. The full (drivetrain, segment, components, material) MC draws dicts
+        # are no longer accumulated across BOTH flows before use -- each flow's full
+        # draws are now built, used for that flow's own plots, reduced to a small
+        # summary, saved to disk, and freed, ALL before the next flow starts. This
+        # bounds peak memory to roughly ONE flow's full draws at a time, for the
+        # WHOLE run, regardless of how many scenarios or flows are active -- see
+        # _extract_cross_scenario_summary's docstring for the measured numbers.
         scalar_tables: dict[tuple, pd.DataFrame] = {}
-        mc_draws_tables: dict[tuple, dict[tuple, np.ndarray]] = {}
-        # [NEW] Drivetrain-level ("standard") counterparts, same (period, flow) keying.
         scalar_tables_standard: dict[tuple, pd.DataFrame] = {}
-        mc_draws_tables_standard: dict[tuple, dict[tuple, np.ndarray]] = {}
         year_span = (
             min(df["scrap_year"].min() for df in tracker_keyed.values()),
             max(df["scrap_year"].max() for df in tracker_keyed.values()),
         )
         mass_by_year_tables: dict[str, pd.DataFrame] = {}
+
+        # [NEW] Only these SMALL, already-reduced summaries persist across flows and
+        # across scenarios (see _extract_cross_scenario_summary) -- feeds the
+        # cross-scenario comparison plots after the scenario loop, below.
+        cross_scenario_by_drivetrain: dict[tuple, np.ndarray] = {}
+        cross_scenario_by_material: dict[tuple, np.ndarray] = {}
 
         for flow in sorted(FLOW_VALUES_IN_SCOPE):
             flow_metric = f"cumulative_{flow}"
@@ -2674,18 +2768,18 @@ def main() -> dict[str, Any]:
                 tracker_keyed, flow, year_span, composition_first_year, p04, region=region
             )
 
+            # [NEW] Full-resolution MC draws for THIS FLOW ONLY -- local to this
+            # iteration, never accumulated alongside the other flow's draws. Freed
+            # (see `del` below) before the next flow starts.
+            mc_draws_tables_flow: dict[tuple, dict[tuple, np.ndarray]] = {}
+            mc_draws_tables_standard_flow: dict[tuple, dict[tuple, np.ndarray]] = {}
+
             for period in periods:
                 print(f"  [{flow}] period {period}: scalar mass (12-segment)...")
                 scalar_tables[(period, flow)] = combine_scalar_mass_from_tracker(
                     tracker_keyed, flow, period, composition_first_year, p04, region=region
                 )
 
-                # [NEW, this round] Cohort-year weights for THIS (scenario, flow, period)
-                # -- from the deterministic tracker, each matched composition year's real
-                # share of vehicles. Feeds directly into the fused bootstrap-and-mix
-                # below -- no separate "which years need bootstrapping" bookkeeping any
-                # more (that was the source of the OOM crash; see bootstrap_mixed_
-                # composition_draws's docstring for the full story).
                 cohort_year_weights = compute_cohort_year_weights(
                     tracker_keyed, flow, period, region, composition_years_by_drivetrain
                 )
@@ -2697,32 +2791,18 @@ def main() -> dict[str, Any]:
                 )
 
                 print(f"  [{flow}] period {period}: MC mass, 12-segment ({n_draws:,} draws)...")
-                mc_draws_tables[(period, flow)] = combine_flow_and_composition_draws(
+                mc_draws_tables_flow[(period, flow)] = combine_flow_and_composition_draws(
                     mc_summary, scenario_name, period, flow_metric, mixed_composition_draws,
                     n_draws, scenario_rng,
                 )
+                del mixed_composition_draws
 
-                # [NEW] Drivetrain-level ("standard") scalar + MC mass, same period/flow.
                 print(f"  [{flow}] period {period}: scalar mass (standard)...")
                 scalar_tables_standard[(period, flow)] = combine_scalar_mass_standard(
                     mc_summary, scenario_name, flow, period, composition_standard, p04, region=region,
                     point_estimate_stat="mean",
-                    # NOTE: point_estimate_stat is the VEHICLE-COUNT statistic (mean of the
-                    # by-drivetrain MC run) -- independent of p04.composition_scalar_statistic,
-                    # which is the COMPOSITION statistic. Left explicit ("mean") rather than
-                    # reusing p04.composition_scalar_statistic here to avoid conflating two
-                    # different "which statistic" choices that happen to share a similarly-
-                    # named parameter; see combine_scalar_mass_standard's own docstring.
                 )
 
-                # [NEW, this round] Standard path: no per-cohort weighting is possible
-                # (see combine_scalar_mass_standard's LIMITATION note -- mc_stage03_02_
-                # summary's "__direct__" entries are period-cumulative only). Same
-                # midpoint-year approximation as the scalar standard path: a trivial
-                # single-year "mixture" (weight 1.0) into the SAME fused function --
-                # degenerates to bootstrapping n_draws from one year, same cost as
-                # before this round for this specific path (it was never the source of
-                # the OOM -- only one year per drivetrain per period, always).
                 midpoint_year = round((period[0] + period[1]) / 2)
                 cohort_year_weights_standard: dict[tuple[str, str], dict[int, float]] = {}
                 for drv in p04.drivetrains:
@@ -2734,30 +2814,26 @@ def main() -> dict[str, Any]:
 
                 mixed_composition_draws_standard = bootstrap_mixed_composition_draws(
                     histogram_standard_all, cohort_year_weights_standard, n_draws, composition_rng,
-                    verbose=False,  # tiny (one year per drivetrain) -- per-group progress prints add noise, not signal
+                    verbose=False,
                 )
 
                 print(f"  [{flow}] period {period}: MC mass, standard ({n_draws:,} draws)...")
-                mc_draws_tables_standard[(period, flow)] = combine_flow_and_composition_draws(
+                mc_draws_tables_standard_flow[(period, flow)] = combine_flow_and_composition_draws(
                     mc_summary, scenario_name, period, flow_metric, mixed_composition_draws_standard,
                     n_draws, scenario_rng, direct=True,
                 )
+                del mixed_composition_draws_standard
+                gc.collect()
 
-        # ---------------------------------------------------------------------------
-        # Diagnostic plots: material mass by year + mass by year by segment, for
-        # EVERY drivetrain, for both flows. The MC panel now shows one box PER
-        # CATEGORY (material, or segment) so categories can be compared against each
-        # other -- not one aggregate box. Saved as PDF (vector), per the user's
-        # preference.
-        # ---------------------------------------------------------------------------
-        print(f"  Generating diagnostic plots for {len(p04.drivetrains)} drivetrains x "
-              f"{len(FLOW_VALUES_IN_SCOPE)} flows...")
-        for flow in sorted(FLOW_VALUES_IN_SCOPE):
-            headline_mc_draws = mc_draws_tables[(headline_period, flow)]
+            # -----------------------------------------------------------------------
+            # Everything below needs THIS FLOW's full-resolution draws -- done right
+            # here, while they're still in memory, before they get freed at the end
+            # of this flow's iteration.
+            # -----------------------------------------------------------------------
+            print(f"  Generating diagnostic plots for {len(p04.drivetrains)} drivetrains "
+                  f"({flow})...")
+            headline_mc_draws = mc_draws_tables_flow[(headline_period, flow)]
             for drivetrain in p04.drivetrains:
-                # Aggregate this drivetrain's (segment, components, material) MC groups
-                # down to per-MATERIAL and per-SEGMENT period-total draws -- each
-                # summed across every other dimension -- for the two comparison plots.
                 mc_by_material: dict[str, np.ndarray] = {}
                 mc_by_segment: dict[str, np.ndarray] = {}
                 for (drv, seg, _comp, mat), draws in headline_mc_draws.items():
@@ -2776,17 +2852,10 @@ def main() -> dict[str, Any]:
                     fig_dir / f"04_01_mass_by_year_segment_{scenario_name}_{flow}_{drivetrain}.png",
                 )
 
-        # ---------------------------------------------------------------------------
-        # [NEW] "Reasonable comparison" figure: 12-segment total vs. drivetrain-level
-        # ("standard") total, all 5 drivetrains side by side, at the HEADLINE period
-        # (the widest requested period -- same convention as the other MC-panel
-        # plots above). One figure per flow.
-        # ---------------------------------------------------------------------------
-        print(f"  Generating standard-vs-segments comparison plots ({len(FLOW_VALUES_IN_SCOPE)} flows)...")
-        for flow in sorted(FLOW_VALUES_IN_SCOPE):
+            print(f"  Generating standard-vs-segments comparison plot ({flow})...")
             plot_standard_vs_segments_comparison(
-                mc_draws_tables[(headline_period, flow)],
-                mc_draws_tables_standard[(headline_period, flow)],
+                mc_draws_tables_flow[(headline_period, flow)],
+                mc_draws_tables_standard_flow[(headline_period, flow)],
                 list(p04.drivetrains),
                 title=f"{scenario_name} / {flow}: 12-segment vs. standard composition, "
                       f"{headline_period[0]}-{headline_period[1]}",
@@ -2794,34 +2863,53 @@ def main() -> dict[str, Any]:
             )
             print(f"  Saved diagnostic plot: {fig_dir}/04_01_standard_vs_segments_{scenario_name}_{flow}.png")
 
+            # [NEW] Reduce THIS FLOW's full draws to the small cross-scenario summary
+            # (see _extract_cross_scenario_summary) before they get freed below.
+            flow_summary = _extract_cross_scenario_summary(mc_draws_tables_flow)
+            cross_scenario_by_drivetrain.update(flow_summary["by_drivetrain"])
+            cross_scenario_by_material.update(flow_summary["by_material"])
+
+            # [NEW] Persist THIS FLOW's full-resolution MC draws to their OWN file
+            # (one file per (scenario, flow) instead of one combined file per
+            # scenario -- same data, split so it never needs to be held alongside
+            # the other flow's draws). The 3 small, scenario-level tables
+            # (scalar_tables, mass_by_year_tables, scalar_tables_standard) are still
+            # saved ONCE per scenario, after the flow loop, unchanged in name.
+            saved_paths.update(save_unregistered_scenario_outputs(artifacts_dir, {
+                f"04_01_mc_mass_draws_{scenario_name}_{flow}.pkl": mc_draws_tables_flow,
+                f"04_01_mc_mass_draws_standard_{scenario_name}_{flow}.pkl": mc_draws_tables_standard_flow,
+            }))
+
+            # [NEW] Free this flow's full-resolution draws before the next flow
+            # starts -- this is the step that bounds peak memory to one flow at a
+            # time, instead of growing with the number of active flows/scenarios.
+            del mc_draws_tables_flow, mc_draws_tables_standard_flow, headline_mc_draws
+            gc.collect()
+
         # ---------------------------------------------------------------------------
-        # Persist: same "unregistered per-scenario pickle" convention the OLD
-        # 04_01_materials.py used for its per-scenario outputs.
+        # Persist the small, scenario-level (not per-flow) tables, same filenames as
+        # before this round's redesign.
         # ---------------------------------------------------------------------------
         saved_paths.update(save_unregistered_scenario_outputs(artifacts_dir, {
             f"04_01_scalar_mass_{scenario_name}.pkl": scalar_tables,
-            f"04_01_mc_mass_draws_{scenario_name}.pkl": mc_draws_tables,
             f"04_01_mass_by_year_{scenario_name}.pkl": mass_by_year_tables,
-            # [NEW] Drivetrain-level ("standard") counterparts.
             f"04_01_scalar_mass_standard_{scenario_name}.pkl": scalar_tables_standard,
-            f"04_01_mc_mass_draws_standard_{scenario_name}.pkl": mc_draws_tables_standard,
         }))
         all_outputs[scenario_name] = {
-            "scalar_tables": scalar_tables,
-            "mc_draws_tables": mc_draws_tables,
             "mass_by_year_tables": mass_by_year_tables,
-            "scalar_tables_standard": scalar_tables_standard,
-            "mc_draws_tables_standard": mc_draws_tables_standard,
+            "by_drivetrain": cross_scenario_by_drivetrain,
+            "by_material": cross_scenario_by_material,
         }
+        del tracker_keyed
+        gc.collect()
         print(f"  Scenario {scenario_name} done in {time.time() - t_start_scenario:.1f}s.")
 
 
     # -------------------------------------------------------------------------------
-    # [NEW] Cross-scenario comparison plots: only meaningful with 2+ active
-    # scenarios (e.g. BAU + stock_lower). For each (flow, drivetrain): (a) total
-    # mass-by-year trajectory, one line per scenario, with a headline-period MC
-    # density panel; (b) a boxplot + PDF pair comparing headline-period total mass
-    # distributions across scenarios.
+    # Cross-scenario comparison plots: only meaningful with 2+ active scenarios.
+    # Built entirely from the SMALL per-scenario summaries in `all_outputs` -- the
+    # full per-(drivetrain, segment, components, material) MC draws are freed
+    # inside the scenario loop above, right after each flow's own plots are made.
     # -------------------------------------------------------------------------------
     if len(active_scenario_names) > 1:
         print(f"\n{'-' * 76}\nCross-scenario comparison plots ({len(active_scenario_names)} scenarios)\n{'-' * 76}")
@@ -2833,15 +2921,9 @@ def main() -> dict[str, Any]:
             for drivetrain in p04.drivetrains:
                 headline_draws_by_scenario: dict[str, np.ndarray] = {}
                 for name in active_scenario_names:
-                    mc_draws = all_outputs[name]["mc_draws_tables"][(headline_period, flow)]
-                    total = np.zeros(n_draws, dtype=float)
-                    found = False
-                    for (drv, _seg, _comp, _mat), draws in mc_draws.items():
-                        if drv == drivetrain:
-                            total = total + draws
-                            found = True
-                    if found:
-                        headline_draws_by_scenario[name] = total
+                    draws = all_outputs[name]["by_drivetrain"].get((headline_period, flow, drivetrain))
+                    if draws is not None:
+                        headline_draws_by_scenario[name] = draws
 
                 plot_total_mass_by_year_scenario_comparison(
                     mass_by_year_by_scenario, headline_draws_by_scenario, drivetrain,
@@ -2861,11 +2943,16 @@ def main() -> dict[str, Any]:
                         colors=scenario_colors,
                     )
 
-        # [NEW] Material breakdown (grouped bars) + percent-change delta plots.
         for flow in sorted(FLOW_VALUES_IN_SCOPE):
-            mc_draws_by_scenario_flow = {
-                name: all_outputs[name]["mc_draws_tables"][(headline_period, flow)] for name in active_scenario_names
-            }
+            mc_draws_by_scenario_flow: dict[str, dict[tuple, np.ndarray]] = {}
+            for name in active_scenario_names:
+                by_material = all_outputs[name]["by_material"]
+                mc_draws_by_scenario_flow[name] = {
+                    (drv, "ALL", "ALL", mat): draws
+                    for (per, f, drv, mat), draws in by_material.items()
+                    if per == headline_period and f == flow
+                }
+
             for drivetrain in p04.drivetrains:
                 plot_material_breakdown_scenario_comparison(
                     mc_draws_by_scenario_flow, drivetrain,
