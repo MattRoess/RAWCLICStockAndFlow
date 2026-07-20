@@ -91,7 +91,6 @@ from src.data_prep import (  # type: ignore
     prepare_remind_scenarios,
 )
 from src.stock_flow import (  # type: ignore
-    warp_bev_transition_all_segments,
     plot_bev_stock_compare_grouped,
 )
 
@@ -220,23 +219,20 @@ def main() -> dict[str, Path]:
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------------
-    # Diagnostic plot 1: BEV transition speed across scenarios (integrated here, not a
-    # separate script, since this is exactly the step that produces scenario_map and
-    # stock_dict -- the two things this chart needs). See MATH_MODELS.md §2.6.
+    # Diagnostic plot 1: BEV stock across scenarios, with the SELECTED scenario
+    # (`p01.scenario`) marked -- integrated here (not a separate script), since this
+    # is exactly the step that produces scenario_map. See MATH_MODELS.md §2.6.
+    # [REMOVED, per user request] Previously also plotted a synthetic "Accelerated
+    # BEV" reference curve (a manual what-if, built via `warp_bev_transition_all_
+    # segments` above this block) as a black dashed line -- that computation and its
+    # line/legend entry are both gone. `warp_bev_transition_all_segments` itself is
+    # untouched in `src/stock_flow.py` (still a standalone, documented utility) but
+    # is no longer called from anywhere in this pipeline as of this change.
     # -----------------------------------------------------------------------
     if ("EUR", "BEV") in stock_dict:
-        warped = warp_bev_transition_all_segments(
-            stock_dict,
-            region="EUR",
-            bev_label="BEV",
-            accelerating_year=p01.accelerating_year,
-            warp_end_year=p01.end_year_plotting,
-        )
-        bev_acc = warped[("EUR", "BEV")]["stock"]
-
         fig, ax = plot_bev_stock_compare_grouped(
             scenario_map=scenario_map,
-            bev_acc=bev_acc,
+            selected_scenario=p01.scenario,
             start_year_plotting=p01.start_year_plotting,
             end_year_plotting=p01.end_year_plotting,
             show=False,

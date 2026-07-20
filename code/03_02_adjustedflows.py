@@ -171,6 +171,7 @@ from src.monte_carlo import summarize_distribution, sensitivity_correlations, pl
 load_many = artifacts.load_many
 save_many = artifacts.save_many
 plot_flows_split_collected_unknown_all_trackers = plotting.plot_flows_split_collected_unknown_all_trackers
+plot_flows_by_drivetrain_single_scenario = plotting.plot_flows_by_drivetrain_single_scenario
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +569,13 @@ def run_adjusted_scenario(
     # unchanged from before this parameter existed. Same "resolved by main(), not
     # hardcoded here" convention as every other scenario-specific value above.
     inflow_draws_by_group: dict[tuple, dict[int, np.ndarray]] | None = None,
+    # [NEW] Passed straight through to `fdm.run_flow_driven_model_monte_carlo`'s
+    # parameter of the same name -- see that function's / `cohort_flow_mc.py`'s
+    # docstring. `(2.5, 97.5)` for a 95% per-year, per-drivetrain uncertainty
+    # band, computed from this same MC run (no separate smaller pass). Exposed
+    # on the return dict via `result["mc"]["per_year_entity_bands"]` (only
+    # populated when `monte_carlo_enabled=True` AND this is not `None`).
+    per_year_entity_band_pct: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """
     Run one adjusted-inflow scenario end to end: rebuild the segment-level cohort
@@ -687,6 +695,7 @@ def run_adjusted_scenario(
             stock_modifier_start_year=stock_modifier_start_year, output_periods=output_periods,
             inflow_draws_by_group=inflow_draws_by_group,
             seed=mc_seed, chunk_size=mc_chunk_size, collect_per_year=False,
+            per_year_entity_band_pct=per_year_entity_band_pct,
             verbose=True, progress_label=scenario_name,
         )
         print(f"[{scenario_name}] Monte Carlo run done in {time.time() - t_start_mc:.1f}s")
@@ -753,65 +762,33 @@ def run_adjusted_scenario(
 
 # ---------------------------------------------------------------------------
 # [NEW] Within-scenario detail figures: drivetrain comparison, and segment
-# comparison within one drivetrain -- boxplot AND smoothed density-curve views
-# of the same raw Monte Carlo draws (the 11-scenario `03_02_monte_carlo_scenario_
-# comparison_*.png` figure further down only compares EU-total collected ACROSS
-# scenarios; these compare WITHIN one scenario, one level of detail down).
+# comparison within one drivetrain -- boxplot view of the raw Monte Carlo draws
+# (the 11-scenario `03_02_monte_carlo_scenario_comparison_*.png` figure further
+# down only compares EU-total collected ACROSS scenarios; these compare WITHIN
+# one scenario, one level of detail down).
+# [REMOVED, per user request] This block used to also render a Gaussian-KDE
+# density-curve overlay per (scenario, period) via a `_gaussian_kde_curve`
+# helper -- both the helper and the density/PDF output are gone. Only the
+# boxplot half of `plot_group_comparison_boxplot_and_pdf` (now renamed
+# `plot_group_comparison_boxplot`) remains.
 # ---------------------------------------------------------------------------
-def _gaussian_kde_curve(
-    values: np.ndarray, *, n_grid: int = 200, bandwidth: float | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Manual Gaussian-KERNEL density estimate (numpy only -- no scipy/seaborn
-    dependency). NONPARAMETRIC: this sums one small Gaussian kernel per observed
-    draw and does NOT fit a single symmetric Normal curve to the data -- the
-    resulting density curve can be (and, for a metric derived from an asymmetric
-    Triangular -- e.g. BAU's future segment-share draws, or any lifetime draw with
-    an `AsymmetricSpread` -- typically IS) skewed or multi-modal, faithfully
-    following whatever shape the actual Monte Carlo draws have. The kernel itself
-    is symmetric; the ESTIMATE it produces is not forced to be.
-
-    `bandwidth` defaults to Silverman's rule of thumb
-    (`0.9 * min(std, IQR/1.34) * n**(-1/5)`) -- the standard, well-established KDE
-    bandwidth heuristic; pass an explicit value to override it if this under/over-
-    smooths a particular metric's distribution.
-
-    Returns `(grid, density)`, both length `n_grid`, evaluated over
-    `[min(values) - 3*bandwidth, max(values) + 3*bandwidth]`. `density` integrates
-    to ~1 over that grid (verified by regression test), i.e. this is a genuine
-    density, not an arbitrarily-scaled curve.
-    """
-    values = np.asarray(values, dtype=float)
-    n = len(values)
-    if bandwidth is None:
-        std = float(values.std(ddof=1)) if n > 1 else 1.0
-        q75, q25 = np.percentile(values, [75, 25])
-        iqr = float(q75 - q25)
-        spread = min(std, iqr / 1.34) if iqr > 0 else std
-        spread = spread if spread > 0 else (std if std > 0 else 1.0)
-        bandwidth = 0.9 * spread * n ** (-1.0 / 5.0)
-        bandwidth = bandwidth if bandwidth > 0 else 1.0
-    grid = np.linspace(values.min() - 3 * bandwidth, values.max() + 3 * bandwidth, n_grid)
-    diffs = (grid[:, None] - values[None, :]) / bandwidth
-    kernel = np.exp(-0.5 * diffs ** 2) / np.sqrt(2 * np.pi)
-    density = kernel.sum(axis=1) / (n * bandwidth)
-    return grid, density
-
-
-def plot_group_comparison_boxplot_and_pdf(
+def plot_group_comparison_boxplot(
     values_by_label: dict[str, np.ndarray], *, title: str, xlabel: str, ylabel: str,
-    fig_path_boxplot: Path, fig_path_pdf: Path,
+    fig_path_boxplot: Path,
 ) -> None:
     """
-    Save TWO comparison figures for a `{label: (n_draws,) array}` dict -- a boxplot
-    (median/IQR/whisker view, quick to read, but collapses distribution SHAPE) and a
-    Gaussian-KDE density-curve overlay (shows the actual distribution shape --
-    skew, multi-modality -- that a boxplot can't; see `_gaussian_kde_curve`). Shared
-    helper for both the drivetrain-comparison and segment-comparison figures below --
-    same two-views-of-one-comparison pattern, just a different label set each time.
-    Styling matches the existing `03_02_monte_carlo_scenario_comparison_*.png`
-    boxplot (`#4a7fb5`, dashed gridlines, hidden top/right spines) for visual
-    consistency across all of this stage's Monte Carlo figures.
+    Save a boxplot comparison figure for a `{label: (n_draws,) array}` dict --
+    median/IQR/whisker view, quick to read. [REMOVED, per user request] This
+    function used to also save a second `_pdf.png` Gaussian-KDE density-curve
+    figure alongside the boxplot (was `plot_group_comparison_boxplot_and_pdf`) --
+    that half, and its `_gaussian_kde_curve` helper, are gone; only the boxplot
+    remains. `xlabel` is kept in the signature for call-site compatibility even
+    though only the boxplot (which doesn't use it) is drawn now.
+    Shared helper for both the drivetrain-comparison and segment-comparison
+    figures below -- same comparison pattern, just a different label set each
+    time. Styling matches the existing `03_02_monte_carlo_scenario_comparison_*.
+    png` boxplot (`#4a7fb5`, dashed gridlines, hidden top/right spines) for
+    visual consistency across all of this stage's Monte Carlo figures.
     """
     labels = list(values_by_label.keys())
 
@@ -829,24 +806,6 @@ def plot_group_comparison_boxplot_and_pdf(
     plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
     plt.tight_layout()
     fig.savefig(fig_path_boxplot, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(11, 6))
-    cmap = plt.get_cmap("tab20")
-    for i, label in enumerate(labels):
-        grid, density = _gaussian_kde_curve(values_by_label[label])
-        color = cmap(i % 20)
-        ax.plot(grid, density, label=label, color=color, linewidth=1.8)
-        ax.fill_between(grid, density, alpha=0.08, color=color)
-    ax.set_title(title, fontsize=12)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Density")
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(frameon=False, fontsize=8, ncol=2)
-    plt.tight_layout()
-    fig.savefig(fig_path_pdf, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1075,6 +1034,12 @@ def main() -> dict[str, Any]:
             mc_seed=mc_scenario_seeds[name],
             mc_chunk_size=mc_chunk_size, output_periods=params.monte_carlo.output_periods,
             inflow_draws_by_group=inflow_draws_for_scenario,
+            # [NEW] 95% per-year, per-drivetrain uncertainty band for the flow
+            # plots below -- computed from THIS scenario's actual MC run
+            # (`n_draws_mc` draws, same as everything else this scenario
+            # reports), no separate smaller pass. `None` when MC is disabled
+            # (nothing to band around).
+            per_year_entity_band_pct=(2.5, 97.5) if monte_carlo_enabled else None,
         )
 
     print(
@@ -1109,22 +1074,15 @@ def main() -> dict[str, Any]:
     print("Saved lifetime/loss/stock scenario artifacts (C6 fix):", saved_other_scenarios)
 
     # -----------------------------------------------------------------------
-    # Diagnostic plot: inflow/outflow split, ALL 11 scenarios at once -- integrated
-    # here (not a separate script), since this is exactly the step where every
-    # scenario's tracker is available. This is also the most direct visual
-    # confirmation that the C6 fix actually produced 5 genuinely different scenarios,
-    # not 5 more silent copies of BAU.
+    # [MOVED] The "inflow/outflow split, all scenarios" diagnostic plot used to be
+    # generated right here, before Monte Carlo even ran -- meaning it could only ever
+    # show the deterministic lines, never an uncertainty band. It now happens further
+    # down, after the Monte Carlo block, once `per_year_entity_bands` is available for
+    # every scenario that had MC enabled. `fig_dir` stays defined here since the
+    # MC-only figures below (boxplots, tornado, scenario comparison) also need it.
     # -----------------------------------------------------------------------
     fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    fig_path = fig_dir / "03_02_flows_all_scenarios.png"
-    plot_flows_split_collected_unknown_all_trackers(
-        tracker_keyed_by_scenario=tracker_keyed_by_scenario,
-        region=materials_region,
-        show=False,
-        save_path=fig_path,
-    )
-    print(f"Saved diagnostic plot: {fig_path}")
 
     # -----------------------------------------------------------------------
     # Monte Carlo (opt-in via params.monte_carlo.enabled, default False -- does not
@@ -1280,20 +1238,17 @@ def main() -> dict[str, Any]:
                 # generated for every scenario actually run (`scenario_names_all`, i.e.
                 # `AdjustedFlowsParams.scenarios_to_run`'s resolution -- no separate
                 # config knob needed: narrow scenarios_to_run and you narrow which
-                # scenarios get these figures too). Two figures per comparison
-                # (boxplot + KDE density curve, see `plot_group_comparison_boxplot_
-                # and_pdf`'s docstring) -- boxplot for a quick median/spread read,
-                # density curve for actual distribution SHAPE (skew, multi-modality),
-                # which a boxplot collapses away.
+                # scenarios get these figures too). [REMOVED, per user request] Used to
+                # also save a KDE density-curve `_pdf.png` alongside the boxplot --
+                # only the boxplot is saved now.
                 # -----------------------------------------------------------------------
                 if len(collected_by_drivetrain) > 1:
-                    plot_group_comparison_boxplot_and_pdf(
+                    plot_group_comparison_boxplot(
                         collected_by_drivetrain,
                         title=f"{scenario_name}: cumulative collected by drivetrain, {period_label}",
                         xlabel="Cumulative collected [million vehicles]",
                         ylabel="Cumulative collected [million vehicles]",
                         fig_path_boxplot=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_boxplot.png",
-                        fig_path_pdf=fig_dir / f"03_02_monte_carlo_drivetrain_comparison_{scenario_name}_{period_label}_pdf.png",
                     )
 
                 for drivetrain, segment_values in collected_by_segment_within_drivetrain.items():
@@ -1303,13 +1258,12 @@ def main() -> dict[str, Any]:
                     # own key order in params_schema.py) rather than plain alphabetical
                     # (which would put "A" before "B" but "JA" before "A" is wrong too).
                     ordered_segments = sorted(segment_values.keys(), key=lambda s: (s.startswith("J"), s))
-                    plot_group_comparison_boxplot_and_pdf(
+                    plot_group_comparison_boxplot(
                         {seg: segment_values[seg] for seg in ordered_segments},
                         title=f"{scenario_name} / {drivetrain}: cumulative collected by segment, {period_label}",
                         xlabel="Cumulative collected [million vehicles]",
                         ylabel="Cumulative collected [million vehicles]",
                         fig_path_boxplot=fig_dir / f"03_02_monte_carlo_segment_comparison_{scenario_name}_{drivetrain}_{period_label}_boxplot.png",
-                        fig_path_pdf=fig_dir / f"03_02_monte_carlo_segment_comparison_{scenario_name}_{drivetrain}_{period_label}_pdf.png",
                     )
 
                 print(f"Saved within-scenario detail figures: {scenario_name}, {period_label}")
@@ -1371,6 +1325,52 @@ def main() -> dict[str, Any]:
             fig_path_mc = fig_dir / f"03_02_monte_carlo_scenario_comparison_{period_label}.png"
             fig.savefig(fig_path_mc, dpi=150, bbox_inches="tight")
             print(f"Saved diagnostic plot: {fig_path_mc}")
+
+    # -----------------------------------------------------------------------
+    # [MOVED + NEW] Diagnostic plots: inflow/outflow split, now WITH each
+    # scenario's 95% Monte Carlo band (when MC was enabled) -- this is why
+    # these plots had to move here, after the MC block above, rather than
+    # staying where they used to be generated (right after `tracker_keyed_by_
+    # scenario` was built, before Monte Carlo had even run). `entity_bands_
+    # by_scenario` pulls straight from each scenario's own `mc` result --
+    # genuinely re-simulated uncertainty for THAT scenario's own assumptions,
+    # not a shared/generic band. A scenario with MC disabled (or that had no
+    # `mc` result) simply gets an unshaded plot -- same lines as before this
+    # feature existed, degrading gracefully rather than erroring.
+    # -----------------------------------------------------------------------
+    entity_bands_by_scenario = {
+        name: (r["mc"]["per_year_entity_bands"] if r["mc"] is not None else None)
+        for name, r in scenario_results_all.items()
+    }
+
+    fig_path = fig_dir / "03_02_flows_all_scenarios.png"
+    plot_flows_split_collected_unknown_all_trackers(
+        tracker_keyed_by_scenario=tracker_keyed_by_scenario,
+        region=materials_region,
+        show=False,
+        save_path=fig_path,
+        entity_bands_by_scenario=entity_bands_by_scenario,
+    )
+    print(f"Saved diagnostic plot: {fig_path}")
+
+    # [NEW] One full-size, one-subplot-per-drivetrain plot PER SCENARIO --
+    # every scenario actually run (`scenario_names_all`, i.e. `AdjustedFlows
+    # Params.scenarios_to_run`'s resolution -- same "narrow scenarios_to_run,
+    # narrow which scenarios get these figures" convention as the within-
+    # scenario detail figures above), not hardcoded to BAU. Restores the
+    # per-scenario flow plot that previously existed only for BAU, now for
+    # every active scenario, each with its own real MC band.
+    for scenario_name in scenario_names_all:
+        fig_path_scenario = fig_dir / f"03_02_flows_{scenario_name}.png"
+        plot_flows_by_drivetrain_single_scenario(
+            tracker_keyed=tracker_keyed_by_scenario[scenario_name],
+            scenario_name=scenario_name,
+            region=materials_region,
+            entity_bands=entity_bands_by_scenario.get(scenario_name),
+            show=False,
+            save_path=fig_path_scenario,
+        )
+        print(f"Saved diagnostic plot: {fig_path_scenario}")
 
     return {**saved_inflow_mix_scenarios, **saved_other_scenarios}
 

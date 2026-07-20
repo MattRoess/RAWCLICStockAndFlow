@@ -407,6 +407,22 @@ def run_cohort_flow_monte_carlo(
     seed: int | np.random.SeedSequence | None = None,
     chunk_size: int = 20_000,
     collect_per_year: bool = False,
+    # [NEW] Per-YEAR, per-ENTITY (e.g. drivetrain) uncertainty band, computed
+    # from THIS SAME run -- no separate smaller-n_draws pass. `(low_pct,
+    # high_pct)`, e.g. `(2.5, 97.5)` for a 95% band. Unlike `collect_per_year`
+    # (which returns the full raw (n_draws, n_years) array per GROUP, i.e. per
+    # segment, and is memory-heavy at real n_draws), this accumulates the RAW
+    # per-year inflow/outflow arrays SUMMED ACROSS SEGMENTS ONTO THEIR ENTITY
+    # (drivetrain) as each group is processed, then reduces to a percentile
+    # band ONLY ONCE ALL GROUPS ARE DONE -- so peak memory is bounded by
+    # `n_entities x n_draws x n_years` (a handful of accumulator arrays), not
+    # `n_groups x n_draws x n_years`. Percentile-of-summed-draws (correct) is
+    # NOT the same as sum-of-percentiles (wrong) when segments share a
+    # drivetrain's own scale_lambda/share draws (they do -- see `entity`
+    # above) -- this is why the summation must happen on raw draws BEFORE the
+    # percentile, not after. `None` (default) skips this entirely, zero
+    # overhead, fully backward compatible.
+    per_year_entity_band_pct: tuple[float, float] | None = None,
     verbose: bool = True,
     progress_label: str = "",
 ) -> dict:
@@ -563,6 +579,15 @@ def run_cohort_flow_monte_carlo(
         )
     t_start_all = time.time()
 
+    # [NEW] Lazily-initialized (first time an entity is seen) accumulators for
+    # `per_year_entity_band_pct` -- see that parameter's docstring above. Summed
+    # across every group (segment) sharing this entity (drivetrain), on RAW
+    # per-year draws, as each group is processed below; reduced to a percentile
+    # band only after the group loop finishes. `{}` and unused (zero overhead)
+    # when `per_year_entity_band_pct is None`.
+    entity_band_accum_inflow: dict = {}
+    entity_band_accum_outflow: dict = {}
+
     for group_idx, (group_key, sub) in enumerate(df.groupby(group_cols, dropna=False), start=1):
         t_start_group = time.time()
         sub = sub.sort_values(year_col).reset_index(drop=True)
@@ -715,7 +740,12 @@ def run_cohort_flow_monte_carlo(
             for p in output_periods
         }
 
-        if collect_per_year:
+        # [NEW] `per_year_entity_band_pct is not None` also needs these THIS
+        # group's raw per-year arrays temporarily (to accumulate onto its
+        # entity below) even when `collect_per_year` (which returns them
+        # per-GROUP to the caller) is False.
+        need_per_year_arrays = collect_per_year or per_year_entity_band_pct is not None
+        if need_per_year_arrays:
             per_year_survival = np.zeros((n_draws, n_years), dtype=float)
             per_year_a = np.zeros((n_draws, n_years), dtype=float)
             per_year_b = np.zeros((n_draws, n_years), dtype=float)
@@ -838,7 +868,7 @@ def run_cohort_flow_monte_carlo(
                     if t == end:
                         stock_end_by_period[p][chunk_start:chunk_end] = stock_sum_this_year
 
-                if collect_per_year:
+                if need_per_year_arrays:
                     per_year_survival[chunk_start:chunk_end, yi] = out_surv_sum
                     per_year_a[chunk_start:chunk_end, yi] = out_a_sum
                     per_year_b[chunk_start:chunk_end, yi] = out_b_sum
@@ -882,6 +912,26 @@ def run_cohort_flow_monte_carlo(
             )
         by_group[lookup_key] = group_result
 
+        # [NEW] Accumulate THIS group's raw per-year draws onto its entity
+        # (drivetrain) -- elementwise add of (n_draws, n_years) arrays, cheap.
+        # `per_year_a`/`per_year_b`/`per_year_collected` are this group's
+        # export/unknown/collected outflow components; summed here into one
+        # "total outflow" accumulator per entity (matching what the existing
+        # deterministic flow plots call "Total outflow"). No percentile taken
+        # yet -- see `per_year_entity_band_pct`'s docstring for why summing
+        # raw draws (not summing percentiles) is the correct order. This
+        # group's own `per_year_*` local arrays are not referenced again after
+        # this point and are freed once the next loop iteration reassigns them
+        # (or the loop ends).
+        if per_year_entity_band_pct is not None:
+            per_year_outflow_this_group = per_year_a + per_year_b + per_year_collected
+            if entity in entity_band_accum_inflow:
+                entity_band_accum_inflow[entity] += per_year_inflow
+                entity_band_accum_outflow[entity] += per_year_outflow_this_group
+            else:
+                entity_band_accum_inflow[entity] = per_year_inflow.copy()
+                entity_band_accum_outflow[entity] = per_year_outflow_this_group
+
         if verbose:
             dt_group = time.time() - t_start_group
             dt_elapsed = time.time() - t_start_all
@@ -916,6 +966,42 @@ def run_cohort_flow_monte_carlo(
     if verbose:
         print(f"{label_prefix}cohort_flow_mc: all {n_groups} group(s) done in {time.time() - t_start_all:.1f}s")
 
+    # [NEW] Reduce `entity_band_accum_inflow`/`entity_band_accum_outflow` (each a
+    # {entity: (n_draws, n_years) array}, one entry per drivetrain, ALL segments
+    # already summed in) down to a `(low, median, high)` percentile band PER
+    # YEAR -- this is the one and only point where the raw draws are
+    # collapsed, and the big accumulator arrays are freed immediately after
+    # (they go out of scope once this block ends; nothing downstream
+    # references them again). Skipped entirely (empty dict, no cost) when
+    # `per_year_entity_band_pct is None`.
+    # [FIXED] `inflow_median`/`outflow_median` are NEW -- previously this band
+    # had no center statistic of its own, and the caller (plotting.py) used a
+    # SEPARATE deterministic (point-estimate) run's line as the visual center
+    # of this MC-derived band. That mixes two different things that only
+    # coincidentally sit near each other: a single point-estimate run is not
+    # a statistic of this ensemble at all. The median below comes from THE
+    # SAME per-year, per-entity draws as the low/high percentiles -- one
+    # ensemble, one consistent set of statistics.
+    per_year_entity_bands: dict = {}
+    if per_year_entity_band_pct is not None:
+        low_pct, high_pct = per_year_entity_band_pct
+        for entity in entity_band_accum_inflow:
+            inflow_draws = entity_band_accum_inflow[entity]
+            outflow_draws = entity_band_accum_outflow[entity]
+            per_year_entity_bands[entity] = {
+                "years": years.copy(),
+                "inflow_low": np.percentile(inflow_draws, low_pct, axis=0),
+                "inflow_median": np.percentile(inflow_draws, 50, axis=0),
+                "inflow_high": np.percentile(inflow_draws, high_pct, axis=0),
+                "outflow_low": np.percentile(outflow_draws, low_pct, axis=0),
+                "outflow_median": np.percentile(outflow_draws, 50, axis=0),
+                "outflow_high": np.percentile(outflow_draws, high_pct, axis=0),
+            }
+        # Explicitly drop references to the large arrays now that the (tiny)
+        # percentile bands above have been extracted from them.
+        entity_band_accum_inflow.clear()
+        entity_band_accum_outflow.clear()
+
     # [NEW] Expose the per-entity sampled INPUT draws (scale_lambda, share_a,
     # share_b) -- previously computed internally (cached in `entity_draw_cache`,
     # keyed by entity so groups sharing an entity share draws) but never returned.
@@ -936,6 +1022,7 @@ def run_cohort_flow_monte_carlo(
     return {
         "by_group": by_group,
         "total": total,
+        "per_year_entity_bands": per_year_entity_bands,
         "share_a_name": share_a_name,
         "share_b_name": share_b_name,
         "share_c_name": share_c_name,

@@ -1017,6 +1017,16 @@ def plot_flows_split_collected_unknown_from_tracker(
     year_min=2015,
     year_max=2070,
     ax=None,
+    # [NEW] Optional `{drivetrain: {"years": array, "inflow_low": array,
+    # "inflow_high": array, "outflow_low": array, "outflow_high": array}}`,
+    # e.g. `mc_result["per_year_entity_bands"]` from `flowdriven_model.py`'s
+    # `run_flow_driven_model_monte_carlo` (only populated when that call was
+    # given `per_year_entity_band_pct`, e.g. `(2.5, 97.5)`). When supplied,
+    # each drivetrain's inflow/outflow lines get a matching shaded band in
+    # the SAME color, at reduced alpha, behind the lines (`zorder` below
+    # them). `None` (default) draws exactly as before -- lines only, no
+    # shading, fully backward compatible.
+    entity_bands=None,
 ):
     """
     [FIXED] Previously drew every drivetrain in `drivetrains` onto the same `ax` using
@@ -1033,6 +1043,10 @@ def plot_flows_split_collected_unknown_from_tracker(
     dropped -- with 5 drivetrains sharing one axes there is no non-overlapping way to
     stack 5 independent sets of areas, and inflow-vs-outflow per drivetrain is the
     comparison that actually needs to be readable here.
+
+    [NEW] `entity_bands`, when supplied, additionally shades a 95% (or whatever
+    percentiles were requested) Monte Carlo band behind each drivetrain's inflow
+    and outflow lines -- see that parameter's docstring above.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 6))
@@ -1074,8 +1088,44 @@ def plot_flows_split_collected_unknown_from_tracker(
         x = pivot.index.to_numpy()
         color = DRIVETRAIN_LINE_COLORS.get(drv)
 
-        ax.plot(x, inflow, color=color, linestyle="-", linewidth=2, zorder=3)
-        ax.plot(x, out_total, color=color, linestyle="--", linewidth=2, zorder=2)
+        # [FIXED] Shaded band behind the lines, if MC data is available for this
+        # drivetrain. Interpolated onto THIS function's own year grid (`years`,
+        # `year_min..year_max`) in case the band's own year range differs
+        # (e.g. the band covers the full simulation horizon while this plot is
+        # zoomed to a subset) -- `np.interp` requires ascending x, which the
+        # band's `years` array already is (built from `np.arange` upstream).
+        #
+        # PREVIOUSLY the line drawn below was always this deterministic
+        # (point-estimate) run's inflow/out_total, even when a band was
+        # present -- meaning the line and the shaded region it sat inside came
+        # from two DIFFERENT things (one fixed point-estimate run vs. an
+        # entire MC ensemble), not one consistent statistic of the same
+        # ensemble. A deterministic line drawn inside an MC band can legitimately
+        # sit outside that band -- they aren't the same distribution. Now: when
+        # a band is available, the line IS the MC median for that same
+        # drivetrain/year/metric -- same draws, same reduction, guaranteed
+        # consistent with the shading around it. The deterministic
+        # `inflow`/`out_total` computed above is used ONLY as a fallback when
+        # no MC band exists for this drivetrain (e.g. Monte Carlo was
+        # disabled) -- same line as always in that case.
+        band = (entity_bands or {}).get(drv)
+        if band is not None:
+            band_years = np.asarray(band["years"], dtype=float)
+            x_f = x.astype(float)
+            inflow_low = np.interp(x_f, band_years, band["inflow_low"])
+            inflow_line = np.interp(x_f, band_years, band["inflow_median"])
+            inflow_high = np.interp(x_f, band_years, band["inflow_high"])
+            outflow_low = np.interp(x_f, band_years, band["outflow_low"])
+            outflow_line = np.interp(x_f, band_years, band["outflow_median"])
+            outflow_high = np.interp(x_f, band_years, band["outflow_high"])
+            ax.fill_between(x, inflow_low, inflow_high, color=color, alpha=0.15, linewidth=0, zorder=1)
+            ax.fill_between(x, outflow_low, outflow_high, color=color, alpha=0.15, linewidth=0, zorder=1)
+        else:
+            inflow_line = inflow
+            outflow_line = out_total
+
+        ax.plot(x, inflow_line, color=color, linestyle="-", linewidth=2, zorder=3)
+        ax.plot(x, outflow_line, color=color, linestyle="--", linewidth=2, zorder=2)
 
     ax.set_ylim(bottom=0)
     ax.grid(True, linestyle="--", alpha=0.25)
@@ -1091,6 +1141,15 @@ def plot_flows_split_collected_unknown_all_trackers(
     n_cols=4,
     show=True,
     save_path=None,
+    # [NEW] Optional `{scenario_name: entity_bands}`, where `entity_bands` is
+    # the same shape `plot_flows_split_collected_unknown_from_tracker` accepts
+    # (see that function's `entity_bands` docstring) -- e.g.
+    # `{name: r["mc"]["per_year_entity_bands"] for name, r in
+    # scenario_results_all.items()}`. A scenario missing from this dict, or
+    # with `None`/`{}` MC results (e.g. Monte Carlo was disabled), simply gets
+    # no shading for that subplot -- lines only, same as before this
+    # parameter existed. `None` (default) draws every subplot unshaded.
+    entity_bands_by_scenario=None,
 ):
     """
     [FIXED] Now returns `(fig, axes)` instead of unconditionally calling `plt.show()`.
@@ -1105,6 +1164,10 @@ def plot_flows_split_collected_unknown_all_trackers(
     described a stacked collected/unknown/export breakdown that, with 5 drivetrains
     overlaid in identical colors, could not actually be read off the chart -- see the
     module docstring for the full diagnosis.
+
+    [NEW] `entity_bands_by_scenario`, when supplied, shades each subplot with that
+    scenario's 95% (or whatever was requested) Monte Carlo band -- see
+    `plot_flows_split_collected_unknown_from_tracker`'s `entity_bands` docstring.
     """
     if scenario_order is None:
         scenario_order = list(tracker_keyed_by_scenario.keys())
@@ -1134,6 +1197,7 @@ def plot_flows_split_collected_unknown_all_trackers(
             year_min=year_min,
             year_max=year_max,
             ax=axes[i],
+            entity_bands=(entity_bands_by_scenario or {}).get(scenario_name),
         )
 
         axes[i].set_title(scenario_name)
@@ -1161,6 +1225,73 @@ def plot_flows_split_collected_unknown_all_trackers(
     fig.legend(handles, labels, loc="upper center", ncol=len(handles), frameon=False)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def plot_flows_by_drivetrain_single_scenario(
+    tracker_keyed,
+    scenario_name,
+    region="EUR",
+    drivetrains=("BEV", "Diesel", "Petrol", "PHEV", "HEV"),
+    year_min=2015,
+    year_max=2070,
+    entity_bands=None,
+    show=False,
+    save_path=None,
+):
+    """
+    [NEW] One full-size figure for a SINGLE scenario: small multiples, one subplot
+    per drivetrain, each showing that drivetrain's inflow (solid) and total outflow
+    (dashed) lines plus its 95% MC band (if `entity_bands` is supplied) -- see
+    `plot_flows_split_collected_unknown_from_tracker`'s `entity_bands` docstring for
+    the expected shape. This is the per-scenario counterpart to
+    `plot_flows_split_collected_unknown_all_trackers`'s grid (which compares ACROSS
+    scenarios, one subplot per scenario); this instead goes one level of detail
+    deeper INTO a single scenario, one subplot per drivetrain so each drivetrain's
+    band is clearly visible on its own axes rather than overlaid with 4 others.
+    """
+    n_cols = min(3, len(drivetrains))
+    n_rows = math.ceil(len(drivetrains) / n_cols)
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(5 * n_cols, 4 * n_rows),
+        sharex=True,
+    )
+    axes = np.atleast_1d(axes).flatten()
+
+    for i, drv in enumerate(drivetrains):
+        plot_flows_split_collected_unknown_from_tracker(
+            tracker_keyed=tracker_keyed,
+            region=region,
+            drivetrains=(drv,),
+            year_min=year_min,
+            year_max=year_max,
+            ax=axes[i],
+            entity_bands=entity_bands,
+        )
+        axes[i].set_title(drv, fontsize=12)
+
+    for j in range(len(drivetrains), len(axes)):
+        axes[j].axis("off")
+
+    style_handles = [
+        plt.Line2D([0], [0], color="black", lw=2, linestyle="-"),
+        plt.Line2D([0], [0], color="black", lw=2, linestyle="--"),
+    ]
+    style_labels = ["Inflow", "Total outflow"]
+    if entity_bands:
+        style_handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="#888888", alpha=0.3, linewidth=0))
+        style_labels.append("95% MC band")
+
+    fig.suptitle(f"{scenario_name}: inflow / outflow by drivetrain", fontsize=14)
+    fig.legend(style_handles, style_labels, loc="upper center", ncol=len(style_handles), frameon=False, bbox_to_anchor=(0.5, 0.98))
+
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
     if show:

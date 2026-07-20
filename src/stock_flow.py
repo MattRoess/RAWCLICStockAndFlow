@@ -149,7 +149,14 @@ def warp_bev_transition_all_segments(
 
 def plot_bev_stock_compare_grouped(
     scenario_map: dict[str, pd.DataFrame],
-    bev_acc: pd.Series,
+    # [REMOVED, per user request] `bev_acc: pd.Series` -- the accelerated-BEV
+    # reference curve this function used to plot as a black dashed line
+    # (previously sourced from `warp_bev_transition_all_segments`) -- gone,
+    # along with all the drawing/legend code that rendered it. See
+    # `selected_scenario` below for the replacement: this plot now marks
+    # WHICH of the real scenarios is actually selected, instead of showing a
+    # synthetic manual-tweak reference curve alongside them.
+    selected_scenario: str | None = None,
     year_min: int | None = None,
     year_max: int | None = None,
     start_year_plotting: int | None = None,
@@ -158,8 +165,7 @@ def plot_bev_stock_compare_grouped(
     show: bool = True,
 ) -> tuple[Figure, plt.Axes]:
     """
-    Plot BEV stock transition speed for grouped scenarios against an accelerated-BEV
-    reference curve (`bev_acc`, e.g. from `warp_bev_transition_all_segments`).
+    Plot BEV stock transition speed for grouped scenarios.
 
     Returns `(fig, ax)`. If `show=True` (default, preserves original interactive
     behavior), also calls `plt.show()`. Pass `show=False` from a non-interactive
@@ -168,6 +174,12 @@ def plot_bev_stock_compare_grouped(
     `min_visible_stock`: BEV values below this are floored to 0 before plotting, to
     keep early-year noise from cluttering the chart. Was a hardcoded `0.2` with no
     cited derivation -- now overridable, derivation still not established.
+
+    `selected_scenario`: if given and present in `scenario_map`, that scenario's line
+    is drawn thicker and on top of the others, and its legend entry is marked
+    "(selected)" -- the direct visual answer to "which of these lines is the one
+    actually feeding stage 02", now that there's no separate reference curve to
+    compare against.
     """
     if year_min is None:
         year_min = start_year_plotting
@@ -207,9 +219,12 @@ def plot_bev_stock_compare_grouped(
                 .sort_index()
             )
             bev = bev.where(bev >= min_visible_stock, 0)
+            is_selected = scen_name == selected_scenario
             ax.plot(
-                bev.index, bev.values, linewidth=1.5,
+                bev.index, bev.values,
+                linewidth=3.5 if is_selected else 1.5,
                 color=colors.get(scen_name, "#333333"), label=scen_name,
+                zorder=10 if is_selected else 2,
             )
             plotted.append(scen_name)
 
@@ -221,23 +236,20 @@ def plot_bev_stock_compare_grouped(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    bev_acc_plot = bev_acc.loc[year_min:year_max]
-    ax.plot(
-        bev_acc_plot.index, bev_acc_plot.values,
-        color="black", linestyle="--", linewidth=1.5, label="Accelerated BEV",
-    )
-
     legend_handles = []
     for group_name, scen_list in groups.items():
         legend_handles.append(Line2D([], [], linestyle="none", label=f"{group_name}:"))
         for scen_name in scen_list:
             if scen_name not in plotted:
                 continue
+            is_selected = scen_name == selected_scenario
+            label = f"  {scen_name}" + ("  (selected)" if is_selected else "")
             legend_handles.append(
-                Line2D([], [], color=colors.get(scen_name, "#333333"), linewidth=2, label=f"  {scen_name}")
+                Line2D(
+                    [], [], color=colors.get(scen_name, "#333333"),
+                    linewidth=3.5 if is_selected else 2, label=label,
+                )
             )
-    legend_handles.append(Line2D([], [], linestyle="none", label="Manual tweak:"))
-    legend_handles.append(Line2D([], [], color="black", linestyle="--", linewidth=2, label="  Accelerated BEV"))
     ax.legend(
         handles=legend_handles, title=None, loc="upper left", bbox_to_anchor=(1.02, 1),
         frameon=False, handlelength=2.5, handletextpad=0.8,

@@ -1317,6 +1317,13 @@ def run_flow_driven_model_monte_carlo(
     seed: int | np.random.SeedSequence | None = None,
     chunk_size: int = 20_000,
     collect_per_year: bool = False,
+    # [NEW] Passed straight through to `cohort_flow_mc.run_cohort_flow_monte_
+    # carlo`'s parameter of the same name -- see that function's docstring for
+    # the full explanation. `(2.5, 97.5)` for a 95% per-year band per
+    # drivetrain, computed from THIS SAME `n_draws` run (no separate smaller
+    # pass), memory-bounded by drivetrain count rather than group count.
+    # `None` (default) skips it entirely, zero overhead.
+    per_year_entity_band_pct: tuple[float, float] | None = None,
     verbose: bool = True,
     progress_label: str = "",
 ) -> dict:
@@ -1383,6 +1390,7 @@ def run_flow_driven_model_monte_carlo(
         inflow_draws_by_group=inflow_draws_by_group,
         output_periods=output_periods,
         seed=seed, chunk_size=chunk_size, collect_per_year=collect_per_year,
+        per_year_entity_band_pct=per_year_entity_band_pct,
         verbose=verbose, progress_label=progress_label,
     )
 

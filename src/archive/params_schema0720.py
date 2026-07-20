@@ -48,7 +48,7 @@ ALL_DRIVETRAINS: list[str] = [
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DataPrepParams:
-    scenario: str = "b650"
+    scenario: str = "npi25"
     scenario_list: tuple[str, ...] = ("b650", "npi25", "ssp2L", "ssp2M", "ssp1")
 
     remind_scenario_files: dict[str, tuple[str, str]] = field(default_factory=lambda: {
@@ -223,15 +223,15 @@ class StockFlowParams:
     # drift out of sync.
 
     lifetime_by_drv: dict[str, WeibullLifetime] = field(default_factory=lambda: {
-        "Hybrid": WeibullLifetime(3.0, 18.0),
-        "PHEV":   WeibullLifetime(3.0, 18.0),
-        "HEV":    WeibullLifetime(3.0, 18.0),
-        "BEV":    WeibullLifetime(3.0, 18.0),
-        "Liquids": WeibullLifetime(3.0, 18.0),
-        "Petrol": WeibullLifetime(3.0, 18.0),
-        "Diesel": WeibullLifetime(3.0, 18.0),
-        "Gases":  WeibullLifetime(3.0, 18.0),
-        "FCEV":   WeibullLifetime(3.0, 18.0),
+        "Hybrid": WeibullLifetime(3.0, 13.0),
+        "PHEV":   WeibullLifetime(3.0, 9.0),
+        "HEV":    WeibullLifetime(3.0, 13.0),
+        "BEV":    WeibullLifetime(3.0, 13.0),
+        "Liquids": WeibullLifetime(3.0, 13.0),
+        "Petrol": WeibullLifetime(3.0, 13.0),
+        "Diesel": WeibullLifetime(3.0, 13.0),
+        "Gases":  WeibullLifetime(3.0, 13.0),
+        "FCEV":   WeibullLifetime(3.0, 13.0),
     })
 
     lifetime_override_by_drv: dict[str, LifetimeOverride | None] = field(default_factory=lambda: {
@@ -394,15 +394,15 @@ class StockFlowParams:
         # per drivetrain once real uncertainty ranges are available (e.g. "BEVs are
         # unlikely to die much earlier than expected, but could plausibly last
         # noticeably longer" -> lower=0.10, upper=0.25).
-        "Hybrid":   AsymmetricSpread(lower=0.10, upper=0.40),
-        "PHEV":     AsymmetricSpread(lower=0.10, upper=0.40),
-        "HEV":      AsymmetricSpread(lower=0.10, upper=0.40),
-        "BEV":      AsymmetricSpread(lower=0.10, upper=0.40),
-        "Liquids":  AsymmetricSpread(lower=0.10, upper=0.40),
-        "Petrol":   AsymmetricSpread(lower=0.10, upper=0.40),
-        "Diesel":   AsymmetricSpread(lower=0.10, upper=0.40),
-        "Gases":    AsymmetricSpread(lower=0.10, upper=0.40),
-        "FCEV":     AsymmetricSpread(lower=0.10, upper=0.40),
+        "Hybrid":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "PHEV":     AsymmetricSpread(lower=0.25, upper=0.40),
+        "HEV":      AsymmetricSpread(lower=0.25, upper=0.40),
+        "BEV":      AsymmetricSpread(lower=0.25, upper=0.40),
+        "Liquids":  AsymmetricSpread(lower=0.25, upper=0.40),
+        "Petrol":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "Diesel":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "Gases":    AsymmetricSpread(lower=0.25, upper=0.40),
+        "FCEV":     AsymmetricSpread(lower=0.25, upper=0.40),
     })
     # Used to build Triangular(point*(1-lower), point, point*(1+upper)) around
     # lifetime_by_drv[drv].scale_lambda -- `lower=upper=<the float>` when a plain float
@@ -875,7 +875,7 @@ class AdjustedFlowsParams:
     # SIMULATED (and its tracker/Monte Carlo output produced) if "BAU" is itself
     # included here. Use `active_scenario_names()` below to resolve this field --
     # don't re-implement the None-vs-tuple logic at the call site.
-    scenarios_to_run: tuple[str, ...] | None = ("BAU", )
+    scenarios_to_run: tuple[str, ...] | None = ("BAU", "stock_lower")
 
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
         "BAU": ScenarioSpec(
@@ -1233,7 +1233,7 @@ class MaterialsParams:
     #   "both"             -- compute both of the above.
     # One of "period", "annual", "both" (validated).
 
-    materials_mc_n_draws: int = 20_000
+    materials_mc_n_draws: int = 200_000
     # [NEW] Number of Monte Carlo draws for the MATERIALS-stage combination (vehicle-
     # count bootstrap x composition bootstrap). Deliberately INDEPENDENT of
     # `monte_carlo.n_draws` (stage 03_02's own resolution, 200,000 by default) -- since
