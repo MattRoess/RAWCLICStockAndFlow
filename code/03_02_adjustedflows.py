@@ -31,12 +31,17 @@ stage's final block only AGGREGATES the 11 already-computed per-scenario
 results into summary stats and the comparison plot.
 
 Uncertainty spreads come from `params.stock_flow` (`lifetime_scale_lambda_
-relative_spread`, `unknown_whereabouts_share_std`, `export_share_std`) --
-the SAME fields stage 02 already uses, nothing hardcoded here. `scale_lambda`
-is sampled from a TRIANGULAR distribution, `Triangular(point*(1-spread),
-point, point*(1+spread))` -- matching `params_schema.py`'s own documented
-convention for lifetime uncertainty (NOT Normal, unlike the two share
-parameters below). The SAME per-draw multiplier carries through a scenario's
+relative_spread`, `collected_share_relative_spread`, `export_share_relative_
+spread`, `unknown_whereabouts_share_relative_spread`, plus `unknown_share_
+lifetime_coupling_k`) -- the SAME fields stage 02 already uses, nothing
+hardcoded here. All four are sampled from TRIANGULAR distributions,
+`Triangular(point*(1-lower), point, point*(1+upper))` -- matching
+`params_schema.py`'s own documented convention (NOT Normal). Unlike lifetime,
+the three shares (collected/export/unknown) are each independently sampled
+with their own spread, then normalized per draw to sum to exactly 1; unknown's
+center is additionally shifted per draw by that draw's own scale_lambda
+outcome before its residual spread is applied (see `params_schema.py`'s
+`unknown_share_lifetime_coupling_k` docstring). The SAME per-draw multiplier carries through a scenario's
 `lifetime_change_by_drv` override (e.g. BEV_longer's scale_lambda=17 from 2027
 onward), so a draw that samples "10% longer-lived" stays 10% longer-lived
 across that boundary rather than resampling independently -- see
@@ -540,8 +545,17 @@ def run_adjusted_scenario(
     monte_carlo_enabled: bool = False,
     n_draws: int = 0,
     lifetime_scale_lambda_relative_spread: dict[str, float] | float | None = None,
-    unknown_whereabouts_share_std: dict[str, float] | None = None,
-    export_share_std: dict[str, float] | None = None,
+    # [FIXED, replaces unknown_whereabouts_share_std/export_share_std] Matches
+    # `flowdriven_model.py`'s `run_flow_driven_model_monte_carlo` signature: three
+    # Triangular relative spreads (own uncertainty for each of collected/export/
+    # unknown, none privileged as a no-uncertainty remainder) plus the lifetime<->
+    # unknown_share coupling strength. `collected_share_by_drivetrain` is now
+    # required by that function (previously implicit as `1 - export - unknown`).
+    collected_share_by_drivetrain: dict[str, float] | None = None,
+    collected_share_relative_spread: dict[str, float] | None = None,
+    export_share_relative_spread: dict[str, float] | None = None,
+    unknown_whereabouts_share_relative_spread: dict[str, float] | None = None,
+    unknown_share_lifetime_coupling_k: dict[str, float] | float | None = None,
     mc_seed: int | np.random.SeedSequence | None = None,
     mc_chunk_size: int = 20_000,
     output_periods: list[tuple[int, int]] | None = None,
@@ -660,11 +674,14 @@ def run_adjusted_scenario(
             lifetime_by_drv=mapped_inputs["lifetime_by_drv"],
             unknown_whereabouts_share=unknown_whereabouts_share,
             export_share_by_drivetrain=export_share_by_drivetrain,
+            collected_share_by_drivetrain=collected_share_by_drivetrain,
             starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup,
             n_draws=n_draws,
             lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
-            unknown_whereabouts_share_std=unknown_whereabouts_share_std,
-            export_share_std=export_share_std,
+            collected_share_relative_spread=collected_share_relative_spread,
+            export_share_relative_spread=export_share_relative_spread,
+            unknown_whereabouts_share_relative_spread=unknown_whereabouts_share_relative_spread,
+            unknown_share_lifetime_coupling_k=unknown_share_lifetime_coupling_k,
             group_cols=["Region", "Drive Train", "Segment"], outflow_timing="post_inflow",
             lifetime_change_by_drv=lifetime_change_by_drv, stock_modifier_2027=stock_modifier_2027,
             stock_modifier_start_year=stock_modifier_start_year, output_periods=output_periods,
@@ -889,9 +906,11 @@ def main() -> dict[str, Any]:
     # Monte Carlo setup -- genuine lifetime + share uncertainty, re-simulated per
     # scenario via the vectorized engine (see `run_adjusted_scenario`'s
     # `monte_carlo_enabled` docstring). Uncertainty spreads come from
-    # `p02.lifetime_scale_lambda_relative_spread` / `p02.unknown_whereabouts_
-    # share_std` / `p02.export_share_std` -- same `params_schema.py` fields
-    # stage 02 already uses, nothing hardcoded here. `params.monte_carlo.enabled` is
+    # `p02.lifetime_scale_lambda_relative_spread` / `p02.collected_share_
+    # relative_spread` / `p02.export_share_relative_spread` / `p02.unknown_
+    # whereabouts_share_relative_spread` / `p02.unknown_share_lifetime_
+    # coupling_k` -- same `params_schema.py` fields stage 02 already uses,
+    # nothing hardcoded here. `params.monte_carlo.enabled` is
     # shared across stages 02/03_01/03_02 by design -- narrow a run with
     # `scenarios_to_run` above rather than toggling MC off here, so 02/03_01 keep
     # running Monte Carlo as usual.
@@ -899,8 +918,19 @@ def main() -> dict[str, Any]:
     monte_carlo_enabled = params.monte_carlo.enabled
     n_draws_mc = params.monte_carlo.n_draws if monte_carlo_enabled else 0
     lifetime_scale_lambda_relative_spread = dict(p02.lifetime_scale_lambda_relative_spread)
-    unknown_whereabouts_share_std_mc = dict(p02.unknown_whereabouts_share_std)
-    export_share_std_mc = dict(p02.export_share_std)
+    # [FIXED] Was `unknown_whereabouts_share_std` / `export_share_std` -- both
+    # retired from `StockFlowParams` when the share-uncertainty model was
+    # refactored (see `params_schema.py`'s `[FIXED, replaces
+    # unknown_whereabouts_share_std/export_share_std below]` comment, and
+    # `flowdriven_model.py`'s `run_flow_driven_model_monte_carlo`, which now
+    # requires `collected_share_by_drivetrain` and the three `*_relative_spread`
+    # dicts instead of `_std`). This stage was not updated to match at the time --
+    # these five lines are the fix.
+    collected_share_by_drivetrain_mc = dict(p02.collected_share_by_drv)
+    collected_share_relative_spread_mc = dict(p02.collected_share_relative_spread)
+    export_share_relative_spread_mc = dict(p02.export_share_relative_spread)
+    unknown_whereabouts_share_relative_spread_mc = dict(p02.unknown_whereabouts_share_relative_spread)
+    unknown_share_lifetime_coupling_k_mc = dict(p02.unknown_share_lifetime_coupling_k)
     mc_chunk_size = params.monte_carlo.chunk_size
 
     # Independent seed stream per scenario, spawn_key=(2,) -- matches this stage's
@@ -1037,8 +1067,12 @@ def main() -> dict[str, Any]:
             lifetime_change_by_drv=lifetime_change_scn,
             monte_carlo_enabled=monte_carlo_enabled, n_draws=n_draws_mc,
             lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
-            unknown_whereabouts_share_std=unknown_whereabouts_share_std_mc,
-            export_share_std=export_share_std_mc, mc_seed=mc_scenario_seeds[name],
+            collected_share_by_drivetrain=collected_share_by_drivetrain_mc,
+            collected_share_relative_spread=collected_share_relative_spread_mc,
+            export_share_relative_spread=export_share_relative_spread_mc,
+            unknown_whereabouts_share_relative_spread=unknown_whereabouts_share_relative_spread_mc,
+            unknown_share_lifetime_coupling_k=unknown_share_lifetime_coupling_k_mc,
+            mc_seed=mc_scenario_seeds[name],
             mc_chunk_size=mc_chunk_size, output_periods=params.monte_carlo.output_periods,
             inflow_draws_by_group=inflow_draws_for_scenario,
         )

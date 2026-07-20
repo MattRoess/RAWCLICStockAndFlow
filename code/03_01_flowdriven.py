@@ -631,8 +631,10 @@ def main() -> dict[str, Any]:
     # intermediate array). `src/stockflow_model.py` is what makes this possible: the
     # exact same function stage 02 uses is now a normal library import here too.
     #
-    # Uncertainty spreads (`unknown_whereabouts_share_std`, `export_share_std`) come
-    # from `params.stock_flow` -- nothing hardcoded here.
+    # Uncertainty spreads (`collected_share_relative_spread`, `export_share_
+    # relative_spread`, `unknown_whereabouts_share_relative_spread`, plus
+    # `unknown_share_lifetime_coupling_k`) come from `params.stock_flow` --
+    # nothing hardcoded here.
     #
     # [FIXED, step 5 of the agreed plan] The `run_cohort_survival_monte_carlo` call
     # below now also passes `hard_zero_inflow_from_year`/`hard_zero_inflow_until_year`
