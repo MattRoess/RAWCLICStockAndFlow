@@ -59,7 +59,7 @@ class DataPrepParams:
         "ssp1": ("REMIND/REMIND_generic_C_SMIPv08-VLLO-SSP1-PkPrice500-def-rem-6.mif", ";"),
     })
 
-    start_year_model: int = 1900
+    start_year_model: int = 1950
     end_year_model: int = 2070
     start_year_plotting: int = 2015
     end_year_plotting: int = 2070
@@ -394,15 +394,15 @@ class StockFlowParams:
         # per drivetrain once real uncertainty ranges are available (e.g. "BEVs are
         # unlikely to die much earlier than expected, but could plausibly last
         # noticeably longer" -> lower=0.10, upper=0.25).
-        "Hybrid":   AsymmetricSpread(lower=0.10, upper=0.40),
-        "PHEV":     AsymmetricSpread(lower=0.10, upper=0.40),
-        "HEV":      AsymmetricSpread(lower=0.10, upper=0.40),
-        "BEV":      AsymmetricSpread(lower=0.10, upper=0.40),
-        "Liquids":  AsymmetricSpread(lower=0.10, upper=0.40),
-        "Petrol":   AsymmetricSpread(lower=0.10, upper=0.40),
-        "Diesel":   AsymmetricSpread(lower=0.10, upper=0.40),
-        "Gases":    AsymmetricSpread(lower=0.10, upper=0.40),
-        "FCEV":     AsymmetricSpread(lower=0.10, upper=0.40),
+        "Hybrid":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "PHEV":     AsymmetricSpread(lower=0.25, upper=0.40),
+        "HEV":      AsymmetricSpread(lower=0.25, upper=0.40),
+        "BEV":      AsymmetricSpread(lower=0.25, upper=0.40),
+        "Liquids":  AsymmetricSpread(lower=0.25, upper=0.40),
+        "Petrol":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "Diesel":   AsymmetricSpread(lower=0.25, upper=0.40),
+        "Gases":    AsymmetricSpread(lower=0.25, upper=0.40),
+        "FCEV":     AsymmetricSpread(lower=0.25, upper=0.40),
     })
     # Used to build Triangular(point*(1-lower), point, point*(1+upper)) around
     # lifetime_by_drv[drv].scale_lambda -- `lower=upper=<the float>` when a plain float
@@ -414,6 +414,66 @@ class StockFlowParams:
     #                                                        # longer-lived also is
     # PLACEHOLDER default (15%, symmetric) -- tune per drivetrain once real uncertainty
     # ranges (e.g. a survival-curve fit's own confidence interval) are available.
+
+    # [NEW] The REMIND-prescribed stock target itself is treated as known/exact up
+    # through this year (matches today's behavior exactly for every year before it --
+    # `02_stockdriven.py`'s stock-driven guarantee, "modeled stock EXACTLY equals
+    # target, every year", is UNCHANGED for years < this one). From this year onward,
+    # the target is no longer ground truth but the scenario's own projection, which
+    # gets its own Monte Carlo uncertainty -- see `stock_target_relative_spread`
+    # below. A SINGLE global year (not per-drivetrain): the "known vs. projected"
+    # boundary is a property of when real registration/stock data ends, not of any
+    # one drivetrain's own assumptions.
+    stock_target_uncertainty_start_year: int = 2025
+
+    # [NEW, this round] The per-draw multiplier from `stock_target_relative_
+    # spread` does NOT switch on abruptly at `stock_target_uncertainty_start_
+    # year` -- confirmed as a real bug this round: an instant step in the
+    # stock TARGET produces a one-year inflow/outflow SHOCK (the residual
+    # `inflow(t) = target(t) - remaining_total(t)` has to close an entire
+    # sudden gap in a single year), not a gradual widening of uncertainty --
+    # visible as a large single-year spike (worst for whichever drivetrain has
+    # the most stock at the cutoff year) immediately followed by the band
+    # apparently "snapping back" to its ordinary width, even though the
+    # UNDERLYING uncertainty is still genuinely there for every later year too.
+    # Instead, each draw's own deviation from 1.0 (its sampled multiplier minus
+    # 1) ramps in LINEARLY from 0 at the cutoff year, at a rate capped at this
+    # many percentage points per year -- e.g. `0.02` means a draw whose full
+    # sampled deviation is +6% takes 3 years to ramp all the way in (+2%, +4%,
+    # +6%), while a draw at +16% takes 8 years -- SMALLER deviations ramp in
+    # FASTER (in years), all draws share the same maximum RATE. Once a draw's
+    # ramp completes, its multiplier is held flat (the actual point in this
+    # feature originally -- see `stock_target_relative_spread`'s own docstring)
+    # for every subsequent year. At the cutoff year itself, every draw's
+    # multiplier is exactly 1.0 (zero elapsed ramp time) -- continuous with the
+    # pre-cutoff deterministic target, no seam-year discontinuity at all.
+    stock_target_ramp_max_rate_per_year: float = 0.005
+
+    # [NEW] Per-drivetrain Triangular relative spread applied to the REMIND stock
+    # target for every year >= `stock_target_uncertainty_start_year` -- same
+    # `AsymmetricSpread`/plain-float convention as `lifetime_scale_lambda_relative_
+    # spread` above. UNLIKE that field, this is NOT resampled independently every
+    # year: ONE multiplier is drawn per Monte Carlo trial, per drivetrain, and held
+    # CONSTANT across every post-cutoff year in that trial (e.g. draw #4,213 might be
+    # "this drivetrain's future stock runs 8% high, every year, for the rest of the
+    # horizon") -- matching how every other uncertainty axis in this pipeline works
+    # (scale_lambda, the three outflow shares, stock_modifier_2027), and avoiding an
+    # unrealistic year-to-year jagged band for a quantity (total vehicle stock) that
+    # only ever moves smoothly in reality. PLACEHOLDER values (15%, symmetric) --
+    # tune once a real confidence interval for the REMIND projection itself is
+    # available. `0.0` (lower=upper=0) for a drivetrain means no stock-target
+    # uncertainty for it -- byte-identical to today's behavior for that drivetrain.
+    stock_target_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
+        "Hybrid":   AsymmetricSpread(lower=0.15, upper=0.15),
+        "PHEV":     AsymmetricSpread(lower=0.15, upper=0.15),
+        "HEV":      AsymmetricSpread(lower=0.15, upper=0.15),
+        "BEV":      AsymmetricSpread(lower=0.15, upper=0.15),
+        "Liquids":  AsymmetricSpread(lower=0.15, upper=0.15),
+        "Petrol":   AsymmetricSpread(lower=0.15, upper=0.15),
+        "Diesel":   AsymmetricSpread(lower=0.15, upper=0.15),
+        "Gases":    AsymmetricSpread(lower=0.15, upper=0.15),
+        "FCEV":     AsymmetricSpread(lower=0.15, upper=0.15),
+    })
 
     # [FIXED, replaces unknown_whereabouts_share_std/export_share_std below] Was:
     # two independent Normal(point, std, clip 0..1) spreads, with `collected_share`
@@ -478,8 +538,8 @@ class StockFlowParams:
         "Diesel":  AsymmetricSpread(lower=0.20, upper=0.35),
         "Petrol":  AsymmetricSpread(lower=0.20, upper=0.35),
         "Liquids": AsymmetricSpread(lower=0.20, upper=0.35),
-        "FCEV":    AsymmetricSpread(lower=0.30, upper=0.50),  # PLACEHOLDER, not a verified real value.
-        "Gases":   AsymmetricSpread(lower=0.30, upper=0.50),  # PLACEHOLDER, not a verified real value.
+        "FCEV":    AsymmetricSpread(lower=0.20, upper=0.35),  # PLACEHOLDER, not a verified real value.
+        "Gases":   AsymmetricSpread(lower=0.20, upper=0.35),  # PLACEHOLDER, not a verified real value.
     })
     # collected_share_relative_spread / export_share_relative_spread: used to build
     # Triangular(point*(1-lower), point, point*(1+upper)) around their own point
@@ -522,17 +582,15 @@ class StockFlowParams:
     # historically inferred when the lifetime parameters were originally
     # calibrated).
     unknown_share_lifetime_coupling_k: dict[str, float] = field(default_factory=lambda: {
-        # Same k=1.0 baseline as before for the mature ICE/Hybrid/BEV group.
-        # FCEV/Gases get a STRONGER coupling (1.5) -- with so little else known
-        # about these drivetrains (see their placeholder point estimates and
-        # widest-of-all spreads above), leaning more heavily on "shorter lifetime
+        # Same k=0.8 baseline as before for the mature ICE/Hybrid/BEV group.
+        # Leaning more heavily on "shorter lifetime
         # implies more unexplained outflow" is more defensible than pretending
         # scale_lambda and unknown_share are independent for them.
-        "BEV":     1.0,
-        "HEV":     1.0, "PHEV": 1.0, "Hybrid": 1.0,
-        "Diesel":  1.0, "Petrol": 1.0, "Liquids": 1.0,
-        "FCEV":    1.5,  # PLACEHOLDER, not a verified real value.
-        "Gases":   1.5,  # PLACEHOLDER, not a verified real value.
+        "BEV":     0.8,
+        "HEV":     0.8, "PHEV": 0.8, "Hybrid": 0.8,
+        "Diesel":  0.8, "Petrol": 0.8, "Liquids": 0.8,
+        "FCEV":    0.8,  # PLACEHOLDER, not a verified real value.
+        "Gases":   0.8,  # PLACEHOLDER, not a verified real value.
     })
 
     def validate(self) -> list[str]:
@@ -555,6 +613,7 @@ class StockFlowParams:
             ("collected_share_relative_spread", self.collected_share_relative_spread),
             ("export_share_relative_spread", self.export_share_relative_spread),
             ("unknown_whereabouts_share_relative_spread", self.unknown_whereabouts_share_relative_spread),
+            ("stock_target_relative_spread", self.stock_target_relative_spread),
         ):
             missing = lifetime_drvs - set(mapping)
             if missing:
@@ -564,6 +623,20 @@ class StockFlowParams:
                     issues += spread.validate(field_name=f"stock_flow.{name}['{drv}']")
                 elif spread < 0:
                     issues.append(f"stock_flow.{name}['{drv}'] = {spread} must be >= 0.")
+
+        if not isinstance(self.stock_target_uncertainty_start_year, int) or self.stock_target_uncertainty_start_year < 1950:
+            issues.append(
+                f"stock_flow.stock_target_uncertainty_start_year="
+                f"{self.stock_target_uncertainty_start_year!r} must be an int >= 1950."
+            )
+
+        if self.stock_target_ramp_max_rate_per_year <= 0:
+            issues.append(
+                f"stock_flow.stock_target_ramp_max_rate_per_year="
+                f"{self.stock_target_ramp_max_rate_per_year!r} must be > 0 "
+                f"(0 would mean an infinite ramp -- the multiplier would never "
+                f"reach its sampled value)."
+            )
 
         missing_k = lifetime_drvs - set(self.unknown_share_lifetime_coupling_k)
         if missing_k:
@@ -584,10 +657,10 @@ class StockFlowParams:
                     f"stock_flow.hard_zero_inflow_from_year_by_drv has key {drv!r}, which "
                     f"is not a drivetrain present in lifetime_by_drv ({sorted(lifetime_drvs)})."
                 )
-            if not isinstance(year, int) or year < 1900:
+            if not isinstance(year, int) or year < 1950:
                 issues.append(
                     f"stock_flow.hard_zero_inflow_from_year_by_drv[{drv!r}] = {year!r} must "
-                    f"be a plausible calendar year (int >= 1900)."
+                    f"be a plausible calendar year (int >= 1950)."
                 )
 
         for drv, year in self.hard_zero_inflow_until_year_by_drv.items():
@@ -596,10 +669,10 @@ class StockFlowParams:
                     f"stock_flow.hard_zero_inflow_until_year_by_drv has key {drv!r}, which "
                     f"is not a drivetrain present in lifetime_by_drv ({sorted(lifetime_drvs)})."
                 )
-            if not isinstance(year, int) or year < 1900:
+            if not isinstance(year, int) or year < 1950:
                 issues.append(
                     f"stock_flow.hard_zero_inflow_until_year_by_drv[{drv!r}] = {year!r} must "
-                    f"be a plausible calendar year (int >= 1900)."
+                    f"be a plausible calendar year (int >= 1950)."
                 )
             from_year = self.hard_zero_inflow_from_year_by_drv.get(drv)
             if from_year is not None and isinstance(year, int) and from_year <= year:
@@ -1014,7 +1087,7 @@ class AdjustedFlowsParams:
 @dataclass(frozen=True)
 class DisaggregationParams:
     output_dir: str = "../data/processed/"
-    start_year_model: int = 1900
+    start_year_model: int = 1950
     end_year_model: int = 2070
 
     use_synthetic_eea_fallback: bool = False
@@ -1055,10 +1128,10 @@ class DisaggregationParams:
         if self.start_year_model >= self.end_year_model:
             issues.append("disaggregation: start_year_model must be strictly before end_year_model.")
         for drv, year in self.introduction_year_by_drv.items():
-            if not isinstance(year, int) or year < 1900:
+            if not isinstance(year, int) or year < 1950:
                 issues.append(
                     f"disaggregation.introduction_year_by_drv[{drv!r}] = {year!r} must be "
-                    f"a plausible calendar year (int >= 1900)."
+                    f"a plausible calendar year (int >= 1950)."
                 )
         return issues
 

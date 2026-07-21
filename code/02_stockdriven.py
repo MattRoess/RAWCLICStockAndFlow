@@ -466,11 +466,21 @@ def main() -> dict[str, Path]:
     # nothing here is hardcoded.
     #
     # IMPORTANT, READ BEFORE COMPARING THIS TO THE TWO DIAGNOSTIC PLOTS ABOVE:
-    # `02_stock_vs_target_check.png` CANNOT show any Monte Carlo variation, ever, no
-    # matter how this block is extended -- it's not a limitation of this code, it's
-    # what "stock-driven" means: modeled stock is FORCED to exactly equal the
-    # REMIND-prescribed target every year, regardless of lifetime assumptions
-    # (verified directly: `abs(modeled_stock - target) < 1e-6` for every year, always).
+    # `02_stock_vs_target_check.png` (the DETERMINISTIC plot, built from the single
+    # point-estimate run above, never from this MC block) always shows modeled stock
+    # exactly equal to the REMIND-prescribed target -- that's what "stock-driven"
+    # means for the deterministic run, unaffected by anything below.
+    # [FIXED] This comment previously claimed that invariant held "regardless of
+    # lifetime assumptions" and "always", full stop -- true when it was written
+    # (stock had no uncertainty mechanism of any kind), no longer true
+    # unconditionally now that `StockFlowParams.stock_target_relative_spread` /
+    # `.stock_target_uncertainty_start_year` exist: for years BEFORE the cutoff
+    # year, modeled stock still equals target exactly, every draw (verified:
+    # `abs(modeled_stock - target) < 1e-6`, same as before). For years AT/AFTER
+    # the cutoff, the target itself is now genuinely per-draw-varying (see
+    # `stock_target_draws`/`result["stock_target_by_year"]` below), so modeled
+    # stock varies across draws too, by design -- that's the whole point of the
+    # feature. `summary_by_drv[drv]["stock_by_year_band"]` is where that shows up.
     # `02_flows_by_drivetrain_check.png`'s underlying quantities (inflow, outflow) DO
     # genuinely vary with lifetime uncertainty -- this block now tracks that variation
     # YEAR BY YEAR (not just a single 2070 total) and plots it directly against the
@@ -493,6 +503,15 @@ def main() -> dict[str, Path]:
         # the one params.monte_carlo.seed) -- stable under adding/removing
         # drivetrains, same reasoning as monte_carlo.sample_scalars().
         child_seeds = rng_seed_seq.spawn(len(drivetrains_present))
+        # [NEW] A SECOND, independent set of child seeds for the new stock-target
+        # uncertainty axis -- `SeedSequence.spawn()` called again returns fresh,
+        # non-overlapping children (not the same ones as `child_seeds` above), so
+        # this genuinely doesn't correlate with or perturb the existing lifetime
+        # draws' reproducibility at all. Kept as its own spawn (rather than reusing
+        # `rng` sequentially within the loop) so this is explicit and independently
+        # seeded per drivetrain, matching this codebase's existing convention of one
+        # spawned seed per distinct uncertainty axis.
+        stock_target_child_seeds = rng_seed_seq.spawn(len(drivetrains_present))
 
         draws_by_drv: dict[str, dict[str, np.ndarray]] = {}
         summary_by_drv: dict[str, dict] = {}
@@ -521,7 +540,9 @@ def main() -> dict[str, Path]:
         # the EU total", not a within-drivetrain sensitivity question.
         sensitivity_input_draws: dict[str, np.ndarray] = {}
 
-        for drivetrain, child_seed in zip(drivetrains_present, child_seeds):
+        for drivetrain, child_seed, stock_target_child_seed in zip(
+            drivetrains_present, child_seeds, stock_target_child_seeds
+        ):
             rng = np.random.default_rng(child_seed)
             base = LIFETIME_BY_DRV[drivetrain]
             # [FIXED] Was: `spread = p02.lifetime_scale_lambda_relative_spread[drivetrain]`
@@ -545,6 +566,88 @@ def main() -> dict[str, Path]:
             stock_series.index = stock_series.index.astype(int)
             stock_series = stock_series.sort_index()
 
+            # [NEW] Per-draw stock TARGET, per `StockFlowParams.stock_target_
+            # relative_spread` / `.stock_target_uncertainty_start_year`: REMIND's
+            # own prescribed trajectory is treated as known/exact through the
+            # cutoff year (identical to the deterministic value, every draw --
+            # this stage's existing "stock always equals target" guarantee is
+            # UNCHANGED for those years), and gets its own uncertainty from the
+            # cutoff onward. Built here (same "engine takes pre-realized draws,
+            # this stage does the sampling from params" convention as
+            # `scale_lambda_draws` above), threaded into `run_cohort_survival_
+            # monte_carlo` as `stock_target_draws`.
+            #
+            # [FIXED, this round] Was: each draw's full multiplier applied as an
+            # instant step at the cutoff year (flat before, flat after, at the
+            # sampled value). Confirmed as a real bug: `inflow(t) = target(t) -
+            # remaining_total(t)` is a pure residual with no smoothing, so an
+            # instant step in the TARGET produced a one-year inflow/outflow
+            # SHOCK (closing an entire sudden gap in a single year) rather than
+            # a gradual widening of uncertainty -- visible as a large spike
+            # right at the cutoff year, dwarfing the genuine (but much smaller
+            # year-to-year) ongoing band width for every later year, making the
+            # uncertainty look like it "snapped back to normal" immediately
+            # after, even though it hadn't.
+            #
+            # Now: each draw's own deviation from 1.0 (`dev = multiplier - 1`)
+            # ramps in LINEARLY from 0 at the cutoff year, at a rate capped at
+            # `stock_target_ramp_max_rate_per_year` (percentage points/year --
+            # see that field's own docstring in params_schema.py). SMALLER
+            # deviations ramp in faster (fewer years); every draw shares the
+            # same maximum RATE, not the same ramp DURATION -- "considers the
+            # size of the uncertainty", per this round's brief. At the cutoff
+            # year itself every draw's multiplier is exactly 1.0 (zero elapsed
+            # ramp time) -- continuous with the deterministic pre-cutoff target,
+            # no seam-year jump. Once a draw's ramp completes, its multiplier
+            # holds flat at the full sampled value for every subsequent year --
+            # the original "held constant, not resampled per year" intent is
+            # preserved, just no longer switched on instantaneously.
+            #
+            # `stock_t_det` replicates EXACTLY the same reindex/ffill/bfill logic
+            # `_run_cohort_recurrence` itself uses internally to build `stock_t`
+            # from `stock_series` -- kept in sync deliberately (not re-derived
+            # from `result` afterward, since the draws array has to exist BEFORE
+            # calling `run_cohort_survival_monte_carlo` below).
+            t0 = int(stock_series.index.min())
+            t_years = np.arange(t0, model_end_year + 1, dtype=int)
+            stock_t_det = stock_series.reindex(t_years).ffill().bfill().to_numpy(dtype=float)
+
+            stock_target_rng = np.random.default_rng(stock_target_child_seed)
+            lower_st, upper_st = resolve_lifetime_spread(
+                p02.stock_target_relative_spread, drivetrain, default=(0.0, 0.0)
+            )
+            stock_target_mult_draws = sample_relative_triangular_scale(
+                1.0, lower_st, upper_st, n_draws, stock_target_rng
+            )
+            sensitivity_input_draws[f"{drivetrain}_stock_target_mult"] = stock_target_mult_draws
+
+            uncertain_mask = t_years >= int(p02.stock_target_uncertainty_start_year)
+
+            # Per-draw deviation from 1.0, and the number of years EACH draw's
+            # own deviation takes to ramp fully in at the capped rate -- e.g.
+            # a +6% draw at a 2%/year cap takes 3 years; a +16% draw takes 8.
+            # `np.where` guards the near-zero-deviation division (a draw whose
+            # sampled multiplier landed almost exactly on 1.0 doesn't need a
+            # real ramp at all -- the guard value only prevents a 0/0 NaN, it
+            # doesn't affect the result, since `dev_draws` there is ~0 anyway).
+            dev_draws = stock_target_mult_draws - 1.0
+            max_rate = float(p02.stock_target_ramp_max_rate_per_year)
+            ramp_years_needed = np.where(
+                np.abs(dev_draws) < 1e-12, 1.0, np.abs(dev_draws) / max_rate
+            )
+
+            years_since_cutoff = (t_years[uncertain_mask] - int(p02.stock_target_uncertainty_start_year)).astype(float)
+            # (n_years_uncertain, n_draws): 0 at the cutoff year itself, rising
+            # to 1.0 once that draw's own ramp completes, held at 1.0 (clipped)
+            # for every year after.
+            ramp_fraction = np.clip(
+                years_since_cutoff[:, None] / ramp_years_needed[None, :], 0.0, 1.0
+            )
+            effective_mult = 1.0 + dev_draws[None, :] * ramp_fraction  # (n_years_uncertain, n_draws)
+
+            stock_target_draws = np.tile(stock_t_det[:, None], (1, n_draws))
+            stock_target_draws[uncertain_mask, :] = stock_t_det[uncertain_mask, None] * effective_mult
+
             backcast = build_backcast_state(
                 stock_series=stock_series, model_end_year=model_end_year,
                 shape_k=base.shape_k, scale_lambda=base.scale_lambda,  # point-estimate backcast, shared across draws
@@ -557,9 +660,11 @@ def main() -> dict[str, Path]:
                 negative_inflow_policy=negative_inflow_policy,
                 hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
                 hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
+                stock_target_draws=stock_target_draws,
             )
             draws_by_drv[drivetrain] = {
                 "scale_lambda": scale_lambda_draws,
+                "stock_target_mult": stock_target_mult_draws,
                 "cumulative_inflow": result["cumulative_inflow"],
                 "cumulative_out_survival": result["cumulative_out_survival"],
             }
@@ -600,6 +705,18 @@ def main() -> dict[str, Path]:
                 "median": np.percentile(result["out_survival_by_year"], 50, axis=1).tolist(),
                 "p97_5": np.percentile(result["out_survival_by_year"], 97.5, axis=1).tolist(),
             }
+            # [NEW] Per-year STOCK band -- previously impossible to report ("stock
+            # is deterministic here" was a true statement before this round's
+            # stock-target uncertainty feature). Degenerates to a flat
+            # p2_5==median==p97_5 line for every year before `stock_target_
+            # uncertainty_start_year` (byte-identical values across draws there,
+            # same as `stock_t` always was), genuinely widens from that year on.
+            stock_band = {
+                "years": years_list,
+                "p2_5": np.percentile(result["stock_target_by_year"], 2.5, axis=1).tolist(),
+                "median": np.percentile(result["stock_target_by_year"], 50, axis=1).tolist(),
+                "p97_5": np.percentile(result["stock_target_by_year"], 97.5, axis=1).tolist(),
+            }
 
             summary_by_drv[drivetrain] = {
                 "cumulative_inflow": summarize_distribution(result["cumulative_inflow"]),
@@ -607,6 +724,7 @@ def main() -> dict[str, Path]:
                 "inflow_applied_by_year_band": inflow_applied_band,
                 "inflow_raw_by_year_band": inflow_raw_band,
                 "out_survival_by_year_band": out_survival_band,
+                "stock_by_year_band": stock_band,
             }
             s = summary_by_drv[drivetrain]["cumulative_out_survival"]
             print(
@@ -629,7 +747,17 @@ def main() -> dict[str, Path]:
                 start, end = period
                 mask = (result["t"] >= start) & (result["t"] <= end)
                 years_in_period = result["t"][mask]
-                stock_values_in_period = result["stock_t"][mask]  # deterministic, (n_years_in_period,)
+                # [FIXED] Was `result["stock_t"][mask]` (deterministic, `(n_years_
+                # in_period,)`) wrapped in `np.full(n_draws, scalar)` below to fake
+                # a per-draw shape for `summarize_distribution` -- that broadcast
+                # trick was ALWAYS there specifically because stock genuinely was
+                # identical across every draw before this round's stock-target
+                # uncertainty feature. `stock_target_by_year` is the real per-draw
+                # array now (still byte-identical across draws for any year before
+                # `stock_target_uncertainty_start_year`, genuinely varying from it
+                # on) -- already the right `(n_years_in_period, n_draws)` shape, no
+                # broadcast trick needed.
+                stock_values_in_period = result["stock_target_by_year"][mask]  # (n_years_in_period, n_draws)
 
                 eu_total_period_sums[period]["cumulative_inflow"] += inflow_period_sums[period]
                 eu_total_period_sums[period]["cumulative_out_survival"] += out_survival_period_sums[period]
@@ -638,12 +766,12 @@ def main() -> dict[str, Path]:
                     "cumulative_inflow": summarize_distribution(inflow_period_sums[period]),
                     "cumulative_out_survival": summarize_distribution(out_survival_period_sums[period]),
                     "stock_end_of_period": summarize_distribution(
-                        np.full(n_draws, stock_values_in_period[-1] if stock_values_in_period.size else np.nan)
+                        stock_values_in_period[-1] if stock_values_in_period.size else np.full(n_draws, np.nan)
                     ),
-                    "stock_sum_over_period": summarize_distribution(np.full(n_draws, stock_values_in_period.sum())),
+                    "stock_sum_over_period": summarize_distribution(stock_values_in_period.sum(axis=0)),
                     "stock_per_year": {
-                        int(y): summarize_distribution(np.full(n_draws, v))
-                        for y, v in zip(years_in_period, stock_values_in_period)
+                        int(y): summarize_distribution(stock_values_in_period[i])
+                        for i, y in enumerate(years_in_period)
                     },
                 }
             period_summary_by_drv[drivetrain] = drv_period_summary

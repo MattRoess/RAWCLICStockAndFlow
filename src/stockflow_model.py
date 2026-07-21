@@ -128,6 +128,19 @@ def _run_cohort_recurrence(
     keep_full_history: bool,
     hard_zero_inflow_from_year: int | None = None,
     hard_zero_inflow_until_year: int | None = None,
+    # [NEW] Optional per-draw-varying stock TARGET -- shape `(n_t, n_draws)`,
+    # aligned 1:1 with `t` (the year axis this function builds internally from
+    # `stock_series`/`model_end_year`). When `None` (default), behavior is
+    # BYTE-IDENTICAL to before this parameter existed: `target` stays the plain
+    # scalar `float(stock_t[i_t])`, shared by every draw. When supplied, `target`
+    # becomes `stock_target_draws[i_t]` (a `(n_draws,)` array) instead -- the
+    # `inflow_raw = target - remaining_total` line below already works
+    # unchanged either way, since numpy broadcasts a scalar against `remaining_
+    # total` exactly the same way it broadcasts a same-shape array. Built by the
+    # CALLER (`02_stockdriven.py`'s Monte Carlo block), not sampled in here --
+    # same "engine takes pre-realized draws, caller does the sampling from
+    # params" convention as `shape_k`/`scale_lambda` above.
+    stock_target_draws: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """
     THE ONLY PLACE THE COHORT-SURVIVAL MATH IS IMPLEMENTED. `shape_k`/`scale_lambda`
@@ -176,6 +189,19 @@ def _run_cohort_recurrence(
     n_t = len(t)
     stock_t = stock_series.reindex(t).ffill().bfill().to_numpy(dtype=float)
 
+    # [NEW] `stock_target_draws`, if supplied, must align exactly with the (n_t,
+    # n_draws) shape this function just derived -- validated once, up front,
+    # rather than failing confusingly deep inside the per-year loop below (same
+    # "validate the whole array once, cheap" pattern `cohort_flow_mc.py` uses for
+    # `inflow_draws_by_group`).
+    if stock_target_draws is not None:
+        stock_target_draws = np.asarray(stock_target_draws, dtype=float)
+        if stock_target_draws.shape != (n_t, n_draws):
+            raise ValueError(
+                f"stock_target_draws has shape {stock_target_draws.shape}, expected "
+                f"({n_t}, {n_draws}) to match (n_years, n_draws) for this run."
+            )
+
     n_cohorts = tau_back.size
     cohort_state = np.tile(backcast.stock0_by_cohort, (n_draws, 1))  # (n_draws, n_cohorts)
 
@@ -193,6 +219,16 @@ def _run_cohort_recurrence(
     # isolated endpoint histogram.
     inflow_by_year = np.zeros((n_t, n_draws), dtype=float)
     out_survival_by_year = np.zeros((n_t, n_draws), dtype=float)
+    # [NEW] Per-draw stock TARGET actually used each year -- identical to
+    # `stock_t` (broadcast) for every year before `stock_target_draws` was given,
+    # or before its uncertainty window starts (the caller is expected to have
+    # already filled `stock_target_draws` with the plain point value for years
+    # outside its own uncertainty window, so this array is simply whatever
+    # `target` resolved to each year, per draw). Same cost class as `inflow_by_
+    # year` above. This is what makes it possible to report a genuine per-draw
+    # STOCK band for post-uncertainty-start years -- previously stock was only
+    # ever `stock_t` (n_t,), deterministic, identical regardless of any draw.
+    stock_target_by_year = np.zeros((n_t, n_draws), dtype=float)
     # [NEW] Always tracked, same cost class as inflow_by_year above -- the raw
     # residual BEFORE any hard_zero_inflow_from_year override is applied. Equal to
     # inflow_by_year whenever no override is active (or none is configured for this
@@ -245,6 +281,16 @@ def _run_cohort_recurrence(
     base_hazard_table = np.clip(base_hazard_table, 0.0, 1.0)
     base_hazard_table[:, -1] = 1.0  # truncation at max_age
 
+    # [NEW] t0's own target -- the loop below starts at i_t=1 (t0 is the given
+    # starting point, not something inflow is solved for), so this year is never
+    # touched by the `stock_target_by_year[i_t] = target` assignment inside the
+    # loop. Set explicitly here so `stock_target_by_year` reports the REAL known
+    # starting stock at every draw for t0, not a stale `0.0` from the initial
+    # `np.zeros(...)` allocation. `stock_target_draws[0]` (if supplied) should
+    # equal `stock_t[0]` broadcast anyway (t0 is always before any uncertainty
+    # window), so this is consistent with the caller's own array either way.
+    stock_target_by_year[0] = stock_target_draws[0] if stock_target_draws is not None else stock_t[0]
+
     for i_t in range(1, n_t):
         year = int(t[i_t])
         prev_year = int(t[i_t - 1])
@@ -279,7 +325,16 @@ def _run_cohort_recurrence(
         cohort_state[:, valid] = prev_stock_valid - out_surv
 
         remaining_total = cohort_state.sum(axis=1)
-        target = float(stock_t[i_t])
+        # [NEW] `target` becomes a per-draw `(n_draws,)` array when `stock_target_
+        # draws` was supplied, instead of the plain scalar `float(stock_t[i_t])` --
+        # `inflow_raw = target - remaining_total` below is UNCHANGED either way,
+        # since numpy broadcasts a scalar against `remaining_total` exactly the
+        # same way it broadcasts a same-shape (n_draws,) array. `None` (default)
+        # is byte-identical to before this parameter existed.
+        if stock_target_draws is not None:
+            target = stock_target_draws[i_t]
+        else:
+            target = float(stock_t[i_t])
         inflow_raw = target - remaining_total
         # inflow_raw < 0: prescribed stock declined faster than natural attrition
         # explains. What happens next is determined entirely by `negative_inflow_policy`
@@ -342,6 +397,7 @@ def _run_cohort_recurrence(
         inflow_pre_hard_zero_override_by_year[i_t] = inflow_raw
         inflow_applied_by_year[i_t] = inflow_applied
         out_survival_by_year[i_t] = this_year_total_outflow
+        stock_target_by_year[i_t] = target
 
         if keep_full_history:
             stock_t_tau[i_t] = cohort_state
@@ -372,6 +428,16 @@ def _run_cohort_recurrence(
         # stock" for a period at all. Cheap to always include -- it's a `(n_t,)`
         # array, not per-draw.
         "stock_t": stock_t,
+        # [NEW] The per-draw target ACTUALLY used each year -- `(n_t, n_draws)`.
+        # Identical to `stock_t` broadcast across every draw when `stock_target_
+        # draws` was `None` (the note above about `stock_t` being "deterministic,
+        # identical regardless of draw" is UNCHANGED in that case). Genuinely
+        # varies per draw for years within `stock_target_draws`'s own uncertainty
+        # window when supplied -- this IS the per-draw stock trajectory itself
+        # (not just inflow/outflow), letting a caller report a real Monte Carlo
+        # stock band for post-uncertainty-start years, something `stock_t` alone
+        # could never express.
+        "stock_target_by_year": stock_target_by_year,
     }
     if keep_full_history:
         result.update({
@@ -495,6 +561,14 @@ def run_cohort_survival_monte_carlo(
     negative_inflow_policy: str = "report_only",
     hard_zero_inflow_from_year: int | None = None,
     hard_zero_inflow_until_year: int | None = None,
+    # [NEW] Passed straight through to `_run_cohort_recurrence`'s parameter of
+    # the same name -- see that function's docstring for the full explanation.
+    # `(n_years, n_draws)`, built by the CALLER (`02_stockdriven.py`'s Monte
+    # Carlo block) from `StockFlowParams.stock_target_relative_spread` /
+    # `.stock_target_uncertainty_start_year`. `None` (default) preserves byte-
+    # identical behavior to before this parameter existed -- `target` stays the
+    # plain deterministic scalar for every year, every draw.
+    stock_target_draws: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Many-draw run for ONE (region, drivetrain) key -- a thin wrapper around the SAME
@@ -516,6 +590,20 @@ def run_cohort_survival_monte_carlo(
     preserves byte-identical behavior. See `params_schema.py`'s
     `StockFlowParams.hard_zero_inflow_until_year_by_drv`.
 
+    `stock_target_draws`: [NEW] `None` (default) preserves byte-identical behavior
+    -- the REMIND stock target stays deterministic, identical for every draw, same
+    as before this parameter existed. When supplied, the target itself becomes
+    per-draw-varying for whichever years the caller filled with something other
+    than the plain point value (see `StockFlowParams.stock_target_uncertainty_
+    start_year` -- typically every year before it stays the deterministic value,
+    every year from it onward gets a per-draw multiplier). This means modeled
+    STOCK, not just inflow/outflow, can now genuinely vary per draw for those
+    years -- see `stock_target_by_year` in the return value below, and
+    `02_stockdriven.py`'s module docstring for how this changes that stage's
+    previously-unconditional "modeled stock always exactly equals target"
+    guarantee (still exactly true before this parameter's uncertainty window,
+    no longer true within it).
+
     Returns {"cumulative_inflow": (n_draws,), "cumulative_out_survival": (n_draws,),
     "t": (n_years,), "inflow_by_year": (n_years, n_draws),
     "inflow_pre_hard_zero_override_by_year": (n_years, n_draws) -- [NEW] the raw
@@ -528,8 +616,10 @@ def run_cohort_survival_monte_carlo(
     hard_zero override is active, so a negative-inflow year is never silently hidden
     from diagnostics; it is NOT the same thing as "what the model actually did".
     "out_survival_by_year": (n_years, n_draws), "stock_t": (n_years,) -- the
-    prescribed target, deterministic, identical regardless of draw}. See
-    `monte_carlo.sum_by_period()` for turning "inflow_applied_by_year"/
+    prescribed target, deterministic, identical regardless of draw, "stock_target_
+    by_year": (n_years, n_draws) -- [NEW] the target ACTUALLY used each year, per
+    draw; identical to "stock_t" broadcast when `stock_target_draws` was `None`}.
+    See `monte_carlo.sum_by_period()` for turning "inflow_applied_by_year"/
     "out_survival_by_year" into cumulative sums over an arbitrary (start_year,
     end_year) window without needing a full per-cohort history.
     """
@@ -540,4 +630,5 @@ def run_cohort_survival_monte_carlo(
         negative_inflow_policy=negative_inflow_policy, keep_full_history=False,
         hard_zero_inflow_from_year=hard_zero_inflow_from_year,
         hard_zero_inflow_until_year=hard_zero_inflow_until_year,
+        stock_target_draws=stock_target_draws,
     )
