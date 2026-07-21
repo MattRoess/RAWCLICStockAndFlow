@@ -32,11 +32,14 @@ SCOPE (confirmed with the user):
     constraint already established for stage 03_02.
   - `componentCarOther` sheet / drivetrain "Other" is out of scope, ignored.
   - `segment == "standard"` rows are now KEPT (previously dropped, not one of the 12
-    real segments) -- [NEW, this round] used for the drivetrain-level ("standard")
-    mass path, combined with 03_02_adjustedflows.py's independent by-drivetrain
-    re-simulation (the "__direct__" entries already saved in mc_stage03_02_summary)
-    instead of the 12-segment tracker. See select_standard_composition,
-    combine_scalar_mass_standard, and combine_flow_and_composition_draws(direct=True)
+    real segments) -- used for the drivetrain-level ("standard") mass path, combined
+    with the SAME drivetrain-level (segment-summed) vehicle-count total the
+    12-segment path's own drivetrain rollup uses ([FIXED, this round] this is NOT a
+    separate re-simulation -- an earlier version of this comment described one that
+    `03_02_adjustedflows.py` never actually implements; see `mc_summary_key`'s
+    docstring for the full correction) instead of the 12-segment tracker. See
+    select_standard_composition, combine_scalar_mass_standard, and
+    combine_flow_and_composition_draws(direct=True)
     below, plus the comparison plots this enables (04_01_standard_vs_segments_*.png).
   - For now, only the FIRST available year's composition data per drivetrain is used
     (temporal resolution is currently every 5 years; will become annual later). This is
@@ -86,6 +89,19 @@ BUILD PROGRESS (step by step, per user's request to test alongside):
       the 12 segments' year coverage). DONE, syntax-checked and every new call site
       cross-checked against its definition -- NOT yet run against real data (no
       access to the actual composition/histogram/mc_stage03_02_summary files).
+      [FIXED, LATER ROUND -- CORRECTION TO THE ABOVE] "independent by-drivetrain
+      re-simulation" and its "__direct__" entries, referenced throughout this Step 7
+      entry, DO NOT EXIST -- confirmed directly against `03_02_adjustedflows.py`,
+      which never writes any key containing "__direct__". Every `direct=True` lookup
+      was therefore a guaranteed `KeyError`, silently treated as zero vehicles --
+      this is why the "standard" composition bars collapsed to near-zero in
+      `04_01_standard_vs_segments_*.png`. Confirmed with the user: no independent
+      re-simulation is wanted anyway -- the "standard" path now correctly reuses the
+      SAME drivetrain-level (segment-summed) vehicle-count total the 12-segment
+      path's own drivetrain rollup already uses; only the composition source
+      differs. See `mc_summary_key`'s docstring for the exact fix. Every "__direct__"
+      mention elsewhere in this file's comments describes this same
+      now-corrected (but at-the-time genuinely mistaken) assumption.
   [x] Step 8 [NEW, this round]: composition data is now ANNUAL (through 2070, per the
       user) -- switched from "one representative first-available-year composition
       applied to every cohort" to matching each vehicle's OWN build year
@@ -780,24 +796,38 @@ def mc_summary_key(
     """
     Build the exact key format `mc_stage03_02_summary` uses, confirmed against the
     real saved artifact:
-      - segment-level:            f"{scenario}__{start}-{end}__{drivetrain}__{segment}__{metric}"
+      - segment-level:                   f"{scenario}__{start}-{end}__{drivetrain}__{segment}__{metric}"
       - drivetrain-level (segment-sum):  f"{scenario}__{start}-{end}__{drivetrain}__{metric}"
-      - drivetrain-level (INDEPENDENT re-simulation, `direct=True`) -- [NEW]:
-            f"{scenario}__{start}-{end}__{drivetrain}__direct__{metric}"
-        This is 03_02_adjustedflows.py's "by-drivetrain, independent re-simulation"
-        (see that script's run_adjusted_scenario docstring) -- a genuinely SEPARATE
-        simulation from the segment-sum, bypassing the base-year segment-share
-        split entirely. Used here as the vehicle-count source for the drivetrain-
-        level ("standard" composition) mass path. `direct=True` requires
-        `segment=None` (drivetrain-level only, no segment concept in that
-        re-simulation).
+
+    [FIXED, this round] There used to be a THIRD key format here, built when
+    `direct=True`: `f"{scenario}__{start}-{end}__{drivetrain}__direct__{metric}"`,
+    described as coming from a genuinely separate "independent by-drivetrain
+    re-simulation" in `03_02_adjustedflows.py`. Confirmed this round, directly
+    against that file: no such re-simulation exists there, and it never writes any
+    key containing `__direct__` -- every `direct=True` lookup was therefore a
+    guaranteed `KeyError`, silently caught by the caller and treated as "zero
+    vehicles for this drivetrain" (see `combine_flow_and_composition_draws`'s
+    skip-on-KeyError handling). This is why the "standard (drivetrain-level)"
+    composition bars collapsed to near-zero in `04_01_standard_vs_segments_*.png`.
+
+    Confirmed with the user: no independent re-simulation is wanted or needed here.
+    The "standard" composition comparison is ONLY about which COMPOSITION source
+    gets applied (whole-car "standard" composition vs. the 12-segment weighted
+    mix) -- both paths should use the exact SAME vehicle-count total, i.e. the
+    drivetrain-level (segment-sum) key that already exists and is already correct
+    (it's what the 12-segment path's own drivetrain-level rollup uses too).
+
+    `direct=True` therefore now returns the IDENTICAL string to `segment=None` --
+    the real, already-populated drivetrain-level key -- rather than a key that was
+    never actually written. Kept as a parameter (rather than removed outright) only
+    so `combine_flow_and_composition_draws`/`combine_scalar_mass_standard`'s own
+    call sites don't need to change their signatures -- it's no longer a
+    meaningfully separate code path from `segment=None, direct=False`.
     """
     if direct and segment is not None:
-        raise ValueError("mc_summary_key: direct=True requires segment=None (no segment concept in the independent by-drivetrain re-simulation).")
+        raise ValueError("mc_summary_key: direct=True requires segment=None (drivetrain-level only).")
     start, end = period
     period_label = f"{start}-{end}"
-    if direct:
-        return f"{scenario_name}__{period_label}__{drivetrain}__direct__{metric}"
     if segment is None:
         return f"{scenario_name}__{period_label}__{drivetrain}__{metric}"
     return f"{scenario_name}__{period_label}__{drivetrain}__{segment}__{metric}"
@@ -1318,13 +1348,18 @@ def combine_flow_and_composition_draws(
         n_draws -- see architecture note)
     rng : numpy Generator for the vehicle-count bootstrap (composition draws are
         assumed already sampled -- this function does not draw them)
-    direct : [NEW] False (default) = existing 12-segment path, vehicle-count draws
+    direct : False (default) = existing 12-segment path, vehicle-count draws
         bootstrapped from `mc_summary`'s SEGMENT-level entries (the scenario's
-        segment-share-split simulation). True = NEW drivetrain-level ("standard")
-        path, vehicle-count draws bootstrapped from `mc_summary`'s "__direct__"
-        entries (03_02_adjustedflows.py's INDEPENDENT by-drivetrain re-simulation,
-        which bypasses the segment-share split entirely) -- see `mc_summary_key`'s
-        docstring for the exact key format difference.
+        segment-share-split simulation). True = drivetrain-level ("standard")
+        path -- [FIXED, this round] bootstraps from the SAME drivetrain-level
+        (segment-sum) `mc_summary` entries the 12-segment path's own drivetrain
+        rollup uses (see `mc_summary_key`'s docstring for the full correction --
+        this used to look for a separate "__direct__"-tagged independent
+        re-simulation that `03_02_adjustedflows.py` never actually produced,
+        making every `direct=True` lookup a guaranteed `KeyError` treated as zero
+        vehicles). Confirmed with the user: this path is meant ONLY to isolate
+        the effect of a different COMPOSITION source -- vehicle counts should be
+        (and now are) identical to the 12-segment path's drivetrain totals.
 
     Returns
     -------
@@ -1591,28 +1626,32 @@ def combine_scalar_mass_standard(
     point_estimate_stat: str = "mean",
 ) -> pd.DataFrame:
     """
-    [NEW] Scalar (point-estimate) counterpart to `combine_flow_and_composition_draws
+    Scalar (point-estimate) counterpart to `combine_flow_and_composition_draws
     (direct=True)` -- the drivetrain-level ("standard" composition) mass path.
 
     IMPORTANT ARCHITECTURE DIFFERENCE from `combine_scalar_mass_from_tracker`: there
     is NO deterministic, single-run, drivetrain-level (no-segment) vehicle-count
-    artifact anywhere in this pipeline -- 03_02_adjustedflows.py's drivetrain-level
-    computation ("by-drivetrain, independent re-simulation") only ever runs as part
-    of its Monte Carlo pass (`monte_carlo_enabled=True`), never as a separate
-    deterministic call. So the "point estimate" used here is `mc_stage03_02_summary`'s
-    own `point_estimate_stat` (default "mean") of the "__direct__" entry for this
-    (scenario, period, drivetrain, metric) -- i.e. the MEAN of that Monte Carlo run,
-    not a genuinely separate deterministic simulation. This is a deliberate,
-    documented choice, not a hidden assumption -- if 03_02_adjustedflows.py is ever
-    run with `monte_carlo_enabled=False`, this function will raise (no "__direct__"
-    entries exist in `mc_summary` at all in that case).
+    artifact anywhere in this pipeline -- `03_02_adjustedflows.py`'s drivetrain-level
+    total (the SAME segment-summed rollup the 12-segment path's own drivetrain totals
+    use -- see `mc_summary_key`'s docstring; [FIXED, this round] this is NOT a
+    separate "independent re-simulation", a previous docstring here described one
+    that never actually existed) only ever gets computed as part of the Monte Carlo
+    pass (`monte_carlo_enabled=True`), never as a separate deterministic call. So the
+    "point estimate" used here is `mc_stage03_02_summary`'s own `point_estimate_stat`
+    (default "mean") of the drivetrain-level entry for this (scenario, period,
+    drivetrain, metric) -- i.e. the MEAN of that Monte Carlo run's per-drivetrain
+    segment-sum, not a genuinely separate deterministic simulation. This is a
+    deliberate, documented choice, not a hidden assumption -- if
+    `03_02_adjustedflows.py` is ever run with `monte_carlo_enabled=False`, this
+    function will raise (no drivetrain-level entries exist in `mc_summary` at all in
+    that case, same as the 12-segment path's own segment-level entries).
 
     [CHANGED, this round -- IMPORTANT LIMITATION, distinct from the 12-segment path]
     Composition data is now annual, and the 12-segment path (`combine_scalar_mass_
     from_tracker`) matches each vehicle's OWN build year (`cohort_year`) exactly --
-    but that is NOT possible here. `mc_stage03_02_summary`'s "__direct__" entries are
-    PERIOD-CUMULATIVE ONLY (confirmed: no per-year, let alone per-cohort-year, vehicle
-    count is persisted anywhere for the by-drivetrain independent re-simulation --
+    but that is NOT possible here. `mc_stage03_02_summary`'s drivetrain-level entries
+    are PERIOD-CUMULATIVE ONLY (confirmed: no per-year, let alone per-cohort-year,
+    vehicle count is persisted anywhere for the drivetrain-level rollup --
     `03_02_adjustedflows.py` only ever summarizes it per requested period). There is
     therefore no per-row build-year to match against here, unlike the segment path
     (which has full per-row `cohort_year` data in `tracker_keyed`).
@@ -1624,8 +1663,8 @@ def combine_scalar_mass_standard(
     the first available year regardless of what period was requested" behavior (the
     value now actually responds to which period is being asked about), but it is NOT
     equivalent to the segment path's true per-cohort weighting -- closing that gap
-    would require 03_02_adjustedflows.py to persist a per-year (not just per-period)
-    "__direct__" summary, which it does not currently do.
+    would require `03_02_adjustedflows.py` to persist a per-year (not just per-period)
+    drivetrain-level summary, which it does not currently do.
 
     THE MATH MODEL: mass = vehicle_count * composition_value, where:
       - vehicle_count = `mc_summary[mc_summary_key(..., direct=True)][point_estimate_stat]`
@@ -1645,16 +1684,16 @@ def combine_scalar_mass_standard(
     composition_standard : output of `select_standard_composition`
     p04 : params.materials (the `MaterialsParams` dataclass instance)
     region : which Region to compute (kept for column-shape parity with the segment
-        path; mc_stage03_02_summary's "__direct__" entries are not region-keyed
+        path; mc_stage03_02_summary's drivetrain-level entries are not region-keyed
         beyond the pipeline's own single-region convention)
     point_estimate_stat : which `mc_summary` entry statistic to use as the vehicle-
         count point estimate -- "mean" (default), "median", or "mode"
 
     Returns
     -------
-    Tidy DataFrame, one row per drivetrain present in both `mc_summary`'s "__direct__"
-    entries AND `composition_standard`, crossed with every (components, material)
-    available for that drivetrain, columns:
+    Tidy DataFrame, one row per drivetrain present in both `mc_summary`'s
+    drivetrain-level entries AND `composition_standard`, crossed with every
+    (components, material) available for that drivetrain, columns:
       region, flow, drivetrain, segment ("standard", constant), components, material,
       vehicle_count, composition_value, mass
 
@@ -1694,7 +1733,7 @@ def combine_scalar_mass_standard(
         })
     if skipped:
         print(f"[combine_scalar_mass_standard] WARNING: {len(skipped)} drivetrain(s) have no "
-              f"matching mc_stage03_02_summary '__direct__' entry for scenario={scenario_name!r}, "
+              f"matching mc_stage03_02_summary drivetrain-level entry for scenario={scenario_name!r}, "
               f"period={period}, flow={flow!r} -- treated as zero vehicles/zero mass: {sorted(skipped)}")
 
     if not counts_rows:
