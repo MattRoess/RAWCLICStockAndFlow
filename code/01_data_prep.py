@@ -87,6 +87,7 @@ from src.artifacts import load_many, save_many  # type: ignore
 from src.data_prep import (  # type: ignore
     build_stock_dict,
     clean_export_data,
+    fill_missing_pre_year_history,
     load_remind_scenarios,
     prepare_remind_scenarios,
 )
@@ -190,7 +191,36 @@ def main() -> dict[str, Path]:
         remind_regions=list(p01.remind_regions),
         prefix=p01.prefix,
         remind_technology=list(p01.remind_technology),
+        # [NEW, this round] See params_schema.py's DataPrepParams.norway_iceland_
+        # share_of_neu docstring for the full derivation -- fixes the UKI (UK+Ireland)
+        # region-taxonomy bug found this round for scenarios that provide REMIND's
+        # native EU27/NEU variables (b650, npi25).
+        norway_iceland_share_of_neu=p01.norway_iceland_share_of_neu,
+        # [NEW, this round] Companion fix for ssp2L/ssp2M/ssp1, which have no native
+        # EU27 to use directly -- see params_schema.py's DataPrepParams.uk_ireland_
+        # share_of_eur docstring for the derivation.
+        uk_ireland_share_of_eur=p01.uk_ireland_share_of_eur,
     )
+
+    # -----------------------------------------------------------------------
+    # [NEW, this round] Pre-2015 missing-history fix -- SEPARATE from, and applied
+    # AFTER, the region-scope fix above (that fixes WHICH COUNTRIES are included;
+    # this fixes MISSING YEARS -- see fill_missing_pre_year_history's docstring for
+    # the full "NaN -> 0 -> interpolation-overshoot -> wrong backcast" chain this
+    # resolves for ssp2L/ssp2M/ssp1). Operates on the FULL scenario_map (needs the
+    # donor scenarios -- b650, npi25 -- already present and already region-scope-
+    # corrected), so this has to run after prepare_remind_scenarios returns, not
+    # inside it. `scenario_df` is re-derived from the UPDATED scenario_map afterward,
+    # in case `p01.scenario` itself is one of the patched (target) scenarios.
+    # -----------------------------------------------------------------------
+    scenario_map = fill_missing_pre_year_history(
+        scenario_map=scenario_map,
+        target_scenarios=p01.pre2015_history_target_scenarios,
+        donor_scenarios=p01.pre2015_history_donor_scenarios,
+        splice_year=p01.pre2015_history_splice_year,
+        method=p01.pre2015_history_method,
+    )
+    scenario_df = scenario_map[p01.scenario].copy()
 
     # -----------------------------------------------------------------------
     # EU vehicle export/import data

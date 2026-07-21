@@ -145,6 +145,14 @@ def prepare_remind_scenarios(
     remind_regions: list[str],
     prefix: str,
     remind_technology: list[str],
+    # [NEW, this round] See `params_schema.py`'s `DataPrepParams.norway_iceland_
+    # share_of_neu` for the full derivation and reasoning. Only used inside the new
+    # EU27+NEU branch below.
+    norway_iceland_share_of_neu: float = 0.0,
+    # [NEW, this round] See `params_schema.py`'s `DataPrepParams.uk_ireland_share_
+    # of_eur` for the full derivation. Only used inside the new EUR+NEU (no native
+    # EU27) branch below -- ssp2L/ssp2M/ssp1's taxonomy.
+    uk_ireland_share_of_eur: float = 0.0,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """
     Reshape every scenario's wide REMIND table into a tidy long table, and return both
@@ -153,6 +161,45 @@ def prepare_remind_scenarios(
     REMIND's `Variable` strings encode a taxonomy path separated by "|":
         Stock|Transport|Pass|Road|LDV|<vehicle_type>|<vehicle_class>|<size>|<class_detail>|<technology>
     `melt_and_expand` splits that path into named columns.
+
+    [FIXED, this round -- REGION-TAXONOMY BUG, confirmed against real data] `remind_
+    regions` summing (the `overlap` branch below) was, until this round, the ONLY path
+    used for scenarios matching any of those 10 codes (b650, npi25) -- and one of
+    those 10, `"UKI"`, is REMIND-EU's COMBINED UK+Ireland region (no finer split
+    exists). This silently included the UK in the "EU" total for every scenario using
+    this path, confirmed against real ACEA fleet data: REMIND's total was 9-22% higher
+    than the real EU27-without-UK fleet, every year 2005-2020, a systematic bias, not
+    noise (see `params_schema.py`'s `remind_regions` docstring for the exact numbers).
+
+    THE FIX: TWO new, preferred branches, checked before the old `remind_regions`-
+    summing path:
+      1. If the raw file provides REMIND's own native `"EU27"` AND `"NEU"` variables
+         (confirmed present for b650 and npi25): use `EU27 + norway_iceland_share_of_
+         neu * NEU`. `EU27` is REMIND's own pre-built aggregate (correctly excludes
+         the UK, includes Ireland -- no ambiguity, not an estimate).
+      2. [NEW, this round] If the raw file provides native `"EUR"` AND `"NEU"` but NO
+         native `"EU27"` (confirmed true for ssp2L/ssp2M/ssp1 -- a completely
+         different, coarser 12-region taxonomy with no sub-region or EU27 breakdown
+         at all): use `EUR * (1 - uk_ireland_share_of_eur) + norway_iceland_share_of_
+         neu * NEU` instead. Confirmed directly: this taxonomy's `"EUR"` is NOT EU27
+         -- it's the SAME "all of Europe incl. UK+Ireland" scope as b650/npi25's own
+         native `"EUR"` (within ~1% of it, every year checked). Since b650/npi25
+         uniquely provide both native `EUR` and native `EU27` simultaneously, the
+         UK+Ireland SHARE of `EUR` can be measured directly from them and reused here,
+         where no native `EU27` exists to check against directly -- see `params_
+         schema.py`'s `uk_ireland_share_of_eur` field for the exact derivation.
+
+    Both branches preserve REMIND's own SCENARIO-SPECIFIC transition dynamics for
+    Norway/Iceland (via `NEU`) rather than substituting a static real-world number,
+    which would throw away exactly the BEV-transition-speed information those
+    countries are valuable for.
+
+    The OLD `remind_regions`-summing path (`overlap` branch) is UNCHANGED and remains
+    the fallback for any scenario that does NOT provide a native `"EU27"`/`"EUR"`+
+    `"NEU"` pair -- still has the UKI limitation for such scenarios, since no better
+    fix is available without REMIND providing a finer regional breakdown for them too.
+    The plain `"EUR"`-only fallback branch (no adjustment at all, for a hypothetical
+    scenario with `"EUR"` but no `"NEU"` to work with) is also unchanged.
     """
 
     def melt_and_expand(df: pd.DataFrame) -> pd.DataFrame:
@@ -204,7 +251,68 @@ def prepare_remind_scenarios(
         regions_in_df = set(df["Region"].dropna().astype(str).unique())
         overlap = regions_in_df.intersection(set(remind_regions))
 
-        # [FIXED, resolves H2] region_filter is computed fresh for THIS scenario, every
+        # [NEW, this round, CHECKED FIRST -- see this function's docstring above for
+        # the full "why" and the real-data derivation]. Preferred over the `overlap`
+        # branch below whenever available: correctly excludes the UK (via REMIND's
+        # own native EU27 aggregate) and approximately includes Norway+Iceland (via a
+        # real-data-derived share of REMIND's NEU bucket), instead of summing
+        # `remind_regions` (which includes UKI = UK+Ireland combined).
+        if {"EU27", "NEU"}.issubset(regions_in_df):
+            df_filt = df[
+                (df["Region"].astype(str).isin(["EU27", "NEU"]))
+                & (df["Variable"].astype(str).str.startswith(prefix))
+            ].copy()
+            df_long = melt_and_expand(df_filt)
+
+            # Scale ONLY the NEU rows by the Norway+Iceland share; EU27 rows are left
+            # untouched (already the correct, exact UK-free EU total). Both then get
+            # relabeled to the SAME "EUR" tag, so `build_stock_dict`'s later
+            # `groupby(["year", "Region", "technology"])["value"].sum()` sums
+            # `EU27 + norway_iceland_share_of_neu * NEU` together automatically --
+            # producing exactly the target formula with no further changes needed
+            # downstream, and no separate "EUR" fallback-aggregation step required
+            # (build_stock_dict's own EUR-fallback block is simply never triggered
+            # for these scenarios, since an "EUR" key already exists from this point).
+            is_neu = df_long["Region"].astype(str) == "NEU"
+            df_long.loc[is_neu, "value"] = (
+                df_long.loc[is_neu, "value"] * norway_iceland_share_of_neu
+            )
+            df_long["Region"] = "EUR"
+
+            df_long = df_long[df_long["technology"].isin(remind_technology)].copy()
+            scenario_map[name] = df_long
+            continue
+
+        # [NEW, this round -- companion to the branch above] ssp2L/ssp2M/ssp1's own
+        # coarser 12-region taxonomy: native "EUR" (confirmed = "all of Europe incl.
+        # UK+Ireland", NOT EU27 -- see this function's docstring) + native "NEU", but
+        # NO native "EU27" to use directly. Approximates EU27 by subtracting the
+        # UK+Ireland share (measured from b650/npi25, where both EUR and EU27 are
+        # available to compare directly) from THIS scenario's own "EUR".
+        elif {"EUR", "NEU"}.issubset(regions_in_df) and "EU27" not in regions_in_df:
+            df_filt = df[
+                (df["Region"].astype(str).isin(["EUR", "NEU"]))
+                & (df["Variable"].astype(str).str.startswith(prefix))
+            ].copy()
+            df_long = melt_and_expand(df_filt)
+
+            # EUR rows: scale DOWN by (1 - uk_ireland_share_of_eur) to approximate
+            # EU27. NEU rows: scale by norway_iceland_share_of_neu, same as the branch
+            # above. Both relabeled to "EUR" so build_stock_dict's groupby-sum adds
+            # them together automatically -- same mechanism as the EU27+NEU branch.
+            is_eur = df_long["Region"].astype(str) == "EUR"
+            is_neu = df_long["Region"].astype(str) == "NEU"
+            df_long.loc[is_eur, "value"] = (
+                df_long.loc[is_eur, "value"] * (1.0 - uk_ireland_share_of_eur)
+            )
+            df_long.loc[is_neu, "value"] = (
+                df_long.loc[is_neu, "value"] * norway_iceland_share_of_neu
+            )
+            df_long["Region"] = "EUR"
+
+            df_long = df_long[df_long["technology"].isin(remind_technology)].copy()
+            scenario_map[name] = df_long
+            continue
         # iteration -- no value can leak in from a previous scenario. A scenario whose
         # data matches neither condition now raises immediately (loud, at the point of
         # the actual ambiguity) instead of silently reusing an unrelated filter.
@@ -231,6 +339,140 @@ def prepare_remind_scenarios(
 
     scenario_df = scenario_map[scenario].copy()
     return scenario_df, scenario_map
+
+
+def fill_missing_pre_year_history(
+    scenario_map: dict[str, pd.DataFrame],
+    target_scenarios: tuple[str, ...],
+    donor_scenarios: tuple[str, ...],
+    splice_year: int,
+    method: str = "donor_scenario_average",
+) -> dict[str, pd.DataFrame]:
+    """
+    [NEW, this round] Patch the pre-2015 missing-history problem in ssp2L/ssp2M/ssp1
+    -- see `params_schema.py`'s `pre2015_history_method` field docstring for the full
+    background (the NaN -> 0 -> interpolation-overshoot -> wrong backcast chain this
+    fixes) and WHY this is deliberately a separate step from `prepare_remind_scenarios`
+    above (that function fixes REGIONAL SCOPE -- which countries are included; this
+    function fixes MISSING YEARS -- a completely independent problem that happens to
+    affect the same three scenarios). Called AFTER `prepare_remind_scenarios`, on its
+    full `scenario_map` output, in `01_data_prep.py`'s `main()`.
+
+    Operates PER-DRIVETRAIN (matches on `technology`, not just a scaled total) --
+    preserves the real historical drivetrain mix (e.g. near-zero BEV before ~2011,
+    Liquids dominance) rather than distorting it with a single blanket scale factor.
+
+    For every `target` in `target_scenarios`: rows with `year < splice_year` are
+    DROPPED (they're the NaN-derived garbage this function exists to replace) and
+    REPLACED with rows built from `donor_scenarios`, per `method`. Rows with
+    `year >= splice_year` are returned completely UNCHANGED -- this function never
+    touches a target scenario's own real data, only fills the gap before it.
+
+    Parameters
+    ----------
+    scenario_map : the FULL dict returned by `prepare_remind_scenarios` (needs every
+        donor scenario to already be present and already region-scope-corrected --
+        i.e. call this AFTER, not instead of, `prepare_remind_scenarios`)
+    target_scenarios, donor_scenarios, splice_year : see `params_schema.py`'s
+        `pre2015_history_target_scenarios` / `_donor_scenarios` / `_splice_year`
+    method : dispatch key -- see [EXTENSION POINT] below
+
+    Returns
+    -------
+    A NEW dict (does not mutate `scenario_map`) -- untouched scenarios (anything not
+    in `target_scenarios`) are included by reference, unchanged.
+
+    [EXTENSION POINT] To add a different method later (e.g. the user's own
+    alternative idea from this round: fit a parameterized function to a set of
+    reference values instead of splicing in another scenario's real data), add a new
+    `elif method == "your_new_name":` branch below that returns the same shape
+    (a dict of tidy long-format DataFrames, same columns as `prepare_remind_
+    scenarios`'s output), then add `"your_new_name"` to `params_schema.py`'s
+    `_KNOWN_PRE2015_METHODS` set and set `pre2015_history_method` to it. Nothing
+    else in the pipeline needs to change -- this function's caller
+    (`01_data_prep.py`) only ever sees the returned dict, never which method
+    produced it.
+    """
+    if method == "donor_scenario_average":
+        # Combine every donor's data and average by (year, Region, technology) --
+        # with only b650/npi25 as donors today this is a simple 2-scenario mean, but
+        # written to generalize to any number of donors. Only years BEFORE
+        # splice_year are kept from this average; the donors' own >= splice_year data
+        # is irrelevant here (each target scenario keeps ITS OWN real data for those
+        # years, not the donors').
+        donor_frames = [scenario_map[d] for d in donor_scenarios if d in scenario_map]
+        missing_donors = set(donor_scenarios) - set(scenario_map)
+        if missing_donors:
+            raise KeyError(
+                f"fill_missing_pre_year_history: donor scenario(s) {sorted(missing_donors)} "
+                f"not found in scenario_map -- was prepare_remind_scenarios run with "
+                f"these in remind_scenario_files?"
+            )
+        # [FIXED, caught by this round's own end-to-end test against real files --
+        # NOT a hypothetical] Each donor's raw data has MULTIPLE rows per (year,
+        # Region, technology) -- separate rows for different vehicle size/class
+        # sub-categories that all roll up under the same top-level `technology` label
+        # (exactly why `build_stock_dict` itself does `.groupby([...])["value"].sum()`,
+        # not `.mean()`, to get a real total). The first version of this function
+        # skipped that per-donor summing step and averaged the RAW sub-rows directly
+        # across both donors combined -- silently UNDERCOUNTING (e.g. dividing a
+        # technology's true total by the number of sub-rows x number of donors,
+        # instead of by just the number of donors). Caught immediately by comparing
+        # the spliced 2005 Liquids value against the already-known real b650 number
+        # (~232M) -- the bug's output was ~16.7M, off by more than 10x. Fixed: sum
+        # WITHIN each donor's own (year, Region, technology) first, THEN average
+        # those per-donor TOTALS across donors -- two separate, ordered steps, not
+        # one combined groupby.
+        donor_totals_per_scenario = [
+            frame.groupby(["year", "Region", "technology"], as_index=False)["value"].sum()
+            for frame in donor_frames
+        ]
+        donor_combined = pd.concat(donor_totals_per_scenario, ignore_index=True)
+        donor_pre = donor_combined[donor_combined["year"] < splice_year]
+        donor_avg = (
+            donor_pre.groupby(["year", "Region", "technology"], as_index=False)["value"].mean()
+        )
+    else:
+        # See this function's [EXTENSION POINT] note above for how to add a new
+        # method -- this branch intentionally raises rather than silently falling
+        # back to a default, so an unrecognized method is caught immediately here
+        # rather than producing a confusing downstream symptom.
+        raise ValueError(
+            f"fill_missing_pre_year_history: method={method!r} not implemented. "
+            f"Known methods: ['donor_scenario_average']. See this function's "
+            f"[EXTENSION POINT] docstring note to add a new one."
+        )
+
+    result: dict[str, pd.DataFrame] = dict(scenario_map)
+    for target in target_scenarios:
+        if target not in result:
+            continue
+        target_df = result[target]
+        target_kept = target_df[target_df["year"] >= splice_year].copy()
+
+        # Build the spliced-in rows with the SAME columns `prepare_remind_scenarios`
+        # produces, so downstream code (`build_stock_dict`, which only actually reads
+        # year/Region/technology/value, but other callers may read more) sees a
+        # consistent schema regardless of whether a row came from this scenario's own
+        # real data or was spliced in. Metadata columns that don't have a real
+        # per-row meaning for spliced data (sector, transport_type, mode,
+        # vehicle_type, vehicle_class, size, class_detail) are left as `pd.NA` rather
+        # than copied from a donor -- copying them would misleadingly imply this
+        # scenario's OWN raw REMIND file had that level of taxonomy detail for these
+        # years, when in fact the entire row is a substitute.
+        spliced = donor_avg.copy()
+        spliced["Model"] = "SPLICED"
+        spliced["Scenario"] = target
+        spliced["Variable"] = (
+            f"[spliced from {'+'.join(donor_scenarios)} average, pre-{splice_year}]"
+        )
+        spliced["Unit"] = "million"
+        for col in ["sector", "transport_type", "mode", "vehicle_type", "vehicle_class", "size", "class_detail"]:
+            spliced[col] = pd.NA
+
+        result[target] = pd.concat([spliced, target_kept], ignore_index=True)
+
+    return result
 
 
 def canonicalize_country_names(series: pd.Series) -> pd.Series:
@@ -409,6 +651,14 @@ def build_stock_dict(
         frame["stock"] = frame["stock"].interpolate(method=stock_interpolation_method).clip(lower=0)
         stock_dict[(region, tech)] = frame
 
+    # [NOTE, this round] For scenarios that went through `prepare_remind_scenarios`'s
+    # new EU27+NEU branch (b650, npi25), `scenario_df` already has every row labeled
+    # `Region="EUR"` (the correct, UK-free, Norway/Iceland-approximated total) -- so
+    # `any(key[0] == "EUR" ...)` is already True and this ENTIRE fallback block is
+    # skipped for them, same as it always was for the "EUR"-native-fallback scenarios.
+    # This block still fires, unchanged, ONLY for a scenario using the OLD `remind_
+    # regions`-summing path (i.e. one with none of EU27/NEU/EUR available at all) --
+    # see `prepare_remind_scenarios`'s docstring for the full picture.
     if not any(key[0] == "EUR" for key in stock_dict):
         eur_sum: dict[tuple[str, str], pd.DataFrame] = {}
         for (region, technology), frame in stock_dict.items():

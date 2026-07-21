@@ -89,6 +89,13 @@ _DESCRIPTIONS: dict[str, str] = {
     "eu_countries": "EU country list used for regional aggregation.",
     "remind_regions": "REMIND model region codes mapped into this analysis.",
     "remind_technology": "Drivetrain categories as labeled in REMIND scenario output.",
+    "norway_iceland_share_of_neu": "Real-data-derived share of REMIND's 'NEU' region "
+        "attributed to Norway+Iceland (11.39%, from 2024 stock figures) -- part of "
+        "this round's UKI region-taxonomy fix; see params_schema.py's field docstring.",
+    "uk_ireland_share_of_eur": "REMIND-derived share of the native 'EUR' region "
+        "attributed to UK+Ireland (11.93%, measured from b650/npi25's own EUR-vs-EU27 "
+        "gap) -- used to approximate EU27 for scenarios with no native EU27 variable "
+        "(ssp2L/ssp2M/ssp1); see params_schema.py's field docstring.",
     "target_technology": "Drivetrain categories used by this model's outputs.",
     "lifetime_by_drv": "Weibull lifetime parameters (shape_k, scale_lambda) per drivetrain.",
     "lifetime_override_by_drv": "Optional manual override window per drivetrain (None = disabled).",

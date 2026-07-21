@@ -48,7 +48,7 @@ ALL_DRIVETRAINS: list[str] = [
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DataPrepParams:
-    scenario: str = "b650"
+    scenario: str = "npi25"
     scenario_list: tuple[str, ...] = ("b650", "npi25", "ssp2L", "ssp2M", "ssp1")
 
     remind_scenario_files: dict[str, tuple[str, str]] = field(default_factory=lambda: {
@@ -98,9 +98,155 @@ class DataPrepParams:
         "SK", "SI", "ES", "SE",
     )
 
+    # [BUG FOUND, this round -- NOT YET FIXED BY THIS FIELD ALONE, see `data_prep.py`'s
+    # `prepare_remind_scenarios` for the actual fix] `remind_regions` was, until this
+    # round, used to build the EU total for EVERY scenario by SUMMING these 10 REMIND-EU
+    # sub-region codes. Confirmed directly against the raw `.mif` files: `"UKI"` is
+    # REMIND-EU's combined UK+Ireland region -- there is NO finer breakdown available
+    # that separates the two. Summing this list therefore silently included the UK in
+    # every "EU" stock total, for every scenario using this list, this whole time.
+    # Verified against real ACEA fleet data (b650/npi25, 2005-2020): including UKI made
+    # REMIND's total stock 9-22% higher than the real EU27-without-UK fleet, every year
+    # (see EVmodel_review_consolidated.md for the full year-by-year comparison) -- NOT
+    # noise, a systematic, one-directional bias of a magnitude in the same ballpark as
+    # the earlier-diagnosed "modeled fleet-wide inflow is ~2x the real ~13.5M/year"
+    # finding, and very likely a meaningful contributor to it.
+    #
+    # THE FIX (implemented in `data_prep.py`, not here): for scenarios whose raw file
+    # provides REMIND's own NATIVE `"EU27"` variable (confirmed present for both b650
+    # and npi25) -- which by definition excludes the UK and includes Ireland, no manual
+    # sub-region splitting needed -- `prepare_remind_scenarios` now uses that directly
+    # instead of summing `remind_regions`. `remind_regions` itself is UNCHANGED (still
+    # `UKI` and all) and is KEPT as the fallback path for any scenario that does NOT
+    # provide a native `"EU27"` variable -- see `norway_iceland_share_of_neu` below for
+    # the other half of this fix (EU27 alone is missing Norway/Iceland).
     remind_regions: tuple[str, ...] = ("DEU", "ECE", "ECS", "ENC", "ESC", "ESW", "EWN", "FRA", "UKI", "NEN")
     remind_technology: tuple[str, ...] = ("BEV", "Hybrid", "Liquids", "Gases", "FCEV")
     target_technology: tuple[str, ...] = ("BEV", "HEV", "PHEV", "Petrol", "Diesel")
+
+    # [NEW, this round] The other half of the UKI fix above. REMIND's native `"EU27"`
+    # variable correctly excludes the UK -- but it ALSO excludes Norway and Iceland
+    # (neither is an EU member), even though this project's target scope everywhere
+    # else is `EU27+NO+IS` (see e.g. `clean_export_data`'s EEA handling). Neither
+    # Norway nor Iceland is reported as its own REMIND region at any resolution in
+    # these files -- confirmed directly: the finest available bucket containing them is
+    # `"NEU"` ("Non-EU Europe"), which ALSO bundles in Switzerland and, going by its
+    # size (~27.5M vehicles in 2024, far more than Switzerland's real ~4.7M fleet alone
+    # could account for), very likely other non-EU European countries too (Turkey and/or
+    # Balkan states are the plausible candidates, unconfirmed -- REMIND provides no
+    # further breakdown).
+    #
+    # DERIVATION of this ratio (real, external data, provided directly by the user this
+    # round -- NOT estimated or looked up by Claude):
+    #   Norway real stock,  2024: 2,880,879 vehicles
+    #   Iceland real stock, 2024:   249,032 vehicles
+    #   REMIND `NEU` stock, 2024: 27.486M (b650; REMIND reports 2020/2025 only --
+    #                              linearly interpolated to 2024 for a same-year
+    #                              comparison; npi25's NEU is nearly identical)
+    #   norway_share  = 2.880879 / 27.486 = 0.1048  (10.48%)
+    #   iceland_share = 0.249032 / 27.486 = 0.0091  ( 0.91%)
+    #   combined      = 0.1048 + 0.0091  = 0.1139   (11.39%)
+    #
+    # USAGE: `EU27_plus_NO_IS(t) = EU27_native(t) + norway_iceland_share_of_neu *
+    # NEU_native(t)`, for every year `t` -- both `EU27_native` and `NEU_native` are
+    # REMIND's OWN scenario-varying trajectories, so Norway/Iceland's BEV-transition
+    # SPEED still moves with whatever that scenario assumes for the whole `NEU` region
+    # (the reason this approach was chosen over substituting a static real-world
+    # number: Norway's aggressive, scenario-relevant EV-adoption dynamics are exactly
+    # what would be lost by that alternative) -- only their absolute SIZE is anchored
+    # to real data, via this one fixed ratio.
+    #
+    # KNOWN LIMITATION, confirmed and accepted as a deliberate simplification (not a
+    # hidden assumption): this ratio is held CONSTANT from 2024 through
+    # `end_year_model` (2070). In reality Norway/Iceland's share of whatever else is
+    # bundled into `NEU` could drift over that horizon in either direction -- there is
+    # no way to track that drift with the data available (REMIND provides no finer
+    # breakdown of `NEU`, and no scenario-specific projection exists for Norway/Iceland
+    # alone). A single fixed ratio is the most defensible choice available, not a
+    # claim that the true share won't change.
+    norway_iceland_share_of_neu: float = 0.1139
+
+    # [NEW, this round] Companion to `norway_iceland_share_of_neu` above -- fixes the
+    # SAME underlying UKI issue for `ssp2L`/`ssp2M`/`ssp1`, which use a COMPLETELY
+    # DIFFERENT, coarser 12-region REMIND taxonomy (`CAZ, CHA, EUR, IND, JPN, LAM, MEA,
+    # NEU, OAS, REF, SSA, USA, World`) -- confirmed directly: no `EU27`, no `UKI`, no
+    # sub-region codes at all, only a single `"EUR"` variable and a separate `"NEU"`.
+    #
+    # Confirmed `"EUR"` in THIS taxonomy is NOT EU27 -- it is the SAME "all of Europe
+    # incl. UK+Ireland" scope as b650/npi25's own native `"EUR"` variable (within ~1%
+    # of it, every year checked: 2015 244.5M vs. 242.4M, 2020 261.7M vs. 259.3M). Since
+    # b650/npi25 uniquely provide BOTH native `"EUR"` and native `"EU27"`
+    # simultaneously, the UK+Ireland SHARE of `"EUR"` can be measured directly from
+    # them and reused here, where no native `EU27` exists to check against directly:
+    #   b650:  2005 12.47%, 2010 11.72%, 2015 11.74%, 2020 11.69%
+    #   npi25: 2005 12.52%, 2010 11.77%, 2015 11.78%, 2020 11.77%
+    #   mean of all 8:  0.1193  (11.93%) -- stabilizes closer to ~11.7-11.8% from 2010
+    #   onward; 2005 is a mild outlier pulling the overall mean up slightly. The full,
+    #   un-cherry-picked mean is used here rather than excluding 2005.
+    #
+    # USAGE (see `data_prep.py`'s `prepare_remind_scenarios`): for a scenario with
+    # native `"EUR"`+`"NEU"` but NO native `"EU27"` --
+    #   EU27_plus_NO_IS(t) = EUR_native(t) * (1 - uk_ireland_share_of_eur)
+    #                        + norway_iceland_share_of_neu * NEU_native(t)
+    # Same constant-ratio limitation as `norway_iceland_share_of_neu` above: held fixed
+    # across the whole 1975-2070 horizon, not a claim that the true UK+Ireland share of
+    # "all of Europe" won't drift over that time.
+    uk_ireland_share_of_eur: float = 0.1193
+
+    # ---------------------------------------------------------------------------
+    # [NEW, this round] PRE-2015 MISSING HISTORY -- separate problem from the UKI
+    # region-scope fix above, though related: confirmed directly against the raw
+    # files that ssp2L/ssp2M/ssp1 report NaN for every technology, every region, in
+    # 2005 and 2010 -- real data only starts at 2015. Left as-is, this NaN silently
+    # became `0.0` under `.groupby().sum()`'s default behavior, then got interpolated
+    # (cubic/pchip) across a `0 -> 0 -> real_value` jump -- producing wild overshoot
+    # artifacts (confirmed for Liquids: a multi-hundred-million-vehicle spike) that
+    # then fed a WRONG `stock0` into `build_backcast_state`'s pre-t0 cohort
+    # reconstruction ("the backwards simulation of the stock gets out of hand", per
+    # the user's own description this round).
+    #
+    # THE CHOSEN FIX (confirmed with the user, current best approach -- explicitly
+    # expected to possibly change later, hence `pre2015_history_method` below being
+    # its own field rather than this being hardcoded as the only option): for years
+    # before `pre2015_history_splice_year`, SPLICE IN the real historical trajectory
+    # already available from `pre2015_history_donor_scenarios` (b650/npi25 -- both
+    # have genuine, non-NaN REMIND-EU data back to 2005, and -- since this round's UKI
+    # fix -- are now on the SAME EU27+NO+IS scope as ssp2L/ssp2M/ssp1, so the splice
+    # seam is small: checked directly, all three land within ~1% of each other at
+    # 2015). Per-DRIVETRAIN, not just per-total -- preserves the real historical
+    # drivetrain mix (e.g. near-zero BEV before ~2011), not just a scaled total.
+    #
+    # [EXTENSION POINT] `pre2015_history_method` exists SPECIFICALLY so a future
+    # change of approach -- e.g. the user's own alternative idea, floated this round:
+    # fitting a parameterized function to some reference values, rather than splicing
+    # in another scenario's real data -- is a NEW METHOD NAME plus a new branch in
+    # `data_prep.py`'s `fill_missing_pre_year_history` dispatch, not a rewrite of the
+    # surrounding pipeline. See that function's docstring for exactly where to add one.
+    pre2015_history_method: str = "donor_scenario_average"
+
+    # Which scenarios have the pre-2015 gap and need patching. Explicit opt-in list
+    # (not auto-detected from which years are NaN) so it's always clear from reading
+    # params_schema.py, without re-inspecting raw files, exactly which scenarios this
+    # affects.
+    pre2015_history_target_scenarios: tuple[str, ...] = ("ssp2L", "ssp2M", "ssp1")
+
+    # Which scenarios' real historical data to splice in, averaged together
+    # (currently only meaningful for `pre2015_history_method="donor_scenario_average"`
+    # -- see that method's docstring in data_prep.py for exactly how the average is
+    # computed). b650 and npi25 chosen because they're the only two scenarios with
+    # genuine non-NaN REMIND-EU data before 2015, and -- since this round's UKI fix --
+    # are on the same EU27+NO+IS scope as the scenarios being patched.
+    pre2015_history_donor_scenarios: tuple[str, ...] = ("b650", "npi25")
+
+    # The cutover year: every year >= this uses the target scenario's OWN real data,
+    # unchanged; every year < this uses the donor(s)' spliced-in history instead.
+    # Confirmed directly against the raw files (2015 is the first non-NaN year for
+    # ssp2L/ssp2M/ssp1, every technology, every region) -- not a tunable "how much
+    # history do we want" knob, this is set to match where the real data gap actually
+    # ends.
+    pre2015_history_splice_year: int = 2015
+    # ---------------------------------------------------------------------------
+
     target_class_detail: tuple[str, ...] = (
         "Large Car and SUV", "Van", "Compact Car", "Midsize Car", "Mini Car", "Subcompact Car",
     )
@@ -147,6 +293,50 @@ class DataPrepParams:
             )
         if self.scenario not in self.scenario_list:
             issues.append(f"data_prep.scenario={self.scenario!r} is not in scenario_list.")
+        if not (0.0 <= self.norway_iceland_share_of_neu < 1.0):
+            issues.append(
+                f"data_prep.norway_iceland_share_of_neu={self.norway_iceland_share_of_neu!r} "
+                f"must be in [0.0, 1.0) -- it's a share of REMIND's 'NEU' region, not a "
+                f"percentage (0.1139, not 11.39)."
+            )
+        if not (0.0 <= self.uk_ireland_share_of_eur < 1.0):
+            issues.append(
+                f"data_prep.uk_ireland_share_of_eur={self.uk_ireland_share_of_eur!r} "
+                f"must be in [0.0, 1.0) -- it's a share of REMIND's 'EUR' region, not a "
+                f"percentage (0.1193, not 11.93)."
+            )
+        _KNOWN_PRE2015_METHODS = {"donor_scenario_average"}
+        if self.pre2015_history_method not in _KNOWN_PRE2015_METHODS:
+            issues.append(
+                f"data_prep.pre2015_history_method={self.pre2015_history_method!r} is "
+                f"not one of {sorted(_KNOWN_PRE2015_METHODS)} -- if you've added a new "
+                f"method to data_prep.py's fill_missing_pre_year_history, add its name "
+                f"here too."
+            )
+        if self.pre2015_history_method == "donor_scenario_average" and not self.pre2015_history_donor_scenarios:
+            issues.append(
+                "data_prep.pre2015_history_donor_scenarios is empty -- "
+                "pre2015_history_method='donor_scenario_average' needs at least one."
+            )
+        missing_donors = set(self.pre2015_history_donor_scenarios) - set(self.scenario_list)
+        if missing_donors:
+            issues.append(
+                f"data_prep.pre2015_history_donor_scenarios contains scenario(s) not "
+                f"in scenario_list: {sorted(missing_donors)}."
+            )
+        missing_targets = set(self.pre2015_history_target_scenarios) - set(self.scenario_list)
+        if missing_targets:
+            issues.append(
+                f"data_prep.pre2015_history_target_scenarios contains scenario(s) not "
+                f"in scenario_list: {sorted(missing_targets)}."
+            )
+        overlap_donor_target = set(self.pre2015_history_donor_scenarios) & set(self.pre2015_history_target_scenarios)
+        if overlap_donor_target:
+            issues.append(
+                f"data_prep.pre2015_history_donor_scenarios and _target_scenarios "
+                f"overlap ({sorted(overlap_donor_target)}) -- a scenario can't donate "
+                f"history to itself."
+            )
         if self.export_min_year >= self.export_max_year_exclusive:
             issues.append("data_prep: export_min_year must be strictly before export_max_year_exclusive.")
         if len(self.eu_countries_iso2) != len(self.eu_countries):
@@ -1306,7 +1496,7 @@ class MaterialsParams:
     #   "both"             -- compute both of the above.
     # One of "period", "annual", "both" (validated).
 
-    materials_mc_n_draws: int = 20_000
+    materials_mc_n_draws: int = 200_000
     # [NEW] Number of Monte Carlo draws for the MATERIALS-stage combination (vehicle-
     # count bootstrap x composition bootstrap). Deliberately INDEPENDENT of
     # `monte_carlo.n_draws` (stage 03_02's own resolution, 200,000 by default) -- since
@@ -1417,7 +1607,7 @@ class MonteCarloParams:
     monte_carlo.py` for the generic sampling machinery this drives).
     """
     enabled: bool = True  # MC
-    n_draws: int = 20000
+    n_draws: int = 200000
     seed: int | None = 42
 
     # [NEW] The full stock-and-flow uncertainty analysis (`mc_stockflow_uncertainty.py`)
@@ -1425,7 +1615,7 @@ class MonteCarloParams:
     # stage-02-level drivetrain simultaneously. Kept SEPARATE from `n_draws` above
     # (which the lightweight single-parameter demo in 02_stockdriven.py uses) so
     # enabling that quick demo never accidentally triggers a 200,000-draw run.
-    stockflow_n_draws: int = 20_000
+    stockflow_n_draws: int = 200_000
     stockflow_seed: int | None = 42
     # Placeholder relative spreads for the uncertainty distributions -- NOT derived
     # from any real uncertainty estimate yet (no such estimate has been provided).
