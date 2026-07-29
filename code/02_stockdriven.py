@@ -150,6 +150,37 @@ and an end cutoff. Same single-point-of-truth propagation to stage 03 as
 `flows_df["inflow"]`, never recompute it). See `stockflow_model.py` and
 `params_schema.py`'s `StockFlowParams.hard_zero_inflow_until_year_by_drv` for the
 full mechanism.
+
+[NEW, this round] inflow_mode_by_drv / inflow_phaseout_by_drv -- 3-way inflow
+resolution policy, and the new "inflow_phaseout" mechanism
+--------------------------------------------------------------------------------------
+`params.stock_flow.inflow_mode_by_drv` selects, per drivetrain, one of three ways
+this stage resolves that drivetrain's annual inflow (see `StockFlowParams.
+inflow_mode_by_drv`'s own docstring in params_schema.py for the full rationale):
+  - "remind_literal"  -- track REMIND's target as closely as possible: forces
+                         negative_inflow_policy="clip_to_target" and disables both
+                         hard_zero overrides for this drivetrain.
+  - "remind_soft"     -- (default for every drivetrain not listed) today's existing
+                         behavior, unchanged: the global negative_inflow_policy plus
+                         this drivetrain's own hard_zero_inflow_from_year_by_drv /
+                         hard_zero_inflow_until_year_by_drv overrides.
+  - "inflow_phaseout"  -- [NEW MECHANISM] from `inflow_phaseout_by_drv[drivetrain]`'s
+                         start year onward (until that drivetrain's own hard-zero
+                         cutoff, if any), inflow is capped at a maximum SHARE of that
+                         year's TOTAL EU inflow across every other drivetrain, instead
+                         of being solved as REMIND's residual -- stock becomes a pure
+                         OUTPUT of natural Weibull attrition on however much inflow the
+                         cap allowed in. Implemented below as a genuine TWO-PASS
+                         computation per section (deterministic and Monte Carlo each
+                         have their own two/three-pass block): pass 1 learns every
+                         drivetrain's own NATURAL (uncapped) inflow; a later pass
+                         re-runs only the "inflow_phaseout" drivetrains with the
+                         computed cap applied. This guarantees the cap computation
+                         never depends on the order drivetrains happen to be visited
+                         in, even when two phaseout drivetrains are active at once.
+Default `{"Liquids": "remind_soft"}` (in params_schema.py) is BYTE-IDENTICAL to
+today's actual behavior -- nothing changes for any drivetrain unless its
+`inflow_mode_by_drv` entry is edited to `"remind_literal"` or `"inflow_phaseout"`.
 """
 
 from __future__ import annotations
@@ -225,6 +256,7 @@ from src.cohort_flow_mc import resolve_lifetime_spread, sample_relative_triangul
 def plot_flows_by_drivetrain(
     matrices_by_key: dict[tuple[str, str], dict[str, pd.DataFrame]],
     region: str = "EUR",
+    label_by_drv: dict[str, str] | None = None,
 ) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
     """
     The direct visual for the core mechanism of THIS stage: inflow (top, can go
@@ -232,6 +264,15 @@ def plot_flows_by_drivetrain(
     (bottom, stacked), per drivetrain in `region`. A negative dip in the top panel is
     exactly a negative-inflow year; a nonzero orange band in the bottom panel is
     "out_excess" from the "clip_to_target" policy (always zero under "report_only").
+
+    `label_by_drv`: [NEW] optional {drivetrain: plain-language phrase describing
+    what's actually governing its inflow this run}, built by `main()` via
+    `_describe_inflow_behavior()`. When supplied, each legend entry reads
+    "{drivetrain} -- {phrase}" (e.g. "Liquids -- capped at 10% of everyone else's
+    inflow, starting 2035, forced to zero from 2050") instead of just the bare
+    drivetrain name -- so which real-world rule is active for a given line is
+    readable directly off the chart, with no need to check params_schema.py.
+    `None` (default) preserves the old bare-name-only labels.
 
     [DISPLAY-ONLY FIX, this round] The first plotted year is t0+1, not t0. Confirmed
     directly in `src/stockflow_model.py`'s `_run_cohort_recurrence`: its loop is
@@ -255,10 +296,19 @@ def plot_flows_by_drivetrain(
         drivetrain = key[1]
         flows = matrices_by_key[key]["flows_df"].iloc[1:]  # drop t0 -- see docstring
         color = colors[i % len(colors)]
-        ax_in.plot(flows.index, flows["inflow"], color=color, linewidth=1.6, label=drivetrain)
+        tag = label_by_drv.get(drivetrain, "") if label_by_drv else ""
+        label = f"{drivetrain} ({tag})" if tag else drivetrain
+        # [FIXED, this round] Plot the FLOORED value (never below 0 -- real new
+        # registrations can't be negative), not the raw residual. The raw
+        # residual can dip negative before a hard-zero year kicks in (see
+        # stockflow_model.py's docstring) -- that's a real, deliberate part of
+        # the underlying data/model and is NOT changed here, only what this one
+        # display draws. `matrices_by_key["flows_df"]["inflow"]` itself, the
+        # saved artifact stage 03 reads, is untouched.
+        ax_in.plot(flows.index, flows["inflow"].clip(lower=0.0), color=color, linewidth=1.6, label=label)
 
     ax_in.axhline(0, color="black", linewidth=0.8, linestyle="-")
-    ax_in.set_title(f"Annual inflow (new registrations) by drivetrain ({region})", fontsize=12)
+    ax_in.set_title(f"Annual inflow by drivetrain ({region})", fontsize=12)
     ax_in.set_ylabel("Inflow [million/year]")
     ax_in.grid(True, linestyle="--", alpha=0.3)
     ax_in.spines["top"].set_visible(False)
@@ -273,11 +323,29 @@ def plot_flows_by_drivetrain(
     if focus_drv is not None:
         focus_key = next(k for k in keys if k[1] == focus_drv)
         flows = matrices_by_key[focus_key]["flows_df"].iloc[1:]  # drop t0 -- see docstring
-        ax_out.stackplot(
-            flows.index, flows["out_survival"], flows["out_excess"],
-            labels=["out_survival", "out_excess"], colors=["#4a7fb5", "#e0793c"],
-        )
-        ax_out.set_title(f"Outflow breakdown for '{focus_drv}' (largest total outflow in {region})", fontsize=12)
+        # [FIXED, this round] "out_excess" is exactly 0 for every year whenever
+        # negative_inflow_policy="report_only" (the default) -- it only becomes
+        # nonzero under "clip_to_target". Previously always listed in the
+        # legend regardless, so the legend showed an orange entry that could
+        # never actually appear on the chart -- confusing ("where is the
+        # orange?"). Now: only plot/label out_excess as its own stacked layer
+        # if it's ever actually nonzero this run; otherwise just show
+        # out_survival alone, with no leftover legend entry for a layer that
+        # isn't there.
+        has_excess = bool((flows["out_excess"].abs() > 1e-9).any())
+        if has_excess:
+            ax_out.stackplot(
+                flows.index, flows["out_survival"], flows["out_excess"],
+                labels=["out_survival", "out_excess"], colors=["#4a7fb5", "#e0793c"],
+            )
+            title_note = ""
+        else:
+            ax_out.stackplot(
+                flows.index, flows["out_survival"],
+                labels=["out_survival"], colors=["#4a7fb5"],
+            )
+            title_note = " (out_excess=0)"
+        ax_out.set_title(f"Outflow breakdown: {focus_drv}{title_note}", fontsize=12)
     ax_out.set_xlabel("Year")
     ax_out.set_ylabel("Outflow [million/year]")
     ax_out.grid(True, linestyle="--", alpha=0.3)
@@ -285,7 +353,7 @@ def plot_flows_by_drivetrain(
     ax_out.spines["right"].set_visible(False)
     ax_out.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
 
-    plt.tight_layout(rect=[0, 0, 0.82, 1])
+    plt.tight_layout(rect=[0, 0, 0.88, 1])
     return fig, (ax_in, ax_out)
 
 
@@ -325,6 +393,14 @@ def plot_stock_vs_target(
     MATH_MODELS.md §2.3 -- under "report_only", the modeled line visibly drifts above
     target after a negative-inflow year; under "clip_to_target", the two lines overlap
     exactly at every point.
+
+    [SHORTENED, this round -- the previous version repeated a full sentence for
+    every single drivetrain, making the legend unreadably long] Solid = what the
+    simulation actually uses. Dotted = REMIND's original number, reference only,
+    never used once a hard-zero/phase-out override is active. Said ONCE, in the
+    title, instead of twice per drivetrain -- the legend itself just lists
+    drivetrain names (solid) plus one shared "REMIND reference" entry for every
+    dotted line, so it stays short no matter how many drivetrains are plotted.
     """
     keys = [k for k in matrices_by_key if k[0] == region]
     fig, ax = plt.subplots(figsize=(11, 6))
@@ -336,18 +412,92 @@ def plot_stock_vs_target(
         modeled = mats["stock_t_tau_df"].sum(axis=1)
         target = mats["diag_df"]["target_stock"].reindex(modeled.index)
         color = colors[i % len(colors)]
-        ax.plot(modeled.index, modeled.values, color=color, linewidth=1.6, label=f"{drivetrain} (modeled)")
-        ax.plot(target.index, target.values, color=color, linewidth=1.2, linestyle=":", label=f"{drivetrain} (target)")
+        ax.plot(modeled.index, modeled.values, color=color, linewidth=1.6, label=drivetrain)
+        ax.plot(target.index, target.values, color=color, linewidth=1.2, linestyle=":")
 
-    ax.set_title(f"Modeled stock vs. prescribed target ({region})", fontsize=12)
+    # One shared proxy entry for every dotted "reference" line, instead of
+    # repeating "REMIND's original number" once per drivetrain.
+    ax.plot([], [], color="gray", linewidth=1.2, linestyle=":", label="REMIND reference (not used)")
+
+    ax.set_title(f"Modeled stock vs. target ({region}): solid = used, dotted = REMIND reference", fontsize=12)
     ax.set_xlabel("Year")
     ax.set_ylabel("Stock [million]")
     ax.grid(True, linestyle="--", alpha=0.3)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
-    plt.tight_layout(rect=[0, 0, 0.82, 1])
+    plt.tight_layout(rect=[0, 0, 0.88, 1])
     return fig, ax
+
+
+def _resolve_inflow_mode_settings(
+    drivetrain: str,
+    mode_by_drv: dict[str, str],
+    default_negative_inflow_policy: str,
+    hard_zero_from_by_drv: dict[str, int],
+    hard_zero_until_by_drv: dict[str, int],
+) -> tuple[str, str, int | None, int | None]:
+    """
+    [NEW] Resolve `inflow_mode_by_drv`'s 3-way choice for one drivetrain into the
+    concrete (negative_inflow_policy, hard_zero_from, hard_zero_until) settings for
+    PASS 1 of the two-pass computation (deterministic and Monte Carlo both use this
+    same resolution). See `StockFlowParams.inflow_mode_by_drv`'s docstring in
+    params_schema.py for the full rationale behind each mode.
+
+    "inflow_phaseout" is deliberately treated identically to "remind_soft" for pass
+    1 -- pass 1 exists ONLY to learn every drivetrain's own NATURAL (uncapped)
+    inflow, including other "inflow_phaseout" drivetrains, so the cap computation
+    (done afterward, from pass-1 results) never depends on which phaseout
+    drivetrain happens to be visited first.
+
+    Returns `(mode, negative_inflow_policy, hard_zero_from_year, hard_zero_until_year)`.
+    """
+    mode = mode_by_drv.get(drivetrain, "remind_soft")
+    if mode == "remind_literal":
+        return mode, "clip_to_target", None, None
+    return mode, default_negative_inflow_policy, hard_zero_from_by_drv.get(drivetrain), hard_zero_until_by_drv.get(drivetrain)
+
+
+def _describe_inflow_behavior(
+    drivetrain: str,
+    mode_by_drv: dict[str, str],
+    hard_zero_from_by_drv: dict[str, int],
+    hard_zero_until_by_drv: dict[str, int],
+    phaseout_by_drv: dict[str, tuple[int, float]],
+) -> str:
+    """
+    [SHORTENED, this round -- the original full-sentence version made legends
+    unreadably long and was cut] Returns a SHORT tag for one drivetrain's
+    legend entry, or "" if nothing special is happening to it (a drivetrain
+    with no tag just follows REMIND's target directly -- the ordinary case,
+    not worth calling out on every single line). Only drivetrains with an
+    actual exception (a hard-zero override or a phase-out cap) get a tag at
+    all -- this is what keeps the legend short: most drivetrains show up as a
+    bare name, only the ones that matter get annotated.
+    """
+    mode = mode_by_drv.get(drivetrain, "remind_soft")
+    hz_from = hard_zero_from_by_drv.get(drivetrain)
+    hz_until = hard_zero_until_by_drv.get(drivetrain)
+
+    # [REWORDED, this round] "0 from {year}" read as "the line visibly drops to
+    # 0 exactly at {year}" -- misleading whenever the floored value already sat
+    # at 0 earlier for other reasons (the ordinary case). "guaranteed" makes
+    # clear this is a floor/rule that holds from that year on, not necessarily
+    # a visible change at that exact year.
+    if mode == "inflow_phaseout" and drivetrain in phaseout_by_drv:
+        start_year, max_share = phaseout_by_drv[drivetrain]
+        tag = f"cap {max_share:.0%}→{start_year}"
+        if hz_from is not None:
+            tag += f", guaranteed 0 from {hz_from}"
+        return tag
+
+    if hz_from is not None and hz_until is not None:
+        return f"guaranteed 0 before {hz_until} & from {hz_from}"
+    if hz_from is not None:
+        return f"guaranteed 0 from {hz_from}"
+    if hz_until is not None:
+        return f"guaranteed 0 before {hz_until}"
+    return ""
 
 
 def main() -> dict[str, Path]:
@@ -387,9 +537,40 @@ def main() -> dict[str, Path]:
     # both are actually consumed by stage 03. Declared under stock_flow for historical
     # reasons; not moved this round since stage 03 isn't fixed yet.
 
+    # [NEW] 3-way per-drivetrain inflow resolution policy -- see
+    # `StockFlowParams.inflow_mode_by_drv`'s own docstring for the full rationale,
+    # and `_resolve_inflow_mode_settings()` above for how it's applied below.
+    # `.get(drivetrain, "remind_soft")` at every call site means a drivetrain not
+    # listed here behaves exactly as it did before this field existed.
+    INFLOW_MODE_BY_DRV = p02.inflow_mode_by_drv
+    # [NEW] Only consulted for a drivetrain whose INFLOW_MODE_BY_DRV entry is
+    # "inflow_phaseout" -- {drivetrain: (phaseout_start_year, max_share_of_total)}.
+    # See StockFlowParams.inflow_phaseout_by_drv's docstring for the cap derivation.
+    INFLOW_PHASEOUT_BY_DRV = p02.inflow_phaseout_by_drv
+    # [NEW] Optional per-drivetrain Monte-Carlo uncertainty on the phase-out cap's
+    # own max_share (deterministic run always uses the point value from
+    # INFLOW_PHASEOUT_BY_DRV -- no uncertainty there, consistent with every other
+    # point estimate in the deterministic path). `getattr` with a `{}` default so
+    # this works whether or not the field exists yet in params_schema.py.
+    INFLOW_PHASEOUT_MAX_SHARE_TRIANGULAR_BY_DRV = getattr(
+        p02, "inflow_phaseout_max_share_triangular_by_drv", {}
+    )
+
     init_max_age = p02.init_max_age
     results_by_key: dict[tuple[str, str], pd.DataFrame] = {}
     matrices_by_key: dict[tuple[str, str], dict[str, pd.DataFrame]] = {}
+
+    # -------------------------------------------------------------------------
+    # [NEW] Two-pass computation, replacing the old single pass, needed to support
+    # "inflow_phaseout" mode. Pass 1 runs EVERY (region, drivetrain) key with its
+    # resolved pass-1 settings (`_resolve_inflow_mode_settings` above) -- for
+    # "remind_soft" and "remind_literal" keys this IS the final result, byte-
+    # identical to the old single-pass loop. Pass 2 re-runs ONLY "inflow_phaseout"
+    # keys, with a computed per-year cap applied, using every OTHER same-region
+    # key's pass-1 NATURAL inflow as the "everyone else" total in the cap formula.
+    # -------------------------------------------------------------------------
+    pass1_state_by_key: dict[tuple[str, str], dict] = {}
+    natural_inflow_by_key: dict[tuple[str, str], dict[int, float]] = {}
 
     for key, df in stock_dict.items():
         region, drivetrain = key
@@ -407,6 +588,10 @@ def main() -> dict[str, Path]:
             init_max_age=init_max_age,
         )
 
+        _mode, pass1_policy, pass1_from, pass1_until = _resolve_inflow_mode_settings(
+            drivetrain, INFLOW_MODE_BY_DRV, negative_inflow_policy,
+            HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV, HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV,
+        )
         out = run_cohort_survival_model(
             stock_series=stock_series,
             model_end_year=model_end_year,
@@ -415,11 +600,64 @@ def main() -> dict[str, Path]:
             base_scale_lambda=base.scale_lambda,
             lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain),
             backcast=backcast,
-            negative_inflow_policy=negative_inflow_policy,
-            hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
-            hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
+            negative_inflow_policy=pass1_policy,
+            hard_zero_inflow_from_year=pass1_from,
+            hard_zero_inflow_until_year=pass1_until,
         )
+        pass1_state_by_key[key] = {
+            "out": out, "backcast": backcast, "base": base, "stock_series": stock_series,
+        }
+        # Natural inflow for the cap formula below -- floored at 0 (a negative
+        # residual isn't a meaningful "share of total inflow" input; this mirrors
+        # the same floor `run_cohort_survival_monte_carlo`'s own
+        # `inflow_applied_by_year` already applies per draw).
+        natural_inflow_by_key[key] = out["flows_df"]["inflow"].clip(lower=0.0).to_dict()
 
+    # --- Pass 2: apply the phase-out cap, only for "inflow_phaseout" keys.
+    for key, df in stock_dict.items():
+        region, drivetrain = key
+        mode = INFLOW_MODE_BY_DRV.get(drivetrain, "remind_soft")
+        if mode != "inflow_phaseout":
+            continue
+        start_year, max_share = INFLOW_PHASEOUT_BY_DRV[drivetrain]
+        hard_zero_year = HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain)
+        own_natural = natural_inflow_by_key[key]
+        other_keys = [k for k in stock_dict if k != key and k[0] == region]
+
+        # cap(t) = other_total(t) * max_share / (1 - max_share) -- the value that
+        # makes this drivetrain's SELF-INCLUSIVE share of the true combined total
+        # equal exactly `max_share`. See StockFlowParams.inflow_phaseout_by_drv's
+        # docstring in params_schema.py for the derivation.
+        override_by_year: dict[int, float] = {}
+        for year, natural_value in own_natural.items():
+            if year < start_year:
+                continue
+            if hard_zero_year is not None and year >= hard_zero_year:
+                continue  # hard_zero wins downstream regardless -- no cap needed
+            other_total = sum(natural_inflow_by_key[ok].get(year, 0.0) for ok in other_keys)
+            cap = other_total * max_share / (1.0 - max_share)
+            if natural_value > cap:
+                override_by_year[year] = cap
+
+        if override_by_year:
+            saved = pass1_state_by_key[key]
+            out = run_cohort_survival_model(
+                stock_series=saved["stock_series"],
+                model_end_year=model_end_year,
+                drivetrain=drivetrain,
+                base_shape_k=saved["base"].shape_k,
+                base_scale_lambda=saved["base"].scale_lambda,
+                lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain),
+                backcast=saved["backcast"],
+                negative_inflow_policy=negative_inflow_policy,
+                hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
+                hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
+                inflow_override_by_year=override_by_year,
+            )
+            pass1_state_by_key[key]["out"] = out
+
+    for key in stock_dict:
+        out = pass1_state_by_key[key]["out"]
         results_by_key[key] = out["results_df"]
         matrices_by_key[key] = {
             "stock_t_tau_df": out["stock_t_tau_df"],
@@ -438,7 +676,7 @@ def main() -> dict[str, Path]:
     fig, ax = plot_stock_vs_target(matrices_by_key, region="EUR")
     fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    fig_path = fig_dir / "02_stock_vs_target_check.png"
+    fig_path = fig_dir / "02_1_stock_vs_target.png"
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     print(f"Saved diagnostic plot: {fig_path}")
 
@@ -446,8 +684,16 @@ def main() -> dict[str, Path]:
     # Diagnostic plot 2: inflow/outflow by drivetrain -- the core mechanism of this
     # stage, including exactly where/how much inflow goes negative.
     # -----------------------------------------------------------------------
-    fig, _ = plot_flows_by_drivetrain(matrices_by_key, region="EUR")
-    fig_path = fig_dir / "02_flows_by_drivetrain_check.png"
+    # [NEW] Plain-language legend labels -- see _describe_inflow_behavior() above.
+    label_by_drv = {
+        drv: _describe_inflow_behavior(
+            drv, INFLOW_MODE_BY_DRV, HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV,
+            HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV, INFLOW_PHASEOUT_BY_DRV,
+        )
+        for drv in {k[1] for k in matrices_by_key}
+    }
+    fig, _ = plot_flows_by_drivetrain(matrices_by_key, region="EUR", label_by_drv=label_by_drv)
+    fig_path = fig_dir / "02_2_inflow_outflow_by_drivetrain.png"
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     print(f"Saved diagnostic plot: {fig_path}")
 
@@ -485,6 +731,14 @@ def main() -> dict[str, Path]:
     # genuinely vary with lifetime uncertainty -- this block now tracks that variation
     # YEAR BY YEAR (not just a single 2070 total) and plots it directly against the
     # deterministic flows chart's own style, so the two are actually comparable.
+    #
+    # [NEW, this round] The same "inflow_phaseout" two-pass idea from the
+    # deterministic loop above applies here too, restructured as THREE passes
+    # (see the block below): pass 1 (natural run, every drivetrain, plus per-draw
+    # cap-uncertainty sampling for phaseout drivetrains), pass 2 (cap + re-run,
+    # phaseout drivetrains only), pass 3 (finalize -- IDENTICAL summarization logic
+    # to the single-pass loop this replaces, just reading from the dict pass 1/2
+    # populated instead of a freshly-computed `result`).
     #
     # Saves the RAW per-draw CUMULATIVE arrays (not the full per-year-per-draw arrays,
     # which would be ~1GB+ at 200,000 draws x 5 drivetrains x 2 metrics x 65 years --
@@ -540,6 +794,22 @@ def main() -> dict[str, Path]:
         # the EU total", not a within-drivetrain sensitivity question.
         sensitivity_input_draws: dict[str, np.ndarray] = {}
 
+        # [NEW] Per-drivetrain state saved from pass 1, needed by pass 2 (cap + rerun)
+        # and pass 3 (finalize) below.
+        mc_result_by_drv: dict[str, dict] = {}
+        mc_scale_lambda_draws_by_drv: dict[str, np.ndarray] = {}
+        mc_stock_target_mult_draws_by_drv: dict[str, np.ndarray] = {}
+        mc_stock_target_draws_by_drv: dict[str, np.ndarray] = {}
+        mc_backcast_state_by_drv: dict[str, dict] = {}
+        mc_max_share_draws_by_drv: dict[str, np.ndarray | None] = {}
+
+        # =====================================================================
+        # PASS 1: natural run for every drivetrain (an "inflow_phaseout"
+        # drivetrain is treated exactly like "remind_soft" here -- see
+        # `_resolve_inflow_mode_settings()` above for the same convention used by
+        # the deterministic loop). Also samples this drivetrain's own per-draw
+        # cap max_share, if it's in "inflow_phaseout" mode.
+        # =====================================================================
         for drivetrain, child_seed, stock_target_child_seed in zip(
             drivetrains_present, child_seeds, stock_target_child_seeds
         ):
@@ -653,15 +923,121 @@ def main() -> dict[str, Path]:
                 shape_k=base.shape_k, scale_lambda=base.scale_lambda,  # point-estimate backcast, shared across draws
                 init_max_age=init_max_age,
             )
+
+            mode, pass1_policy, pass1_from, pass1_until = _resolve_inflow_mode_settings(
+                drivetrain, INFLOW_MODE_BY_DRV, negative_inflow_policy,
+                HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV, HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV,
+            )
+
+            # [NEW] Per-draw uncertainty on the phase-out cap's own max_share --
+            # sampled from the SAME rng stream immediately after scale_lambda_draws,
+            # so re-running with the same Monte Carlo seed reproduces identical
+            # draws for both; non-phaseout drivetrains consume no extra random
+            # numbers at all (regression-safe under the default inflow_mode_by_drv).
+            # Reuses `sample_relative_triangular_scale` (already imported/used
+            # above) by converting the explicit (low, mode, high) triangular into
+            # its point + asymmetric-relative-spread form, rather than assuming a
+            # separate Triangular-sampling API exists.
+            if mode == "inflow_phaseout":
+                point_max_share = INFLOW_PHASEOUT_BY_DRV[drivetrain][1]
+                cap_low, cap_mode, cap_high = INFLOW_PHASEOUT_MAX_SHARE_TRIANGULAR_BY_DRV.get(
+                    drivetrain, (point_max_share, point_max_share, point_max_share)
+                )
+                if cap_mode > 0:
+                    lower_cap_spread = max(0.0, (cap_mode - cap_low) / cap_mode)
+                    upper_cap_spread = max(0.0, (cap_high - cap_mode) / cap_mode)
+                else:
+                    lower_cap_spread = upper_cap_spread = 0.0
+                max_share_draws = sample_relative_triangular_scale(
+                    cap_mode, lower_cap_spread, upper_cap_spread, n_draws, rng
+                )
+            else:
+                max_share_draws = None
+
             result = run_cohort_survival_monte_carlo(
                 stock_series=stock_series, model_end_year=model_end_year, drivetrain=drivetrain,
                 shape_k_draws=np.full(n_draws, base.shape_k), scale_lambda_draws=scale_lambda_draws,
                 lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain), backcast=backcast,
-                negative_inflow_policy=negative_inflow_policy,
-                hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
-                hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
+                negative_inflow_policy=pass1_policy,
+                hard_zero_inflow_from_year=pass1_from,
+                hard_zero_inflow_until_year=pass1_until,
                 stock_target_draws=stock_target_draws,
             )
+            mc_result_by_drv[drivetrain] = result
+            mc_scale_lambda_draws_by_drv[drivetrain] = scale_lambda_draws
+            mc_stock_target_mult_draws_by_drv[drivetrain] = stock_target_mult_draws
+            mc_stock_target_draws_by_drv[drivetrain] = stock_target_draws
+            mc_backcast_state_by_drv[drivetrain] = {
+                "stock_series": stock_series, "backcast": backcast, "base": base,
+            }
+            mc_max_share_draws_by_drv[drivetrain] = max_share_draws
+
+        # =====================================================================
+        # PASS 2: apply the phase-out cap (only for "inflow_phaseout" drivetrains),
+        # using every OTHER drivetrain's pass-1 `inflow_applied_by_year` (already
+        # floored >= 0 per draw -- the Monte Carlo counterpart of the deterministic
+        # loop's `flows_df["inflow"].clip(lower=0.0)`) as the "everyone else" total.
+        # =====================================================================
+        for drivetrain in drivetrains_present:
+            mode = INFLOW_MODE_BY_DRV.get(drivetrain, "remind_soft")
+            if mode != "inflow_phaseout":
+                continue
+            start_year, _point_max_share = INFLOW_PHASEOUT_BY_DRV[drivetrain]
+            hard_zero_year = HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain)
+            own_result = mc_result_by_drv[drivetrain]
+            own_years = list(own_result["t"])
+            own_inflow_by_year = own_result["inflow_applied_by_year"]  # (n_years, n_draws), always >= 0
+            max_share_draws = mc_max_share_draws_by_drv[drivetrain]  # (n_draws,)
+
+            other_drivetrains = [d for d in drivetrains_present if d != drivetrain]
+            override_by_year: dict[int, np.ndarray] = {}
+            for i_year, year in enumerate(own_years):
+                if year < start_year:
+                    continue
+                if hard_zero_year is not None and year >= hard_zero_year:
+                    continue
+                other_total = np.zeros(n_draws, dtype=float)
+                for other_drv in other_drivetrains:
+                    other_result = mc_result_by_drv[other_drv]
+                    other_years = list(other_result["t"])
+                    if year in other_years:
+                        other_total += other_result["inflow_applied_by_year"][other_years.index(year)]
+                cap = other_total * max_share_draws / (1.0 - max_share_draws)
+                natural_value = own_inflow_by_year[i_year]
+                needs_cap = natural_value > cap
+                if np.any(needs_cap):
+                    override_by_year[year] = np.where(needs_cap, cap, natural_value)
+
+            if override_by_year:
+                state = mc_backcast_state_by_drv[drivetrain]
+                scale_lambda_draws = mc_scale_lambda_draws_by_drv[drivetrain]
+                stock_target_draws = mc_stock_target_draws_by_drv[drivetrain]
+                result = run_cohort_survival_monte_carlo(
+                    stock_series=state["stock_series"], model_end_year=model_end_year, drivetrain=drivetrain,
+                    shape_k_draws=np.full(n_draws, state["base"].shape_k), scale_lambda_draws=scale_lambda_draws,
+                    lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain), backcast=state["backcast"],
+                    negative_inflow_policy=negative_inflow_policy,
+                    hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
+                    hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
+                    stock_target_draws=stock_target_draws,
+                    inflow_override_by_year=override_by_year,
+                )
+                mc_result_by_drv[drivetrain] = result
+
+        # =====================================================================
+        # PASS 3: finalize -- IDENTICAL summarization logic to the single-pass
+        # loop this replaces (regression-safe: for every drivetrain in
+        # "remind_soft"/"remind_literal" mode, `mc_result_by_drv[drivetrain]` is
+        # exactly what a single-pass loop would have produced). Only change from
+        # the original: reads `result`/`scale_lambda_draws`/`stock_target_mult_
+        # draws` from the dicts pass 1/2 populated, instead of computing them
+        # inline in this same loop.
+        # =====================================================================
+        for drivetrain in drivetrains_present:
+            result = mc_result_by_drv[drivetrain]
+            scale_lambda_draws = mc_scale_lambda_draws_by_drv[drivetrain]
+            stock_target_mult_draws = mc_stock_target_mult_draws_by_drv[drivetrain]
+
             draws_by_drv[drivetrain] = {
                 "scale_lambda": scale_lambda_draws,
                 "stock_target_mult": stock_target_mult_draws,
@@ -808,7 +1184,7 @@ def main() -> dict[str, Path]:
             sensitivity_df,
             title=f"Sensitivity: EU-total cumulative_out_survival, {headline_period[0]}-{headline_period[1]}",
         )
-        fig_path_tornado = fig_dir / "02_monte_carlo_sensitivity_tornado.png"
+        fig_path_tornado = fig_dir / "02_5_montecarlo_sensitivity.png"
         fig_tornado.savefig(fig_path_tornado, dpi=150, bbox_inches="tight")
         print(f"Saved diagnostic plot: {fig_path_tornado}")
 
@@ -862,63 +1238,59 @@ def main() -> dict[str, Path]:
         ax_out.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
 
         plt.tight_layout(rect=[0, 0, 0.85, 1])
-        fig_path = fig_dir / "02_monte_carlo_flows_over_time.png"
+        fig_path = fig_dir / "02_3_montecarlo_inflow_outflow.png"
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         print(f"Saved diagnostic plot: {fig_path}")
 
         # -----------------------------------------------------------------------
-        # Plot 1b: [NEW] raw residual vs. actually-applied inflow, side by side --
-        # direct answer to "the two ways inflow is now tracked, plotted separately".
-        # Top panel: inflow_raw_by_year_band (unfloored residual -- CAN go negative;
-        # same diagnostic quantity `02_flows_by_drivetrain_check.png` shows for the
-        # deterministic run, just as a Monte Carlo band here). Bottom panel:
-        # inflow_applied_by_year_band (floored per draw before the percentile is
-        # taken -- always >= 0; this is what Plot 1 above uses, and what
-        # `cumulative_inflow` sums). For most drivetrains the two are visually
-        # identical (no negative-residual years ever occur for them); the
-        # difference is only visible for drivetrains that actually hit a
-        # negative-residual year (Liquids, Hybrid, in the run that produced the
-        # figure this was built to explain) -- exactly the years where natural
-        # attrition alone outpaces the falling REMIND target.
+        # Plot 1b: [REORDERED + RETITLED, this round] SECONDARY/reference check
+        # only -- the primary Monte Carlo result is the chart above (Plot 1,
+        # 02_3_montecarlo_inflow_outflow.png). This chart exists ONLY to double-
+        # check the primary result against REMIND's own untouched number, so the
+        # ACTUALLY-USED panel is now shown FIRST (top), and the untouched
+        # REMIND reference is shown SECOND (bottom) -- reading top-to-bottom
+        # matches "what matters most" first, "for reference" second. For most
+        # drivetrains the two panels look identical (no negative-residual years
+        # ever occur for them); they only diverge for a drivetrain that actually
+        # hit a negative-residual year (Liquids, Hybrid here) -- exactly the
+        # years where natural attrition alone outpaces the falling REMIND target.
         # -----------------------------------------------------------------------
-        fig, (ax_raw, ax_applied) = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
+        fig, (ax_used, ax_ref) = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
         for i, drivetrain in enumerate(drivetrains_present):
             color = colors[i % len(colors)]
             rb = summary_by_drv[drivetrain]["inflow_raw_by_year_band"]
             ab = summary_by_drv[drivetrain]["inflow_applied_by_year_band"]
             # Same t0-skip display fix as Plot 1 above -- row 0 is always exactly 0.0.
-            ax_raw.plot(rb["years"][1:], rb["median"][1:], color=color, linewidth=1.6, label=drivetrain)
-            ax_raw.fill_between(rb["years"][1:], rb["p2_5"][1:], rb["p97_5"][1:], color=color, alpha=0.2)
-            ax_applied.plot(ab["years"][1:], ab["median"][1:], color=color, linewidth=1.6, label=drivetrain)
-            ax_applied.fill_between(ab["years"][1:], ab["p2_5"][1:], ab["p97_5"][1:], color=color, alpha=0.2)
+            ax_used.plot(ab["years"][1:], ab["median"][1:], color=color, linewidth=1.6, label=drivetrain)
+            ax_used.fill_between(ab["years"][1:], ab["p2_5"][1:], ab["p97_5"][1:], color=color, alpha=0.2)
+            ax_ref.plot(rb["years"][1:], rb["median"][1:], color=color, linewidth=1.6, label=drivetrain)
+            ax_ref.fill_between(rb["years"][1:], rb["p2_5"][1:], rb["p97_5"][1:], color=color, alpha=0.2)
 
-        ax_raw.axhline(0, color="black", linewidth=0.8)
-        ax_raw.set_title(
-            f"Monte Carlo: RAW residual inflow (target \u2212 remaining_total, can be negative), "
-            f"median + P2.5-P97.5 band (n={n_draws:,})",
+        ax_used.axhline(0, color="black", linewidth=0.8)
+        ax_used.set_title(
+            f"What was actually simulated and used everywhere else (n={n_draws:,})",
             fontsize=11,
         )
-        ax_raw.set_ylabel("Inflow [million/year]")
-        ax_raw.grid(True, linestyle="--", alpha=0.3)
-        ax_raw.spines["top"].set_visible(False)
-        ax_raw.spines["right"].set_visible(False)
-        ax_raw.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+        ax_used.set_ylabel("Inflow [million/year]")
+        ax_used.grid(True, linestyle="--", alpha=0.3)
+        ax_used.spines["top"].set_visible(False)
+        ax_used.spines["right"].set_visible(False)
+        ax_used.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
 
-        ax_applied.axhline(0, color="black", linewidth=0.8)
-        ax_applied.set_title(
-            "Monte Carlo: APPLIED inflow (what was actually simulated, floored at 0 per draw), "
-            "median + P2.5-P97.5 band",
+        ax_ref.axhline(0, color="black", linewidth=0.8)
+        ax_ref.set_title(
+            "REMIND's untouched number, for reference only -- never used downstream",
             fontsize=11,
         )
-        ax_applied.set_xlabel("Year")
-        ax_applied.set_ylabel("Inflow [million/year]")
-        ax_applied.grid(True, linestyle="--", alpha=0.3)
-        ax_applied.spines["top"].set_visible(False)
-        ax_applied.spines["right"].set_visible(False)
-        ax_applied.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
+        ax_ref.set_xlabel("Year")
+        ax_ref.set_ylabel("Inflow [million/year]")
+        ax_ref.grid(True, linestyle="--", alpha=0.3)
+        ax_ref.spines["top"].set_visible(False)
+        ax_ref.spines["right"].set_visible(False)
+        ax_ref.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
 
         plt.tight_layout(rect=[0, 0, 0.85, 1])
-        fig_path_raw_vs_applied = fig_dir / "02_monte_carlo_inflow_raw_vs_applied.png"
+        fig_path_raw_vs_applied = fig_dir / "02_6_reference_only_remind_vs_actual.png"
         fig.savefig(fig_path_raw_vs_applied, dpi=150, bbox_inches="tight")
         print(f"Saved diagnostic plot: {fig_path_raw_vs_applied}")
 
@@ -944,7 +1316,7 @@ def main() -> dict[str, Path]:
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
         plt.tight_layout()
-        fig_path = fig_dir / "02_monte_carlo_cumulative_out_survival.png"
+        fig_path = fig_dir / "02_4_montecarlo_cumulative_totals.png"
         fig.savefig(fig_path, dpi=150, bbox_inches="tight")
         print(f"Saved diagnostic plot: {fig_path}")
 

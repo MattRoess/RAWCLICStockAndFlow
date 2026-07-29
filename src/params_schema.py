@@ -63,7 +63,7 @@ class DataPrepParams:
     end_year_model: int = 2070
     start_year_plotting: int = 2015
     end_year_plotting: int = 2070
-    composition_extend_from_year: int = 2050
+    composition_extend_from_year: int = 2050  # Only used in 04_03 traction motors. Check if still needed
     accelerating_year: int = 2026  # FLAGGED (L2, still open): no cited derivation.
     threshold: float = 1e-4
     prefix: str = "Stock|Transport|Pass|Road|LDV"
@@ -258,14 +258,26 @@ class DataPrepParams:
 
     input_dir: str = "../data/raw/"
     output_dir: str = "../data/processed/"
-    composition_file_name: str = "ELV_2010_2050.xlsx"
-    petrol_composition_file_name: str = "ELVComponent_1990_2050_Petrol.xlsx"
+    # [REMOVED, confirmed dead -- see find_multiple_param_usages.py's project-wide
+    # search output] These two fields fed the OLD version of 04_01, which loaded
+    # the ELV composition workbooks directly by file name. 04_01 was rewritten to
+    # use the newer 36_MonteCarlo_Summary.xlsx-based composition summary +
+    # histogram loader instead -- nothing in the codebase reads these two fields
+    # anymore. Uncomment exactly as-is below if that old direct-workbook-loading
+    # path is ever needed again:
+    # composition_file_name: str = "ELV_2010_2050.xlsx"
+    # petrol_composition_file_name: str = "ELVComponent_1990_2050_Petrol.xlsx"
     export_data_file_name: str = "usedvehicles_v1.2.xlsx"
 
-    sheets: tuple[str, ...] = (
-        "petrolCar_1980_2050", "dieselCar_1980_2050", "BEVCar_1980_2050",
-        "HEVCar_1980_2050", "PHEVCar_1980_2050", "otherCar_1980_2050",
-    )
+    # [REMOVED, confirmed dead -- see find_multiple_param_usages.py's project-wide
+    # search output] The sheet names the OLD version of 04_01 read directly from
+    # the ELV composition workbook (composition_file_name above, before it too was
+    # removed). No longer read anywhere. Uncomment exactly as-is below if that old
+    # direct-workbook-loading path is ever needed again:
+    # sheets: tuple[str, ...] = (
+    #     "petrolCar_1980_2050", "dieselCar_1980_2050", "BEVCar_1980_2050",
+    #     "HEVCar_1980_2050", "PHEVCar_1980_2050", "otherCar_1980_2050",
+    # )
 
     stock_interpolation_method: str = "cubic"  # resolves C3; "cubic" or "pchip"
 
@@ -465,6 +477,168 @@ class StockFlowParams:
     })
 
     negative_inflow_policy: str = "report_only"
+    # -------------------------------------------------------------------------
+    # [PLAIN-LANGUAGE EXPLANATION] This is the ONE global switch -- not per
+    # drivetrain -- for what to do in a year where the math would need a
+    # NEGATIVE number of new cars. That happens when natural scrapping alone
+    # already shrinks the fleet faster than REMIND's own falling target for
+    # that year -- there's no real-world way to "un-scrap" cars to make up the
+    # difference, so something has to give. Two choices:
+    #
+    #   "report_only"     (default) -- do nothing about it. Add ZERO new cars
+    #                       that year, and just let the modeled fleet stay
+    #                       LARGER than REMIND's target from then on. Nothing
+    #                       is corrected -- the mismatch is only ever reported,
+    #                       so you can see it happened, never fixed.
+    #
+    #   "clip_to_target"  -- actively force the modeled fleet size back down to
+    #                       exactly match REMIND's target that year, by
+    #                       removing extra cars from the existing fleet (on top
+    #                       of ordinary scrapping). Nothing is added; instead,
+    #                       something extra is taken away so the numbers line
+    #                       up exactly.
+    #
+    # WHO ACTUALLY USES THIS SWITCH: every drivetrain uses it EXCEPT one
+    # specific case -- a drivetrain whose `inflow_mode_by_drv` (right below) is
+    # set to "remind_literal" ALWAYS behaves as "clip_to_target" for itself, no
+    # matter what this switch says. Every other drivetrain (the "remind_soft"
+    # default below, or any drivetrain not listed in `inflow_mode_by_drv` at
+    # all) simply uses whatever THIS switch says. So to know what one specific
+    # drivetrain actually does, check its `inflow_mode_by_drv` entry FIRST --
+    # only if that says "remind_soft" (or it's not listed at all) does this
+    # switch's value actually matter for it.
+    #
+    # A second, more detailed copy of this same explanation also lives further
+    # below, right before `hard_zero_inflow_from_year_by_drv` -- left in place
+    # rather than deleted, so nothing that was already there is lost.
+    # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # [NEW] Per-drivetrain choice of HOW that drivetrain's inflow gets resolved
+    # against REMIND's prescribed stock target -- three alternatives, agreed
+    # after discussing the Liquids negative-inflow/phantom-inflow issue (see
+    # 02_stockdriven.py's module docstring, "hard_zero_inflow_from_year_by_drv"
+    # section, and stockflow_model.py for the underlying mechanics):
+    #   "remind_literal"   -- track REMIND's target as closely as possible: uses
+    #                         "clip_to_target" (forces stock to match target
+    #                         exactly, even in a negative-residual year) AND
+    #                         disables that drivetrain's hard_zero_inflow_from_
+    #                         year/until_year overrides, if any -- nothing is
+    #                         allowed to deviate from REMIND's own number.
+    #   "remind_soft"      -- (default for every drivetrain not listed here,
+    #                         and the value Liquids already effectively uses
+    #                         today) uses the GLOBAL negative_inflow_policy
+    #                         above (report_only by default) plus that
+    #                         drivetrain's existing hard_zero_inflow_from_year_
+    #                         by_drv/until_year_by_drv overrides, unchanged.
+    #   "inflow_phaseout"  -- [NEW MECHANISM] ignores the REMIND residual for
+    #                         inflow once the phase-out window starts (see
+    #                         inflow_phaseout_by_drv below): inflow is instead
+    #                         capped at a maximum SHARE of that year's TOTAL
+    #                         EU inflow across every other drivetrain, and
+    #                         stock becomes a pure OUTPUT of natural Weibull
+    #                         attrition on however much inflow the cap allowed
+    #                         in -- not back-solved from REMIND's stock number.
+    #                         Requires 02_stockdriven.py to run that drivetrain
+    #                         TWICE (once to learn its own and every other
+    #                         drivetrain's natural inflow, once more with the
+    #                         computed cap applied) -- see that file's main()
+    #                         for the two-pass implementation.
+    # Default `{"Liquids": "remind_soft"}` is BYTE-IDENTICAL to today's actual
+    # behavior (report_only + hard_zero_inflow_from_year_by_drv={"Liquids": 2050}
+    # already gives exactly this). Every drivetrain not present in this dict
+    # also gets "remind_soft" (`.get(drivetrain, "remind_soft")` at the call
+    # site) -- adding this field changes nothing until a value is edited.
+    # -------------------------------------------------------------------------
+    inflow_mode_by_drv: dict[str, str] = field(default_factory=lambda: {
+        "Liquids": "remind_soft",
+    })
+
+    # [NEW] Only consulted for a drivetrain whose inflow_mode_by_drv is
+    # "inflow_phaseout" -- {drivetrain: (phaseout_start_year, max_share_of_total)}.
+    # `max_share_of_total` is that drivetrain's inflow as a fraction of TOTAL EU
+    # inflow across every OTHER active drivetrain that year (e.g. 0.10 == "this
+    # drivetrain's inflow must never exceed 10% of the true combined total that
+    # year, itself included" -- solved algebraically in 02_stockdriven.py as
+    # `cap(t) = other_drivetrains_inflow(t) * max_share / (1 - max_share)`, which
+    # is exactly the value that makes this drivetrain's SELF-INCLUSIVE share of
+    # the true total equal `max_share` -- see that file for the derivation). The
+    # phase-out window's END is still governed by hard_zero_inflow_from_year_
+    # by_drv (unchanged, e.g. Liquids' existing 2050 cutoff) -- this field only
+    # controls the START of capping and the cap's size, not when inflow finally
+    # reaches exactly 0.
+    inflow_phaseout_by_drv: dict[str, tuple[int, float]] = field(default_factory=lambda: {
+        "Liquids": (2035, 0.10),
+    })
+
+    # [NEW] Monte Carlo uncertainty on the phase-out cap's own max_share (only
+    # consulted for a drivetrain whose inflow_mode_by_drv is "inflow_phaseout") --
+    # {drivetrain: (low, mode, high)}, a Triangular distribution. Per-draw: instead
+    # of always using the fixed max_share point value from inflow_phaseout_by_drv
+    # above, each Monte Carlo draw samples its OWN cap ceiling from this triangle,
+    # so the 10% cap itself becomes a range instead of a single hard number. The
+    # deterministic run is unaffected -- it always uses the fixed point value from
+    # inflow_phaseout_by_drv, no uncertainty there, same as every other point
+    # estimate in the deterministic path. A drivetrain missing from this dict falls
+    # back to a degenerate triangle at its own fixed point value (no uncertainty) --
+    # 02_stockdriven.py's Monte Carlo block already does this via
+    # `.get(drivetrain, (point_max_share, point_max_share, point_max_share))`, so
+    # this field can safely stay absent for any inflow_phaseout drivetrain you
+    # haven't given a real range for yet.
+    inflow_phaseout_max_share_triangular_by_drv: dict[str, tuple[float, float, float]] = field(default_factory=lambda: {
+        "Liquids": (0.08, 0.10, 0.15),
+    })
+
+    # -------------------------------------------------------------------------
+    # [DISCUSSION, NOT YET IMPLEMENTED -- recorded here so both of us remember
+    # exactly what was agreed and how it would need to be built, next time this
+    # comes up] STOCK-TARGET UNCERTAINTY -- a genuinely separate question from
+    # every uncertainty field in this class.
+    # -------------------------------------------------------------------------
+    # lifetime_scale_lambda_relative_spread / unknown_whereabouts_share_std /
+    # export_share_std (below) are all about HOW the fleet turns over --
+    # lifetimes, export/unknown-whereabouts splits. NONE of them touch the
+    # actual SIZE of the future fleet: `stock_series` (REMIND's prescribed
+    # target(t)) is read ONCE and used identically, completely unperturbed, for
+    # EVERY Monte Carlo draw in `run_cohort_survival_monte_carlo` (confirmed by
+    # reading stockflow_model.py directly -- there is no sampling of
+    # `stock_series` anywhere in that file, today).
+    #
+    # Real EU fleet numbers are only actually KNOWN up to ~2023 (registration
+    # statistics). From then to `model_end_year` (2070), REMIND's own
+    # prescribed stock trajectory is itself just ONE projection among several
+    # plausible ones -- it should eventually be treated as an uncertain
+    # quantity, not a certainty, the same way lifetime and export-share
+    # assumptions already are.
+    #
+    # AGREED DESIGN, not yet built:
+    #   - A new per-drivetrain relative-spread field, e.g.
+    #     `stock_target_relative_spread_by_drv: dict[str, float]`, defaulting to
+    #     0.0 everywhere (== today's behavior, byte-identical, no perturbation
+    #     -- "if 0 then no uncertainty, but if something else then
+    #     uncertainty", per the agreed framing).
+    #   - Applies UPSTREAM of, and identically regardless of, which of the
+    #     three `inflow_mode_by_drv` policies above is active for that
+    #     drivetrain -- all three consume `target(t)` as their common starting
+    #     point, so a spread on `target(t)` itself is orthogonal to that 3-way
+    #     choice, not a 4th option competing with it.
+    #   - SAME per-draw convention already used for `lifetime_scale_lambda_
+    #     relative_spread` below: ONE multiplier sampled per Monte Carlo draw
+    #     (e.g. Triangular(1-spread, 1, 1+spread)), held CONSTANT across every
+    #     year within that draw, then applied multiplicatively to the whole
+    #     `target(t)` trajectory for that draw -- NOT independently re-sampled
+    #     year by year (a target that wiggles independently every year is not
+    #     physically meaningful; a draw representing "this whole future runs
+    #     X% high/low" is).
+    #   - Rather than guessing a spread percentage out of nothing: the 5 REMIND
+    #     scenario files already used by 01_data_prep.py's
+    #     `remind_scenario_files` (b650, npi25, ssp2L, ssp2M, ssp1) represent 5
+    #     different real projections of the same future. The actual spread
+    #     ACROSS those 5 scenarios, per drivetrain, is a real, empirically-
+    #     grounded way to size `stock_target_relative_spread_by_drv`, rather
+    #     than an assumed statistical distribution pulled from nothing.
+    # NOT YET IMPLEMENTED -- this section only documents the agreed design.
+    # -------------------------------------------------------------------------
     # [NEW] Controls how 02_stockdriven.py's run_cohort_survival_model() handles a year
     # where the residual-inflow formula goes negative (prescribed stock declining faster
     # than natural Weibull attrition explains -- see MATH_MODELS.md 2.3).
@@ -840,6 +1014,48 @@ class StockFlowParams:
                 f"stock_flow.negative_inflow_policy={self.negative_inflow_policy!r} is "
                 f"not one of ['report_only', 'clip_to_target']."
             )
+
+        # [NEW] inflow_mode_by_drv / inflow_phaseout_by_drv consistency checks.
+        valid_inflow_modes = {"remind_literal", "remind_soft", "inflow_phaseout"}
+        for drv, mode in self.inflow_mode_by_drv.items():
+            if mode not in valid_inflow_modes:
+                issues.append(
+                    f"stock_flow.inflow_mode_by_drv[{drv!r}]={mode!r} is not one of "
+                    f"{sorted(valid_inflow_modes)}."
+                )
+            if mode == "inflow_phaseout" and drv not in self.inflow_phaseout_by_drv:
+                issues.append(
+                    f"stock_flow.inflow_mode_by_drv[{drv!r}]='inflow_phaseout' but "
+                    f"'{drv}' has no entry in stock_flow.inflow_phaseout_by_drv."
+                )
+        for drv, phaseout_spec in self.inflow_phaseout_by_drv.items():
+            start_year, max_share = phaseout_spec
+            if not (0.0 < max_share < 1.0):
+                issues.append(
+                    f"stock_flow.inflow_phaseout_by_drv[{drv!r}]'s max_share={max_share} "
+                    f"must be strictly between 0 and 1."
+                )
+            hard_zero_year = self.hard_zero_inflow_from_year_by_drv.get(drv)
+            if hard_zero_year is not None and start_year >= hard_zero_year:
+                issues.append(
+                    f"stock_flow.inflow_phaseout_by_drv[{drv!r}]'s start_year={start_year} "
+                    f"must be strictly before hard_zero_inflow_from_year_by_drv[{drv!r}]="
+                    f"{hard_zero_year} (the phase-out window would be empty or invalid)."
+                )
+
+        # [NEW] inflow_phaseout_max_share_triangular_by_drv consistency checks.
+        for drv, triangular in self.inflow_phaseout_max_share_triangular_by_drv.items():
+            low, mode, high = triangular
+            if not (low <= mode <= high):
+                issues.append(
+                    f"stock_flow.inflow_phaseout_max_share_triangular_by_drv[{drv!r}]="
+                    f"{triangular} must satisfy low <= mode <= high."
+                )
+            if not (0.0 < low < 1.0) or not (0.0 < high < 1.0):
+                issues.append(
+                    f"stock_flow.inflow_phaseout_max_share_triangular_by_drv[{drv!r}]="
+                    f"{triangular} -- low and high must both be strictly between 0 and 1."
+                )
 
         for drv, year in self.hard_zero_inflow_from_year_by_drv.items():
             if drv not in lifetime_drvs:

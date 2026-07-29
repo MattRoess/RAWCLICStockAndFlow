@@ -141,6 +141,19 @@ def _run_cohort_recurrence(
     # same "engine takes pre-realized draws, caller does the sampling from
     # params" convention as `shape_k`/`scale_lambda` above.
     stock_target_draws: np.ndarray | None = None,
+    # [NEW] Optional per-year forced inflow override -- {year: value}, where
+    # `value` is either a plain float (broadcast to every draw) or an
+    # `(n_draws,)` array (a genuinely different forced value per draw, e.g. a
+    # Monte Carlo phase-out cap that itself varies draw-to-draw). For a year
+    # present as a key here, `inflow_applied` is forced to exactly that value
+    # instead of whatever `inflow(t) = target(t) - remaining_total(t)` (plus
+    # `negative_inflow_policy`) would otherwise have computed. `None` (default)
+    # is byte-identical to before this parameter existed. If BOTH this and a
+    # hard_zero override apply to the same year, hard_zero wins (0 always beats
+    # a computed cap) -- see the precedence check in the loop below. The raw
+    # residual is still tracked separately regardless (inflow_pre_hard_zero_
+    # override_by_year/_t), same guarantee as the hard_zero overrides.
+    inflow_override_by_year: dict[int, float | np.ndarray] | None = None,
 ) -> dict[str, Any]:
     """
     THE ONLY PLACE THE COHORT-SURVIVAL MATH IS IMPLEMENTED. `shape_k`/`scale_lambda`
@@ -375,6 +388,20 @@ def _run_cohort_recurrence(
         if hard_zero_active:
             inflow_applied = np.zeros(n_draws, dtype=float)
 
+        # [NEW] Generic per-year forced-inflow override -- checked AFTER hard_zero
+        # so hard_zero always wins if both apply to the same year (defensive; the
+        # two are not expected to overlap in practice, but 0 should always beat a
+        # computed cap if they ever do). `override_value` may be a plain float
+        # (broadcasts to every draw) or an (n_draws,) array (already per-draw).
+        override_active = (
+            not hard_zero_active
+            and inflow_override_by_year is not None
+            and year in inflow_override_by_year
+        )
+        if override_active:
+            override_value = np.asarray(inflow_override_by_year[year], dtype=float)
+            inflow_applied = np.broadcast_to(override_value, (n_draws,)).astype(float).copy()
+
         j_new = np.where(tau_back == year)[0]
         if j_new.size != 1:
             raise ValueError(f"Year {year} not found in tau_back range.")
@@ -393,7 +420,7 @@ def _run_cohort_recurrence(
         this_year_total_outflow = this_year_out_survival + excess_outflow
         cumulative_out_survival += this_year_total_outflow
 
-        inflow_by_year[i_t] = inflow_applied if hard_zero_active else inflow_raw
+        inflow_by_year[i_t] = inflow_applied if (hard_zero_active or override_active) else inflow_raw
         inflow_pre_hard_zero_override_by_year[i_t] = inflow_raw
         inflow_applied_by_year[i_t] = inflow_applied
         out_survival_by_year[i_t] = this_year_total_outflow
@@ -404,7 +431,7 @@ def _run_cohort_recurrence(
             year_out_tau = np.zeros((n_draws, n_cohorts), dtype=float)
             year_out_tau[:, valid] = out_surv
             outflow_surv_t_tau[i_t] = year_out_tau
-            inflow_t[i_t] = inflow_applied if hard_zero_active else inflow_raw
+            inflow_t[i_t] = inflow_applied if (hard_zero_active or override_active) else inflow_raw
             inflow_pre_hard_zero_override_t[i_t] = inflow_raw
             inflow_applied_t[i_t] = inflow_applied
             outflow_surv_t[i_t] = this_year_out_survival
@@ -462,6 +489,9 @@ def run_cohort_survival_model(
     negative_inflow_policy: str = "report_only",
     hard_zero_inflow_from_year: int | None = None,
     hard_zero_inflow_until_year: int | None = None,
+    # [NEW] Passed straight through to `_run_cohort_recurrence`'s parameter of the
+    # same name. `None` (default) preserves byte-identical behavior.
+    inflow_override_by_year: dict[int, float | np.ndarray] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """
     Single deterministic run for ONE (region, drivetrain) key -- a thin wrapper
@@ -497,6 +527,7 @@ def run_cohort_survival_model(
         negative_inflow_policy=negative_inflow_policy, keep_full_history=True,
         hard_zero_inflow_from_year=hard_zero_inflow_from_year,
         hard_zero_inflow_until_year=hard_zero_inflow_until_year,
+        inflow_override_by_year=inflow_override_by_year,
     )
     t, tau_back, stock_t = core["t"], core["tau_back"], core["stock_t"]
     stock_t_tau = core["stock_t_tau"][:, 0, :]
@@ -569,6 +600,11 @@ def run_cohort_survival_monte_carlo(
     # identical behavior to before this parameter existed -- `target` stays the
     # plain deterministic scalar for every year, every draw.
     stock_target_draws: np.ndarray | None = None,
+    # [NEW] Passed straight through to `_run_cohort_recurrence`'s parameter of the
+    # same name -- {year: value}, value a plain float (every draw) or an
+    # (n_draws,) array (genuinely per-draw, e.g. a Monte Carlo phase-out cap).
+    # `None` (default) preserves byte-identical behavior.
+    inflow_override_by_year: dict[int, float | np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Many-draw run for ONE (region, drivetrain) key -- a thin wrapper around the SAME
@@ -631,4 +667,5 @@ def run_cohort_survival_monte_carlo(
         hard_zero_inflow_from_year=hard_zero_inflow_from_year,
         hard_zero_inflow_until_year=hard_zero_inflow_until_year,
         stock_target_draws=stock_target_draws,
+        inflow_override_by_year=inflow_override_by_year,
     )
