@@ -914,6 +914,9 @@ VEHICLE_COUNT_UNIT_SCALE = 1_000_000.0
 # of kg on the mass-by-year figures (per the user's request), without touching any
 # upstream numbers other code might depend on.
 KG_PER_TONNE = 1_000.0
+# kg -> Mt. The standard-vs-segments totals are ~1e8 t, which made matplotlib add a
+# "1e8" offset label that collided with the figure title; in Mt they read as ~100-800.
+KG_PER_MEGATONNE = 1_000_000_000.0
 
 
 def _floor_amount_at_zero(df: pd.DataFrame, context_label: str = "") -> pd.DataFrame:
@@ -2560,6 +2563,80 @@ def plot_scenario_delta_by_drivetrain_and_material(
     plt.close(fig)
 
 
+def plot_standard_vs_segments_boxplot(
+    mc_draws_segments: dict[tuple, np.ndarray],
+    mc_draws_standard: dict[tuple, np.ndarray],
+    drivetrains: list[str],
+    title: str,
+    fig_path: Path,
+) -> None:
+    """
+    Same comparison as `plot_standard_vs_segments_comparison`, drawn as paired
+    BOXPLOTS instead of bars-with-error-bars: for each drivetrain, two boxes side by
+    side -- the 12-SEGMENT path summed over every segment and material, against the
+    drivetrain-level "standard" composition path.
+
+    The bar version shows only median + P2.5/P97.5. A boxplot shows the full shape of
+    each Monte Carlo distribution (median, IQR, whiskers), which is what makes an
+    asymmetric or skewed mismatch between the two paths visible rather than collapsed
+    into three numbers. Aggregation is deliberately identical to the bar version's
+    `_mc_total`, so the two figures cannot disagree.
+    """
+    n_draws_local = next(iter(mc_draws_segments.values())).shape[0] if mc_draws_segments else (
+        next(iter(mc_draws_standard.values())).shape[0] if mc_draws_standard else 0
+    )
+    if not n_draws_local:
+        print(f"[plot_standard_vs_segments_boxplot] no Monte Carlo draws -- skipping {fig_path.name}.")
+        return
+
+    def _mc_total(draws_dict: dict[tuple, np.ndarray], drivetrain: str) -> np.ndarray:
+        total = np.zeros(n_draws_local, dtype=float)
+        for (drv, _seg, _comp, _mat), draws in draws_dict.items():
+            if drv == drivetrain:
+                total = total + draws
+        return total
+
+    labels, seg_data, std_data = [], [], []
+    for drv in drivetrains:
+        seg = _mc_total(mc_draws_segments, drv) / KG_PER_MEGATONNE
+        std = _mc_total(mc_draws_standard, drv) / KG_PER_MEGATONNE
+        if not seg.any() and not std.any():
+            continue
+        labels.append(drv); seg_data.append(seg); std_data.append(std)
+    if not labels:
+        print(f"[plot_standard_vs_segments_boxplot] nothing to plot -- skipping {fig_path.name}.")
+        return
+
+    width, gap = 0.32, 0.06
+    pos = np.arange(len(labels), dtype=float)
+    fig, ax = plt.subplots(figsize=(max(8, 1.6 * len(labels)), 6))
+    for offset, data, color in (
+        (-(width + gap) / 2, seg_data, "#2E86AB"),
+        (+(width + gap) / 2, std_data, "#E67E22"),
+    ):
+        bp = ax.boxplot(data, positions=pos + offset, widths=width, showfliers=False,
+                        patch_artist=True, manage_ticks=False)
+        for patch in bp["boxes"]:
+            patch.set_facecolor(color); patch.set_alpha(0.6)
+        for element in ("medians", "whiskers", "caps"):
+            for artist in bp[element]:
+                artist.set_color("#333333")
+
+    ax.set_xticks(pos); ax.set_xticklabels(labels)
+    ax.set_ylabel("Total mass [Mt]")
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    ax.legend(handles=[
+        plt.Rectangle((0, 0), 1, 1, facecolor="#2E86AB", alpha=0.6, label="12-segment (sum)"),
+        plt.Rectangle((0, 0), 1, 1, facecolor="#E67E22", alpha=0.6, label="standard (drivetrain-level)"),
+    ], loc="upper right", frameon=False, fontsize=9)
+    plt.tight_layout()
+    fig_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_standard_vs_segments_comparison(
     mc_draws_segments: dict[tuple, np.ndarray],
     mc_draws_standard: dict[tuple, np.ndarray],
@@ -2610,8 +2687,8 @@ def plot_standard_vs_segments_comparison(
     segment_median, segment_p2_5, segment_p97_5 = [], [], []
     standard_median, standard_p2_5, standard_p97_5 = [], [], []
     for drv in drivetrains:
-        seg_draws = _mc_total(mc_draws_segments, drv) / KG_PER_TONNE
-        std_draws = _mc_total(mc_draws_standard, drv) / KG_PER_TONNE
+        seg_draws = _mc_total(mc_draws_segments, drv) / KG_PER_MEGATONNE
+        std_draws = _mc_total(mc_draws_standard, drv) / KG_PER_MEGATONNE
         seg_lo, seg_mid, seg_hi = (np.percentile(seg_draws, [2.5, 50, 97.5]) if seg_draws.any() else (0.0, 0.0, 0.0))
         std_lo, std_mid, std_hi = (np.percentile(std_draws, [2.5, 50, 97.5]) if std_draws.any() else (0.0, 0.0, 0.0))
         segment_p2_5.append(seg_lo); segment_median.append(seg_mid); segment_p97_5.append(seg_hi)
@@ -2639,7 +2716,7 @@ def plot_standard_vs_segments_comparison(
 
     ax.set_xticks(x)
     ax.set_xticklabels(drivetrains)
-    ax.set_ylabel("Total mass [t]")
+    ax.set_ylabel("Total mass [Mt]")
     ax.set_title(title, fontsize=12)
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     ax.spines["top"].set_visible(False)
@@ -2899,6 +2976,14 @@ def main() -> dict[str, Any]:
                 title=f"{scenario_name} / {flow}: 12-segment vs. standard composition, "
                       f"{headline_period[0]}-{headline_period[1]}",
                 fig_path=fig_dir / f"04_01_standard_vs_segments_{scenario_name}_{flow}.png",
+            )
+            plot_standard_vs_segments_boxplot(
+                mc_draws_tables_flow[(headline_period, flow)],
+                mc_draws_tables_standard_flow[(headline_period, flow)],
+                list(p04.drivetrains),
+                title=f"{scenario_name} / {flow}: 12-segment vs. standard composition "
+                      f"(distributions), {headline_period[0]}-{headline_period[1]}",
+                fig_path=fig_dir / f"04_01_standard_vs_segments_boxplot_{scenario_name}_{flow}.png",
             )
             print(f"  Saved diagnostic plot: {fig_dir}/04_01_standard_vs_segments_{scenario_name}_{flow}.png")
 

@@ -194,6 +194,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")  # never opens an interactive window -- always saves to file
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 
 def _find_project_root(start: Path) -> Path:
@@ -1048,7 +1049,7 @@ def main() -> dict[str, Path]:
 
         ax_used.axhline(0, color="black", linewidth=0.8)
         ax_used.set_title(
-            f"What was actually simulated and used everywhere else (n={n_draws:,})",
+            f"Adjusted inflow: floored at 0, zero from 2050 -- used downstream (n={n_draws:,})",
             fontsize=11,
         )
         ax_used.set_ylabel("Inflow [million/year]")
@@ -1059,7 +1060,7 @@ def main() -> dict[str, Path]:
 
         ax_ref.axhline(0, color="black", linewidth=0.8)
         ax_ref.set_title(
-            "REMIND's untouched number, for reference only -- never used downstream",
+            "REMIND literal: negative where target falls faster than scrappage",
             fontsize=11,
         )
         ax_ref.set_xlabel("Year")
@@ -1070,7 +1071,7 @@ def main() -> dict[str, Path]:
         ax_ref.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
 
         plt.tight_layout(rect=[0, 0, 0.85, 1])
-        fig_path_raw_vs_applied = fig_dir / "02_6_reference_only_remind_vs_actual.png"
+        fig_path_raw_vs_applied = fig_dir / "02_6_inflow_adjusted_vs_remind_literal.png"
         fig.savefig(fig_path_raw_vs_applied, dpi=150, bbox_inches="tight")
         print(f"Saved diagnostic plot: {fig_path_raw_vs_applied}")
 
@@ -1092,6 +1093,10 @@ def main() -> dict[str, Path]:
             ax.axvline(summ["p2_5"], color="black", linestyle="--", linewidth=1.0, label=f"P2.5={summ['p2_5']:.1f}")
             ax.axvline(summ["p97_5"], color="black", linestyle="--", linewidth=1.0, label=f"P97.5={summ['p97_5']:.1f}")
             ax.set_title(f"{drivetrain}: cumulative out-survival through {model_end_year} (n={n_draws:,})")
+            ax.set_xlabel("Cumulative out-survival [million vehicles]")
+            ax.set_ylabel("Number of draws")
+            # Draw counts are read at a glance -- a dense tick ladder adds nothing.
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
             ax.legend(frameon=False, fontsize=8)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
