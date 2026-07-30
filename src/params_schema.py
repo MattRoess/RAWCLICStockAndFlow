@@ -827,6 +827,100 @@ class StockFlowParams:
     # tune once a real confidence interval for the REMIND projection itself is
     # available. `0.0` (lower=upper=0) for a drivetrain means no stock-target
     # uncertainty for it -- byte-identical to today's behavior for that drivetrain.
+    # [NEW] Treat the per-drivetrain `stock_target_relative_spread` draws above as a
+    # CORRELATED MIX rather than 9 independent perturbations.
+    #
+    # WHY: this stage is stock-driven, so `inflow(t) = target(t) - remaining_total(t)`
+    # -- perturbing a drivetrain's stock target IS perturbing its inflow. Drawing each
+    # drivetrain's multiplier independently (the behavior when this is False) allows a
+    # trial where BEV runs +15% AND Petrol runs +15% simultaneously. That is not a real
+    # uncertainty: a buyer registering a new car picks exactly ONE drivetrain, so if
+    # BEV's share of new registrations comes in high, some other drivetrain's must come
+    # in low. Independence also lets the SUM across drivetrains wander, silently adding
+    # or removing whole vehicles from the European fleet -- an uncertainty nobody
+    # specified, arising purely as an artifact of sampling the parts separately.
+    #
+    # WHAT IT DOES when True: the per-drivetrain multipliers are still drawn from
+    # `stock_target_relative_spread` exactly as before (same distributions, same seeds,
+    # same ramp), but are then RENORMALIZED across drivetrains within each (year, draw)
+    # so the drivetrain targets sum to `total_fleet_relative_spread`'s own shared draw
+    # times the deterministic REMIND total. The mix therefore lies on the simplex --
+    # shares sum to 1 and are mutually negatively correlated -- while total fleet size
+    # becomes its own explicit, separately-controlled axis instead of an accident.
+    #
+    # This is the same sample-then-renormalize construction `03_02_adjustedflows.py`'s
+    # `sample_future_segment_share_inflow_draws` already uses for SEGMENT shares within
+    # a drivetrain, applied one level up, to drivetrain shares within the fleet.
+    #
+    # NOTE ON MARGINALS: renormalizing necessarily shrinks each drivetrain's realized
+    # spread relative to the nominal +/-15%, and shrinks it MOST for whichever
+    # drivetrain currently dominates the fleet. That is the correct behavior, not a
+    # loss of uncertainty: a drivetrain holding 80% of the fleet cannot move far in
+    # share terms without some other drivetrain absorbing the difference, and there is
+    # not enough room elsewhere to absorb it. The freed-up "everything moves together"
+    # component is exactly what `total_fleet_relative_spread` now carries explicitly.
+    #
+    # VERIFIED when this was switched on (2000-draw runs against the independent
+    # baseline, invariants asserted inside the sampling code itself, not just on the
+    # outputs): historic years deviate from the deterministic REMIND target by exactly
+    # 0; post-cutoff the drivetrain targets sum to the intended total to within 6.6e-16
+    # relative; no drivetrain with a zero target ever receives nonzero stock. The
+    # substitution it was built for shows up as intended -- the BEV<->Liquids
+    # correlation of the applied stock-target multiplier moves from about +0.02
+    # (independent sampling: no substitution whatsoever) to about -0.80 in the years
+    # where the two actually compete for the same buyer (2035: 41%/50%; 2040: 68%/25%).
+    #
+    # Setting this back to False restores the pre-existing independent behavior
+    # byte-identically (verified: 45,121 compared values, zero differences).
+    stock_target_correlated_mix: bool = True
+
+    # [NEW] Only consulted when `stock_target_correlated_mix` is True: the relative
+    # spread on TOTAL fleet size (every drivetrain's target scaled together by one
+    # shared per-trial multiplier), as distinct from the drivetrain MIX uncertainty
+    # that `stock_target_relative_spread` now carries. Same `AsymmetricSpread`/plain-
+    # float convention, and the SAME ramp discipline as the per-drivetrain axis: no
+    # uncertainty at all before `stock_target_uncertainty_start_year` (the historic
+    # period is observed data, not a projection), then phased in steadily at
+    # `stock_target_ramp_max_rate_per_year` until that trial's full sampled value is
+    # reached.
+    #
+    # Deliberately much smaller than the 15% mix spread below, for two reasons.
+    #
+    # First, on the substance: how many cars Europe will own is governed by population
+    # and economics, and is considerably more predictable than WHICH drivetrain those
+    # cars are, which is governed by policy and technology deployment.
+    #
+    # Second, and this one is measured rather than assumed -- THIS AXIS IS IN DIRECT
+    # TENSION WITH THE MIX AXIS, so it cannot be sized independently of it. Scaling
+    # every drivetrain together is a perfectly correlated common mode, while the mix is
+    # negatively correlated; the two superimpose, and in any year where ONE drivetrain
+    # dominates the fleet the common mode can overwhelm the substitution entirely.
+    # Measured BEV<->Liquids correlation of the applied multiplier, by this field's
+    # value (2000 draws):
+    #
+    #     spread   2030 (17/75)   2035 (41/50)   2040 (68/25)   2050 (97/2)
+    #     0.00        -0.92          -0.95          -0.96         -0.91
+    #     0.02        -0.35          -0.80          -0.83         -0.16
+    #     0.05        +0.21          -0.28          -0.38         +0.14
+    #
+    # At 0.05 the sign FLIPS POSITIVE in 2030 and 2050 -- the years where Liquids
+    # (75%) and then BEV (97%) dominate -- which would defeat the point of modelling
+    # the mix as a composition at all. 0.02 keeps substitution negative across the
+    # whole horizon while still carrying real total-fleet uncertainty, and is the
+    # calibrated choice for that reason, not a placeholder.
+    #
+    # Set to 0.0 to hold total fleet size exactly at REMIND's own trajectory and make
+    # the mix the only uncertain thing (strongest substitution signal, but treats the
+    # REMIND total-fleet projection as known-exact).
+    #
+    # KNOWN ASYMMETRY: this axis and the per-drivetrain one share
+    # `stock_target_ramp_max_rate_per_year`, and that rate is a cap on percentage
+    # points per year -- so a SMALLER spread reaches its full value SOONER (0.02 ramps
+    # in over ~4 years, the 0.15 mix spread needs ~30). The common mode is therefore
+    # fully present long before the mix uncertainty is, which is why the 2030 column
+    # above degrades fastest. Giving this axis its own ramp rate would decouple them.
+    total_fleet_relative_spread: float | AsymmetricSpread = AsymmetricSpread(lower=0.02, upper=0.02)
+
     stock_target_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
         "Hybrid":   AsymmetricSpread(lower=0.15, upper=0.15),
         "PHEV":     AsymmetricSpread(lower=0.15, upper=0.15),
@@ -987,6 +1081,25 @@ class StockFlowParams:
                     issues += spread.validate(field_name=f"stock_flow.{name}['{drv}']")
                 elif spread < 0:
                     issues.append(f"stock_flow.{name}['{drv}'] = {spread} must be >= 0.")
+
+        # [NEW] `total_fleet_relative_spread` is a SINGLE spread shared by every
+        # drivetrain (not a per-drivetrain mapping), so it validates on its own rather
+        # than in the loop above.
+        if isinstance(self.total_fleet_relative_spread, AsymmetricSpread):
+            issues += self.total_fleet_relative_spread.validate(
+                field_name="stock_flow.total_fleet_relative_spread"
+            )
+        elif self.total_fleet_relative_spread < 0:
+            issues.append(
+                f"stock_flow.total_fleet_relative_spread="
+                f"{self.total_fleet_relative_spread} must be >= 0."
+            )
+
+        if not isinstance(self.stock_target_correlated_mix, bool):
+            issues.append(
+                f"stock_flow.stock_target_correlated_mix="
+                f"{self.stock_target_correlated_mix!r} must be a bool."
+            )
 
         if not isinstance(self.stock_target_uncertainty_start_year, int) or self.stock_target_uncertainty_start_year < 1950:
             issues.append(
@@ -1941,6 +2054,6 @@ class Params:
             "03_02_adjusted_flows": asdict(self.adjusted_flows),
             "03_disaggregation": asdict(self.disaggregation),
             "04_materials": asdict(self.materials),
-            "06_visualization": asdict(self.visualization),
+            "visualization": asdict(self.visualization),
             "monte_carlo": asdict(self.monte_carlo),
         }

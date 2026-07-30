@@ -1288,10 +1288,10 @@ def plot_flows_by_drivetrain_single_scenario(
         style_handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="#888888", alpha=0.3, linewidth=0))
         style_labels.append("95% MC band")
 
-    fig.suptitle(f"{scenario_name}: inflow / outflow by drivetrain", fontsize=14)
-    fig.legend(style_handles, style_labels, loc="upper center", ncol=len(style_handles), frameon=False, bbox_to_anchor=(0.5, 0.98))
+    fig.suptitle(f"{scenario_name}: inflow / outflow by drivetrain", fontsize=14, y=0.99)
+    fig.legend(style_handles, style_labels, loc="upper center", ncol=len(style_handles), frameon=False, bbox_to_anchor=(0.5, 0.93))
 
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    plt.tight_layout(rect=[0, 0, 1, 0.88])
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
     if show:

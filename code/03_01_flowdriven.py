@@ -93,7 +93,7 @@ import src.artifacts as artifacts  # type: ignore
 from src.monte_carlo import (  # type: ignore
     summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
 )
-from src.stockflow_model import build_backcast_state, run_cohort_survival_monte_carlo  # type: ignore
+from src.stockflow_model import run_stage02_cohort_monte_carlo  # type: ignore
 # [NEW] Shared with 02_stockdriven.py and cohort_flow_mc.py's own internal use --
 # same asymmetric-spread resolution + Triangular-bounds logic, reused here for the
 # collected/export/unknown_whereabouts share sampling (see the Monte Carlo block
@@ -622,31 +622,29 @@ def main() -> dict[str, Any]:
     #
     # PER-YEAR BANDS, not just a cumulative endpoint: stage 02 only PERSISTS the
     # cumulative (2070-total) per-draw array (a full per-year-per-draw array would be
-    # ~100MB+ per drivetrain per metric -- too large to pickle by default). To get a
-    # genuine year-by-year uncertainty band here too (matching
-    # `02_monte_carlo_flows_over_time.png`'s style, not just an isolated histogram),
-    # this block RE-RUNS `run_cohort_survival_monte_carlo` using the SAME saved
-    # `scale_lambda` draws (deterministic given the same inputs -- this reproduces
-    # stage 02's per-draw results exactly, without needing to have persisted the large
-    # intermediate array). `src/stockflow_model.py` is what makes this possible: the
-    # exact same function stage 02 uses is now a normal library import here too.
+    # hundreds of MB per drivetrain per metric -- too large to pickle by default). To
+    # get a genuine year-by-year uncertainty band here too, this block re-runs stage
+    # 02's Monte Carlo cohort model in memory.
+    #
+    # IT DOES THAT BY CALLING `stockflow_model.run_stage02_cohort_monte_carlo` -- the
+    # SAME function 02_stockdriven.py calls -- not by reassembling the call locally.
+    # That distinction is the whole point, and it was learned the hard way: while the
+    # sequence was written down in both files it silently diverged three times, because
+    # a re-run missing an argument still returns numbers that look completely fine.
+    #   1. the hard-zero overrides were omitted -> Liquids/Hybrid post-2050 and BEV
+    #      pre-2011 wrong;
+    #   2. `stock_target_draws` was omitted -> none of the stock-target uncertainty
+    #      present at all, measured at up to 20.8% error on per-year inflow, and every
+    #      stock summary reporting std=0 for a genuinely uncertain quantity;
+    #   3. the `inflow_mode_by_drv` resolution and the phase-out cap pass were never
+    #      replicated -- latent only because no drivetrain was configured to use them.
+    # There is now one implementation, so there is nothing here to keep in sync. Add
+    # uncertainty axes or inflow policies to that function and both stages get them.
     #
     # Uncertainty spreads (`collected_share_relative_spread`, `export_share_
     # relative_spread`, `unknown_whereabouts_share_relative_spread`, plus
     # `unknown_share_lifetime_coupling_k`) come from `params.stock_flow` --
     # nothing hardcoded here.
-    #
-    # [FIXED, step 5 of the agreed plan] The `run_cohort_survival_monte_carlo` call
-    # below now also passes `hard_zero_inflow_from_year`/`hard_zero_inflow_until_year`
-    # (from `params.stock_flow`, same `.get(drivetrain)` pattern as
-    # `02_stockdriven.py`'s own MC call) -- previously omitted here, meaning this
-    # block's re-derived per-year `out_survival_by_year` (and the collected/export/
-    # unknown bands built from it) would silently diverge from what stage 02 actually
-    # computed and persisted for Liquids/Hybrid (post-2050 hard zero) and BEV
-    # (pre-2011 hard zero), even though it's regenerated from the SAME saved
-    # scale_lambda draws. See `params_schema.py`'s
-    # `StockFlowParams.hard_zero_inflow_from_year_by_drv`/`hard_zero_inflow_until_
-    # year_by_drv` for the full rationale.
     # -----------------------------------------------------------------------
     if params.monte_carlo.enabled:
         try:
@@ -669,6 +667,79 @@ def main() -> dict[str, Any]:
             # accident of sharing the same raw seed stream.
             drivetrains_present = sorted(mc_stage02.keys())
             child_seeds = rng_seed_seq.spawn(len(drivetrains_present))
+
+            # [FIXED] Reproduce stage 02's Monte Carlo cohort run by CALLING the same
+            # function stage 02 calls, rather than rebuilding the call here.
+            #
+            # WHY: this block needs stage 02's per-YEAR per-draw arrays, which stage 02
+            # cannot persist (hundreds of MB per drivetrain at production draw counts),
+            # so it regenerates them. While that regeneration was assembled locally it
+            # diverged from stage 02 three separate times, every time silently, because
+            # a re-run missing an argument still returns plausible-looking numbers:
+            # the hard-zero overrides, then `stock_target_draws` (measured at up to
+            # 20.8% error on per-year inflow), and the `inflow_mode_by_drv` resolution
+            # plus phase-out cap pass which were never replicated at all.
+            #
+            # `run_stage02_cohort_monte_carlo` owns the entire sequence AND the seed
+            # spawn order, so the results below are stage 02's results by construction
+            # -- not a reconstruction that happens to agree. Anything added to that
+            # function reaches both stages at once.
+            #
+            # The drivetrain LIST indexes the seed blocks, so a mismatch against stage
+            # 02's own list would silently shift every draw. Stage 02 derives it from
+            # `stock_dict`; this stage derives it from the saved draws' keys. Asserted
+            # rather than assumed.
+            _stock_dict_drvs = sorted({drv for (_, drv) in stock_dict.keys()})
+            if _stock_dict_drvs != drivetrains_present:
+                raise ValueError(
+                    f"Drivetrain list mismatch between stage 02's stock_dict "
+                    f"({_stock_dict_drvs}) and the saved Monte Carlo draws "
+                    f"({drivetrains_present}). The Monte Carlo seed blocks are indexed "
+                    f"by this list, so reproducing stage 02's run is only valid when the "
+                    f"two agree -- re-run 02_stockdriven.py to regenerate "
+                    f"'mc_stage02_draws' against the current stock_dict."
+                )
+            stage02_mc = run_stage02_cohort_monte_carlo(
+                stock_dict=stock_dict,
+                drivetrains=drivetrains_present,
+                model_end_year=model_end_year_02,
+                init_max_age=init_max_age,
+                n_draws=n_draws,
+                seed=params.monte_carlo.seed,
+                lifetime_by_drv=p02.lifetime_by_drv,
+                lifetime_override_by_drv=p02.lifetime_override_by_drv,
+                lifetime_scale_lambda_relative_spread=p02.lifetime_scale_lambda_relative_spread,
+                negative_inflow_policy=p02.negative_inflow_policy,
+                hard_zero_inflow_from_year_by_drv=p02.hard_zero_inflow_from_year_by_drv,
+                hard_zero_inflow_until_year_by_drv=p02.hard_zero_inflow_until_year_by_drv,
+                inflow_mode_by_drv=p02.inflow_mode_by_drv,
+                inflow_phaseout_by_drv=p02.inflow_phaseout_by_drv,
+                inflow_phaseout_max_share_triangular_by_drv=getattr(
+                    p02, "inflow_phaseout_max_share_triangular_by_drv", {}
+                ),
+                stock_target_relative_spread=p02.stock_target_relative_spread,
+                stock_target_uncertainty_start_year=p02.stock_target_uncertainty_start_year,
+                stock_target_ramp_max_rate_per_year=p02.stock_target_ramp_max_rate_per_year,
+                stock_target_correlated_mix=p02.stock_target_correlated_mix,
+                total_fleet_relative_spread=p02.total_fleet_relative_spread,
+            )
+            # Guard, not decoration: stage 02 persists its own per-draw `scale_lambda`
+            # and `stock_target_mult`, so if this run did NOT land on the same draws
+            # (changed seed, changed drivetrain list, stale artifact) it is caught here
+            # rather than silently producing bands for a different Monte Carlo universe.
+            for _drv in drivetrains_present:
+                for _key, _got in (
+                    ("scale_lambda", stage02_mc.scale_lambda_draws[_drv]),
+                    ("stock_target_mult", stage02_mc.targets.stock_target_mult_draws[_drv]),
+                ):
+                    _saved = mc_stage02[_drv].get(_key)
+                    if _saved is not None and not np.array_equal(_saved, _got):
+                        raise ValueError(
+                            f"Reproduced {_key!r} draws for {_drv!r} do not match the "
+                            f"ones 02_stockdriven.py saved. The Monte Carlo seed, the "
+                            f"drivetrain list, or a stock_flow parameter changed since "
+                            f"'mc_stage02_draws' was written -- re-run 02_stockdriven.py."
+                        )
 
             per_drivetrain_mc: dict[str, dict[str, np.ndarray]] = {}
             per_drivetrain_band: dict[str, dict[str, dict]] = {}
@@ -766,36 +837,14 @@ def main() -> dict[str, Any]:
                     "cumulative_unknown": cumulative_out_survival * unk_share,
                 }
 
-                # --- per-YEAR split, regenerated from the SAME scale_lambda draws ---
-                base_shape_k = p02.lifetime_by_drv[drivetrain].shape_k
-                stock_series = pd.to_numeric(stock_dict[("EUR", drivetrain)]["stock"], errors="coerce").fillna(0.0)
-                stock_series.index = stock_series.index.astype(int)
-                stock_series = stock_series.sort_index()
-                backcast = build_backcast_state(
-                    stock_series=stock_series, model_end_year=model_end_year_02,
-                    shape_k=base_shape_k, scale_lambda=base_scale_lambda,
-                    init_max_age=init_max_age,
-                )
-                result_02 = run_cohort_survival_monte_carlo(
-                    stock_series=stock_series, model_end_year=model_end_year_02, drivetrain=drivetrain,
-                    shape_k_draws=np.full(n_draws, base_shape_k), scale_lambda_draws=scale_lambda_draws,
-                    lifetime_override=p02.lifetime_override_by_drv.get(drivetrain), backcast=backcast,
-                    negative_inflow_policy=p02.negative_inflow_policy,
-                    # [FIXED, step 5 of the agreed plan] This block RE-RUNS
-                    # run_cohort_survival_monte_carlo to regenerate a per-year band
-                    # from the SAME saved scale_lambda draws -- it's only a faithful
-                    # reproduction of stage 02's own run if EVERY argument that
-                    # affects the cohort trajectory matches, including the hard-zero
-                    # overrides. Without these two, this re-derived out_survival_by_
-                    # year (and the collected/export/unknown bands built from it)
-                    # would silently diverge from what 02_stockdriven.py actually
-                    # computed and persisted for Liquids/Hybrid (post-2050) and BEV
-                    # (pre-2011) -- the exact kind of dragged inconsistency this
-                    # whole plan exists to avoid. Same params.stock_flow fields,
-                    # same .get(drivetrain) pattern, as 02_stockdriven.py's own call.
-                    hard_zero_inflow_from_year=p02.hard_zero_inflow_from_year_by_drv.get(drivetrain),
-                    hard_zero_inflow_until_year=p02.hard_zero_inflow_until_year_by_drv.get(drivetrain),
-                )
+                # --- per-YEAR split, taken from the SHARED stage-02 run above ---
+                # No local re-run any more: `result_02` IS stage 02's own final result
+                # for this drivetrain (post phase-out cap), so every per-year band and
+                # period summary below is built on exactly the arrays stage 02
+                # simulated. This is the line that used to reassemble the call by hand
+                # and drift out of sync.
+                result_02 = stage02_mc.results[drivetrain]
+
                 # (n_years, n_draws) x (n_draws,) broadcasts correctly: each draw's own
                 # share applies to that same draw's every year.
                 out_survival_by_year = result_02["out_survival_by_year"]
@@ -826,10 +875,10 @@ def main() -> dict[str, Any]:
                 }
 
                 # --- [NEW] period-based summaries for this drivetrain ---
-                # `inflow_applied_by_year` was already computed by
-                # `run_cohort_survival_monte_carlo` above (same call, no extra
-                # simulation) but previously discarded here -- now actually used,
-                # giving "cumulative input" at 03_01 too, not just at stage 02.
+                # `inflow_applied_by_year` comes straight from the shared stage-02 run
+                # (no extra simulation) and was previously discarded here -- now
+                # actually used, giving "cumulative input" at 03_01 too, not just at
+                # stage 02.
                 # [FIXED] Was `result_02["inflow_by_year"]` -- the RAW, possibly-
                 # negative residual (see stockflow_model.py's `_run_cohort_
                 # recurrence` docstring), which disagreed with stage 02's own
@@ -847,10 +896,19 @@ def main() -> dict[str, Any]:
                     start, end = period
                     mask = (result_02["t"] >= start) & (result_02["t"] <= end)
                     years_in_period = result_02["t"][mask]
-                    # stock_t: DETERMINISTIC (stage 02's stock-driven paradigm pins it
-                    # to the REMIND target regardless of lifetime draws) -- see
-                    # 02_stockdriven.py's Monte Carlo block for the same convention.
-                    stock_values_in_period = result_02["stock_t"][mask]
+                    # [FIXED] Was `result_02["stock_t"]` -- the PRESCRIBED REMIND
+                    # trajectory, one number per year, identical across every draw, on
+                    # the since-outdated premise that "stage 02's stock-driven paradigm
+                    # pins stock to the REMIND target regardless of lifetime draws".
+                    # That stopped being true when `stock_target_relative_spread` was
+                    # introduced: stock IS uncertain from
+                    # `stock_target_uncertainty_start_year` onward, and stage 02
+                    # simulates it that way. Reporting `stock_t` broadcast across draws
+                    # therefore claimed std=0 for a genuinely uncertain quantity.
+                    # `stock_target_by_year` is the per-draw target actually used each
+                    # year -- equal to `stock_t` broadcast for pre-cutoff years, so the
+                    # historic period reads exactly as before.
+                    stock_by_year_draws = result_02["stock_target_by_year"][mask]  # (n_years, n_draws)
 
                     eu_total_period_sums[period]["cumulative_inflow"] += inflow_period_sums[period]
                     eu_total_period_sums[period]["cumulative_collected"] += collected_period_sums[period]
@@ -862,15 +920,24 @@ def main() -> dict[str, Any]:
                         "cumulative_collected": summarize_distribution(collected_period_sums[period]),
                         "cumulative_export": summarize_distribution(export_period_sums[period]),
                         "cumulative_unknown": summarize_distribution(unknown_period_sums[period]),
+                        # [FIXED] These three were `np.full(n_draws, <scalar>)` -- a
+                        # constant broadcast that reported std=0 and a degenerate
+                        # single-bin histogram for stock. They now summarize the real
+                        # per-draw distribution. For years before the uncertainty cutoff
+                        # every draw still holds the same value, so those years continue
+                        # to report std=0 -- correctly, because there genuinely is no
+                        # uncertainty there, rather than by construction.
                         "stock_end_of_period": summarize_distribution(
-                            np.full(n_draws, stock_values_in_period[-1] if stock_values_in_period.size else np.nan)
+                            stock_by_year_draws[-1] if stock_by_year_draws.size
+                            else np.full(n_draws, np.nan)
                         ),
                         "stock_sum_over_period": summarize_distribution(
-                            np.full(n_draws, stock_values_in_period.sum())
+                            stock_by_year_draws.sum(axis=0) if stock_by_year_draws.size
+                            else np.full(n_draws, np.nan)
                         ),
                         "stock_per_year": {
-                            int(y): summarize_distribution(np.full(n_draws, v))
-                            for y, v in zip(years_in_period, stock_values_in_period)
+                            int(y): summarize_distribution(stock_by_year_draws[i])
+                            for i, y in enumerate(years_in_period)
                         },
                     }
                 per_drivetrain_period_summary[drivetrain] = drv_period_summary

@@ -212,17 +212,17 @@ from src.monte_carlo import (  # type: ignore
     summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
 )
 from src.stockflow_model import (  # type: ignore
-    BackcastState, build_backcast_state,
-    run_cohort_survival_model, run_cohort_survival_monte_carlo,
+    build_backcast_state, run_cohort_survival_model,
+    # [NEW] The whole Monte Carlo cohort orchestration (target sampling + natural run
+    # + phase-out cap) lives in src/ so stage 03_01 reproduces it by CALLING it rather
+    # than re-deriving it -- three silent divergences came from the latter. Same reason
+    # `resolve_inflow_mode_settings` moved out of this file: the deterministic loop
+    # below and both Monte Carlo consumers must resolve the modes identically.
+    resolve_inflow_mode_settings, run_stage02_cohort_monte_carlo,
 )
-# [NEW] Shared with stage 03_02 (via flowdriven_model.py) -- same asymmetric-spread
-# resolution + Triangular-bounds logic, one implementation. See these functions'
-# own docstrings in cohort_flow_mc.py for the full behavior; `resolve_lifetime_spread`
-# accepts a plain float (symmetric), a (lower, upper) tuple, or an
-# `AsymmetricSpread`-like object (anything with `.lower`/`.upper`, e.g.
-# `params_schema.AsymmetricSpread`) -- exactly what `p02.lifetime_scale_lambda_
-# relative_spread[drivetrain]` can now hold.
-from src.cohort_flow_mc import resolve_lifetime_spread, sample_relative_triangular_scale  # type: ignore
+# (The asymmetric-spread resolution and Triangular sampling this stage used to do
+# inline now happen inside `run_stage02_cohort_monte_carlo`, so `cohort_flow_mc` is no
+# longer imported here.)
 
 
 # ---------------------------------------------------------------------------
@@ -430,34 +430,6 @@ def plot_stock_vs_target(
     return fig, ax
 
 
-def _resolve_inflow_mode_settings(
-    drivetrain: str,
-    mode_by_drv: dict[str, str],
-    default_negative_inflow_policy: str,
-    hard_zero_from_by_drv: dict[str, int],
-    hard_zero_until_by_drv: dict[str, int],
-) -> tuple[str, str, int | None, int | None]:
-    """
-    [NEW] Resolve `inflow_mode_by_drv`'s 3-way choice for one drivetrain into the
-    concrete (negative_inflow_policy, hard_zero_from, hard_zero_until) settings for
-    PASS 1 of the two-pass computation (deterministic and Monte Carlo both use this
-    same resolution). See `StockFlowParams.inflow_mode_by_drv`'s docstring in
-    params_schema.py for the full rationale behind each mode.
-
-    "inflow_phaseout" is deliberately treated identically to "remind_soft" for pass
-    1 -- pass 1 exists ONLY to learn every drivetrain's own NATURAL (uncapped)
-    inflow, including other "inflow_phaseout" drivetrains, so the cap computation
-    (done afterward, from pass-1 results) never depends on which phaseout
-    drivetrain happens to be visited first.
-
-    Returns `(mode, negative_inflow_policy, hard_zero_from_year, hard_zero_until_year)`.
-    """
-    mode = mode_by_drv.get(drivetrain, "remind_soft")
-    if mode == "remind_literal":
-        return mode, "clip_to_target", None, None
-    return mode, default_negative_inflow_policy, hard_zero_from_by_drv.get(drivetrain), hard_zero_until_by_drv.get(drivetrain)
-
-
 def _describe_inflow_behavior(
     drivetrain: str,
     mode_by_drv: dict[str, str],
@@ -539,7 +511,7 @@ def main() -> dict[str, Path]:
 
     # [NEW] 3-way per-drivetrain inflow resolution policy -- see
     # `StockFlowParams.inflow_mode_by_drv`'s own docstring for the full rationale,
-    # and `_resolve_inflow_mode_settings()` above for how it's applied below.
+    # and `stockflow_model.resolve_inflow_mode_settings()` for how it's applied below.
     # `.get(drivetrain, "remind_soft")` at every call site means a drivetrain not
     # listed here behaves exactly as it did before this field existed.
     INFLOW_MODE_BY_DRV = p02.inflow_mode_by_drv
@@ -563,7 +535,7 @@ def main() -> dict[str, Path]:
     # -------------------------------------------------------------------------
     # [NEW] Two-pass computation, replacing the old single pass, needed to support
     # "inflow_phaseout" mode. Pass 1 runs EVERY (region, drivetrain) key with its
-    # resolved pass-1 settings (`_resolve_inflow_mode_settings` above) -- for
+    # resolved pass-1 settings (`resolve_inflow_mode_settings`) -- for
     # "remind_soft" and "remind_literal" keys this IS the final result, byte-
     # identical to the old single-pass loop. Pass 2 re-runs ONLY "inflow_phaseout"
     # keys, with a computed per-year cap applied, using every OTHER same-region
@@ -588,7 +560,7 @@ def main() -> dict[str, Path]:
             init_max_age=init_max_age,
         )
 
-        _mode, pass1_policy, pass1_from, pass1_until = _resolve_inflow_mode_settings(
+        _mode, pass1_policy, pass1_from, pass1_until = resolve_inflow_mode_settings(
             drivetrain, INFLOW_MODE_BY_DRV, negative_inflow_policy,
             HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV, HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV,
         )
@@ -751,21 +723,10 @@ def main() -> dict[str, Path]:
     if params.monte_carlo.enabled:
         n_draws = params.monte_carlo.n_draws
         output_periods = params.monte_carlo.output_periods
-        rng_seed_seq = np.random.SeedSequence(params.monte_carlo.seed)
         drivetrains_present = sorted({drv for (_, drv) in stock_dict.keys()})
-        # Each drivetrain gets its own independently-seeded generator (spawned from
-        # the one params.monte_carlo.seed) -- stable under adding/removing
-        # drivetrains, same reasoning as monte_carlo.sample_scalars().
-        child_seeds = rng_seed_seq.spawn(len(drivetrains_present))
-        # [NEW] A SECOND, independent set of child seeds for the new stock-target
-        # uncertainty axis -- `SeedSequence.spawn()` called again returns fresh,
-        # non-overlapping children (not the same ones as `child_seeds` above), so
-        # this genuinely doesn't correlate with or perturb the existing lifetime
-        # draws' reproducibility at all. Kept as its own spawn (rather than reusing
-        # `rng` sequentially within the loop) so this is explicit and independently
-        # seeded per drivetrain, matching this codebase's existing convention of one
-        # spawned seed per distinct uncertainty axis.
-        stock_target_child_seeds = rng_seed_seq.spawn(len(drivetrains_present))
+        # All Monte Carlo seeding now happens inside
+        # `run_stage02_cohort_monte_carlo` (it owns the whole spawn order, which is
+        # what lets stage 03_01 land on identical draws) -- nothing to seed here.
 
         draws_by_drv: dict[str, dict[str, np.ndarray]] = {}
         summary_by_drv: dict[str, dict] = {}
@@ -794,235 +755,54 @@ def main() -> dict[str, Path]:
         # the EU total", not a within-drivetrain sensitivity question.
         sensitivity_input_draws: dict[str, np.ndarray] = {}
 
-        # [NEW] Per-drivetrain state saved from pass 1, needed by pass 2 (cap + rerun)
-        # and pass 3 (finalize) below.
-        mc_result_by_drv: dict[str, dict] = {}
-        mc_scale_lambda_draws_by_drv: dict[str, np.ndarray] = {}
-        mc_stock_target_mult_draws_by_drv: dict[str, np.ndarray] = {}
-        mc_stock_target_draws_by_drv: dict[str, np.ndarray] = {}
-        mc_backcast_state_by_drv: dict[str, dict] = {}
-        mc_max_share_draws_by_drv: dict[str, np.ndarray | None] = {}
+        # (Every `mc_*_by_drv` name below is bound from
+        # `run_stage02_cohort_monte_carlo`'s return value, so none is pre-declared.)
 
         # =====================================================================
-        # PASS 1: natural run for every drivetrain (an "inflow_phaseout"
-        # drivetrain is treated exactly like "remind_soft" here -- see
-        # `_resolve_inflow_mode_settings()` above for the same convention used by
-        # the deterministic loop). Also samples this drivetrain's own per-draw
-        # cap max_share, if it's in "inflow_phaseout" mode.
+        # PASSES 0-2: target sampling, the natural cohort run, and the phase-out cap.
+        #
+        # All of it lives in `stockflow_model.run_stage02_cohort_monte_carlo` rather
+        # than here, because `03_01_flowdriven.py` has to reproduce these results
+        # EXACTLY (it layers its own collected/export/unknown split onto these same
+        # draws, and regenerates the per-year arrays that are too large to persist).
+        # While that sequence was written down in both places it drifted apart three
+        # separate times, silently -- see that function's docstring for the specifics.
+        # It is now written down once. Do not inline any of it back here.
         # =====================================================================
-        for drivetrain, child_seed, stock_target_child_seed in zip(
-            drivetrains_present, child_seeds, stock_target_child_seeds
-        ):
-            rng = np.random.default_rng(child_seed)
-            base = LIFETIME_BY_DRV[drivetrain]
-            # [FIXED] Was: `spread = p02.lifetime_scale_lambda_relative_spread[drivetrain]`
-            # followed by `base.scale_lambda * (1 - spread)` -- broke immediately (a
-            # confusing TypeError from `1 - AsymmetricSpread(...)`) the moment ANY
-            # drivetrain's spread was set to an `AsymmetricSpread` in params_schema.py,
-            # since this stage never unwrapped it. `resolve_lifetime_spread` handles a
-            # plain float (symmetric, old behavior exactly preserved), a (lower, upper)
-            # tuple, or an `AsymmetricSpread` uniformly; `sample_relative_triangular_scale`
-            # builds Triangular(point*(1-lower), point, point*(1+upper)) from the
-            # resolved pair -- same shared logic stage 03_02 already uses.
-            lower_spread, upper_spread = resolve_lifetime_spread(
-                p02.lifetime_scale_lambda_relative_spread, drivetrain, default=(0.0, 0.0)
+        _mc = run_stage02_cohort_monte_carlo(
+            stock_dict=stock_dict,
+            drivetrains=drivetrains_present,
+            model_end_year=model_end_year,
+            init_max_age=init_max_age,
+            n_draws=n_draws,
+            seed=params.monte_carlo.seed,
+            lifetime_by_drv=LIFETIME_BY_DRV,
+            lifetime_override_by_drv=LIFETIME_OVERRIDE_BY_DRV,
+            lifetime_scale_lambda_relative_spread=p02.lifetime_scale_lambda_relative_spread,
+            negative_inflow_policy=negative_inflow_policy,
+            hard_zero_inflow_from_year_by_drv=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV,
+            hard_zero_inflow_until_year_by_drv=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV,
+            inflow_mode_by_drv=INFLOW_MODE_BY_DRV,
+            inflow_phaseout_by_drv=INFLOW_PHASEOUT_BY_DRV,
+            inflow_phaseout_max_share_triangular_by_drv=INFLOW_PHASEOUT_MAX_SHARE_TRIANGULAR_BY_DRV,
+            stock_target_relative_spread=p02.stock_target_relative_spread,
+            stock_target_uncertainty_start_year=p02.stock_target_uncertainty_start_year,
+            stock_target_ramp_max_rate_per_year=p02.stock_target_ramp_max_rate_per_year,
+            stock_target_correlated_mix=p02.stock_target_correlated_mix,
+            total_fleet_relative_spread=p02.total_fleet_relative_spread,
+        )
+        mc_result_by_drv = _mc.results
+        mc_scale_lambda_draws_by_drv = _mc.scale_lambda_draws
+        mc_stock_target_draws_by_drv = _mc.targets.stock_target_draws
+        mc_stock_target_mult_draws_by_drv = _mc.targets.stock_target_mult_draws
+
+        for _drv in drivetrains_present:
+            sensitivity_input_draws[f"{_drv}_scale_lambda"] = _mc.scale_lambda_draws[_drv]
+            sensitivity_input_draws[f"{_drv}_stock_target_mult"] = (
+                _mc.targets.stock_target_mult_draws[_drv]
             )
-            scale_lambda_draws = sample_relative_triangular_scale(
-                base.scale_lambda, lower_spread, upper_spread, n_draws, rng
-            )
-            sensitivity_input_draws[f"{drivetrain}_scale_lambda"] = scale_lambda_draws
-
-            stock_series = pd.to_numeric(stock_dict[("EUR", drivetrain)]["stock"], errors="coerce").fillna(0.0)
-            stock_series.index = stock_series.index.astype(int)
-            stock_series = stock_series.sort_index()
-
-            # [NEW] Per-draw stock TARGET, per `StockFlowParams.stock_target_
-            # relative_spread` / `.stock_target_uncertainty_start_year`: REMIND's
-            # own prescribed trajectory is treated as known/exact through the
-            # cutoff year (identical to the deterministic value, every draw --
-            # this stage's existing "stock always equals target" guarantee is
-            # UNCHANGED for those years), and gets its own uncertainty from the
-            # cutoff onward. Built here (same "engine takes pre-realized draws,
-            # this stage does the sampling from params" convention as
-            # `scale_lambda_draws` above), threaded into `run_cohort_survival_
-            # monte_carlo` as `stock_target_draws`.
-            #
-            # [FIXED, this round] Was: each draw's full multiplier applied as an
-            # instant step at the cutoff year (flat before, flat after, at the
-            # sampled value). Confirmed as a real bug: `inflow(t) = target(t) -
-            # remaining_total(t)` is a pure residual with no smoothing, so an
-            # instant step in the TARGET produced a one-year inflow/outflow
-            # SHOCK (closing an entire sudden gap in a single year) rather than
-            # a gradual widening of uncertainty -- visible as a large spike
-            # right at the cutoff year, dwarfing the genuine (but much smaller
-            # year-to-year) ongoing band width for every later year, making the
-            # uncertainty look like it "snapped back to normal" immediately
-            # after, even though it hadn't.
-            #
-            # Now: each draw's own deviation from 1.0 (`dev = multiplier - 1`)
-            # ramps in LINEARLY from 0 at the cutoff year, at a rate capped at
-            # `stock_target_ramp_max_rate_per_year` (percentage points/year --
-            # see that field's own docstring in params_schema.py). SMALLER
-            # deviations ramp in faster (fewer years); every draw shares the
-            # same maximum RATE, not the same ramp DURATION -- "considers the
-            # size of the uncertainty", per this round's brief. At the cutoff
-            # year itself every draw's multiplier is exactly 1.0 (zero elapsed
-            # ramp time) -- continuous with the deterministic pre-cutoff target,
-            # no seam-year jump. Once a draw's ramp completes, its multiplier
-            # holds flat at the full sampled value for every subsequent year --
-            # the original "held constant, not resampled per year" intent is
-            # preserved, just no longer switched on instantaneously.
-            #
-            # `stock_t_det` replicates EXACTLY the same reindex/ffill/bfill logic
-            # `_run_cohort_recurrence` itself uses internally to build `stock_t`
-            # from `stock_series` -- kept in sync deliberately (not re-derived
-            # from `result` afterward, since the draws array has to exist BEFORE
-            # calling `run_cohort_survival_monte_carlo` below).
-            t0 = int(stock_series.index.min())
-            t_years = np.arange(t0, model_end_year + 1, dtype=int)
-            stock_t_det = stock_series.reindex(t_years).ffill().bfill().to_numpy(dtype=float)
-
-            stock_target_rng = np.random.default_rng(stock_target_child_seed)
-            lower_st, upper_st = resolve_lifetime_spread(
-                p02.stock_target_relative_spread, drivetrain, default=(0.0, 0.0)
-            )
-            stock_target_mult_draws = sample_relative_triangular_scale(
-                1.0, lower_st, upper_st, n_draws, stock_target_rng
-            )
-            sensitivity_input_draws[f"{drivetrain}_stock_target_mult"] = stock_target_mult_draws
-
-            uncertain_mask = t_years >= int(p02.stock_target_uncertainty_start_year)
-
-            # Per-draw deviation from 1.0, and the number of years EACH draw's
-            # own deviation takes to ramp fully in at the capped rate -- e.g.
-            # a +6% draw at a 2%/year cap takes 3 years; a +16% draw takes 8.
-            # `np.where` guards the near-zero-deviation division (a draw whose
-            # sampled multiplier landed almost exactly on 1.0 doesn't need a
-            # real ramp at all -- the guard value only prevents a 0/0 NaN, it
-            # doesn't affect the result, since `dev_draws` there is ~0 anyway).
-            dev_draws = stock_target_mult_draws - 1.0
-            max_rate = float(p02.stock_target_ramp_max_rate_per_year)
-            ramp_years_needed = np.where(
-                np.abs(dev_draws) < 1e-12, 1.0, np.abs(dev_draws) / max_rate
-            )
-
-            years_since_cutoff = (t_years[uncertain_mask] - int(p02.stock_target_uncertainty_start_year)).astype(float)
-            # (n_years_uncertain, n_draws): 0 at the cutoff year itself, rising
-            # to 1.0 once that draw's own ramp completes, held at 1.0 (clipped)
-            # for every year after.
-            ramp_fraction = np.clip(
-                years_since_cutoff[:, None] / ramp_years_needed[None, :], 0.0, 1.0
-            )
-            effective_mult = 1.0 + dev_draws[None, :] * ramp_fraction  # (n_years_uncertain, n_draws)
-
-            stock_target_draws = np.tile(stock_t_det[:, None], (1, n_draws))
-            stock_target_draws[uncertain_mask, :] = stock_t_det[uncertain_mask, None] * effective_mult
-
-            backcast = build_backcast_state(
-                stock_series=stock_series, model_end_year=model_end_year,
-                shape_k=base.shape_k, scale_lambda=base.scale_lambda,  # point-estimate backcast, shared across draws
-                init_max_age=init_max_age,
-            )
-
-            mode, pass1_policy, pass1_from, pass1_until = _resolve_inflow_mode_settings(
-                drivetrain, INFLOW_MODE_BY_DRV, negative_inflow_policy,
-                HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV, HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV,
-            )
-
-            # [NEW] Per-draw uncertainty on the phase-out cap's own max_share --
-            # sampled from the SAME rng stream immediately after scale_lambda_draws,
-            # so re-running with the same Monte Carlo seed reproduces identical
-            # draws for both; non-phaseout drivetrains consume no extra random
-            # numbers at all (regression-safe under the default inflow_mode_by_drv).
-            # Reuses `sample_relative_triangular_scale` (already imported/used
-            # above) by converting the explicit (low, mode, high) triangular into
-            # its point + asymmetric-relative-spread form, rather than assuming a
-            # separate Triangular-sampling API exists.
-            if mode == "inflow_phaseout":
-                point_max_share = INFLOW_PHASEOUT_BY_DRV[drivetrain][1]
-                cap_low, cap_mode, cap_high = INFLOW_PHASEOUT_MAX_SHARE_TRIANGULAR_BY_DRV.get(
-                    drivetrain, (point_max_share, point_max_share, point_max_share)
-                )
-                if cap_mode > 0:
-                    lower_cap_spread = max(0.0, (cap_mode - cap_low) / cap_mode)
-                    upper_cap_spread = max(0.0, (cap_high - cap_mode) / cap_mode)
-                else:
-                    lower_cap_spread = upper_cap_spread = 0.0
-                max_share_draws = sample_relative_triangular_scale(
-                    cap_mode, lower_cap_spread, upper_cap_spread, n_draws, rng
-                )
-            else:
-                max_share_draws = None
-
-            result = run_cohort_survival_monte_carlo(
-                stock_series=stock_series, model_end_year=model_end_year, drivetrain=drivetrain,
-                shape_k_draws=np.full(n_draws, base.shape_k), scale_lambda_draws=scale_lambda_draws,
-                lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain), backcast=backcast,
-                negative_inflow_policy=pass1_policy,
-                hard_zero_inflow_from_year=pass1_from,
-                hard_zero_inflow_until_year=pass1_until,
-                stock_target_draws=stock_target_draws,
-            )
-            mc_result_by_drv[drivetrain] = result
-            mc_scale_lambda_draws_by_drv[drivetrain] = scale_lambda_draws
-            mc_stock_target_mult_draws_by_drv[drivetrain] = stock_target_mult_draws
-            mc_stock_target_draws_by_drv[drivetrain] = stock_target_draws
-            mc_backcast_state_by_drv[drivetrain] = {
-                "stock_series": stock_series, "backcast": backcast, "base": base,
-            }
-            mc_max_share_draws_by_drv[drivetrain] = max_share_draws
-
-        # =====================================================================
-        # PASS 2: apply the phase-out cap (only for "inflow_phaseout" drivetrains),
-        # using every OTHER drivetrain's pass-1 `inflow_applied_by_year` (already
-        # floored >= 0 per draw -- the Monte Carlo counterpart of the deterministic
-        # loop's `flows_df["inflow"].clip(lower=0.0)`) as the "everyone else" total.
-        # =====================================================================
-        for drivetrain in drivetrains_present:
-            mode = INFLOW_MODE_BY_DRV.get(drivetrain, "remind_soft")
-            if mode != "inflow_phaseout":
-                continue
-            start_year, _point_max_share = INFLOW_PHASEOUT_BY_DRV[drivetrain]
-            hard_zero_year = HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain)
-            own_result = mc_result_by_drv[drivetrain]
-            own_years = list(own_result["t"])
-            own_inflow_by_year = own_result["inflow_applied_by_year"]  # (n_years, n_draws), always >= 0
-            max_share_draws = mc_max_share_draws_by_drv[drivetrain]  # (n_draws,)
-
-            other_drivetrains = [d for d in drivetrains_present if d != drivetrain]
-            override_by_year: dict[int, np.ndarray] = {}
-            for i_year, year in enumerate(own_years):
-                if year < start_year:
-                    continue
-                if hard_zero_year is not None and year >= hard_zero_year:
-                    continue
-                other_total = np.zeros(n_draws, dtype=float)
-                for other_drv in other_drivetrains:
-                    other_result = mc_result_by_drv[other_drv]
-                    other_years = list(other_result["t"])
-                    if year in other_years:
-                        other_total += other_result["inflow_applied_by_year"][other_years.index(year)]
-                cap = other_total * max_share_draws / (1.0 - max_share_draws)
-                natural_value = own_inflow_by_year[i_year]
-                needs_cap = natural_value > cap
-                if np.any(needs_cap):
-                    override_by_year[year] = np.where(needs_cap, cap, natural_value)
-
-            if override_by_year:
-                state = mc_backcast_state_by_drv[drivetrain]
-                scale_lambda_draws = mc_scale_lambda_draws_by_drv[drivetrain]
-                stock_target_draws = mc_stock_target_draws_by_drv[drivetrain]
-                result = run_cohort_survival_monte_carlo(
-                    stock_series=state["stock_series"], model_end_year=model_end_year, drivetrain=drivetrain,
-                    shape_k_draws=np.full(n_draws, state["base"].shape_k), scale_lambda_draws=scale_lambda_draws,
-                    lifetime_override=LIFETIME_OVERRIDE_BY_DRV.get(drivetrain), backcast=state["backcast"],
-                    negative_inflow_policy=negative_inflow_policy,
-                    hard_zero_inflow_from_year=HARD_ZERO_INFLOW_FROM_YEAR_BY_DRV.get(drivetrain),
-                    hard_zero_inflow_until_year=HARD_ZERO_INFLOW_UNTIL_YEAR_BY_DRV.get(drivetrain),
-                    stock_target_draws=stock_target_draws,
-                    inflow_override_by_year=override_by_year,
-                )
-                mc_result_by_drv[drivetrain] = result
+        if _mc.targets.fleet_mult_draws is not None:
+            sensitivity_input_draws["TOTAL_FLEET_mult"] = _mc.targets.fleet_mult_draws
 
         # =====================================================================
         # PASS 3: finalize -- IDENTICAL summarization logic to the single-pass

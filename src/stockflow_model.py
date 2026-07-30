@@ -88,6 +88,468 @@ class BackcastState(NamedTuple):
     max_age: int
 
 
+def resolve_inflow_mode_settings(
+    drivetrain: str,
+    mode_by_drv: dict[str, str],
+    default_negative_inflow_policy: str,
+    hard_zero_from_by_drv: dict[str, int],
+    hard_zero_until_by_drv: dict[str, int],
+) -> tuple[str, str, "int | None", "int | None"]:
+    """
+    Resolve `inflow_mode_by_drv`'s 3-way choice for one drivetrain into the concrete
+    (negative_inflow_policy, hard_zero_from, hard_zero_until) settings for PASS 1.
+    See `StockFlowParams.inflow_mode_by_drv` for the rationale behind each mode.
+
+    "inflow_phaseout" is deliberately treated identically to "remind_soft" for pass 1
+    -- pass 1 exists ONLY to learn every drivetrain's own NATURAL (uncapped) inflow,
+    including other phase-out drivetrains, so the cap computation (done afterward, from
+    pass-1 results) never depends on which phase-out drivetrain is visited first.
+
+    Lives here rather than in `02_stockdriven.py` because the deterministic loop, that
+    stage's Monte Carlo block, AND `03_01_flowdriven.py`'s reconstruction all need the
+    identical resolution. Returns
+    `(mode, negative_inflow_policy, hard_zero_from_year, hard_zero_until_year)`.
+    """
+    mode = mode_by_drv.get(drivetrain, "remind_soft")
+    if mode == "remind_literal":
+        return mode, "clip_to_target", None, None
+    return (
+        mode,
+        default_negative_inflow_policy,
+        hard_zero_from_by_drv.get(drivetrain),
+        hard_zero_until_by_drv.get(drivetrain),
+    )
+
+
+class Stage02MonteCarlo(NamedTuple):
+    """
+    The complete result of `run_stage02_cohort_monte_carlo()`.
+
+    `results[drv]` is exactly what `run_cohort_survival_monte_carlo` returned for that
+    drivetrain AFTER the phase-out cap pass, i.e. the final simulated outcome -- the
+    thing both stage 02 and stage 03_01 must agree on, draw for draw.
+    """
+    results: dict[str, dict]
+    scale_lambda_draws: dict[str, np.ndarray]
+    max_share_draws: dict[str, "np.ndarray | None"]
+    backcast: dict[str, BackcastState]
+    targets: "StockTargetDraws"
+
+
+class StockTargetDraws(NamedTuple):
+    """
+    Everything `sample_stock_target_draws()` produces, keyed by drivetrain.
+
+    `stock_target_draws[drv]` is the `(n_years, n_draws)` array to hand straight to
+    `run_cohort_survival_monte_carlo(stock_target_draws=...)`. The rest is bookkeeping
+    the callers need anyway: the stock series and year axis each drivetrain's array was
+    built on, the deterministic (unperturbed) target, and the raw per-drivetrain and
+    shared-fleet multipliers for sensitivity reporting.
+    """
+    stock_target_draws: dict[str, np.ndarray]
+    stock_target_mult_draws: dict[str, np.ndarray]
+    stock_series: dict[str, pd.Series]
+    t_years: dict[str, np.ndarray]
+    stock_t_det: dict[str, np.ndarray]
+    fleet_mult_draws: np.ndarray | None
+
+
+def sample_stock_target_draws(
+    *,
+    stock_dict: dict,
+    drivetrains: "list[str] | tuple[str, ...]",
+    model_end_year: int,
+    n_draws: int,
+    seed: int | None,
+    stock_target_relative_spread: Any,
+    stock_target_uncertainty_start_year: int,
+    stock_target_ramp_max_rate_per_year: float,
+    correlated_mix: bool,
+    total_fleet_relative_spread: Any,
+    region: str = "EUR",
+) -> StockTargetDraws:
+    """
+    THE ONLY PLACE THE PER-DRAW STOCK TARGET IS BUILT -- same principle as
+    `_run_cohort_recurrence` being the only place the cohort math lives. Both
+    `02_stockdriven.py` (which simulates with these targets) and
+    `03_01_flowdriven.py` (which RE-DERIVES stage 02's per-year results from the same
+    saved `scale_lambda` draws, and so must reconstruct the identical targets) call
+    this. Two independent implementations of this sampling would silently disagree,
+    which is exactly the bug this function was extracted to remove: 03_01 previously
+    omitted `stock_target_draws` from its re-run entirely, so its per-year bands
+    carried no stock-target uncertainty at all while stage 02's did.
+
+    WHAT IT BUILDS, per drivetrain:
+      1. ONE relative multiplier per Monte Carlo trial, from
+         `Triangular(1-lower, 1, 1+upper)` per `stock_target_relative_spread`. Held
+         constant across years within a trial (not resampled per year) -- total
+         vehicle stock moves smoothly in reality.
+      2. That multiplier's deviation from 1.0 ramped in LINEARLY from 0 at
+         `stock_target_uncertainty_start_year`, at a rate capped at
+         `stock_target_ramp_max_rate_per_year` percentage points/year. Smaller
+         deviations therefore complete sooner; every draw shares the same maximum
+         RATE, not the same ramp DURATION. At the cutoff year itself every draw's
+         multiplier is exactly 1.0, so there is no seam-year discontinuity against
+         the deterministic pre-cutoff target.
+      3. If `correlated_mix`, a cross-drivetrain renormalization onto the simplex
+         plus one shared total-fleet multiplier -- see
+         `StockFlowParams.stock_target_correlated_mix` for the full rationale.
+
+    SEEDING -- load-bearing, read before changing. The caller's own lifetime
+    (`scale_lambda`) axis takes the FIRST spawn off a `SeedSequence(seed)`; this
+    function needs the SECOND (per-drivetrain targets) and the THIRD (shared fleet).
+    Rather than have callers pass pre-spawned seeds in the right order -- which is
+    exactly the kind of coupling that drifts apart between two call sites -- this
+    function rebuilds the sequence from `seed` itself and spawns in that same fixed
+    order, discarding the first block. `SeedSequence.spawn` is a pure function of
+    (entropy, spawn_key, children-already-spawned), so a fresh `SeedSequence(seed)`
+    spawning `n, n, 1` yields byte-identical children to the caller's own object
+    doing the same -- the two agree by construction, with no shared mutable state.
+    """
+    # Imported here rather than at module scope purely to keep this module's import
+    # surface unchanged for its existing callers; `cohort_flow_mc` imports only
+    # `src.monte_carlo`, so there is no cycle either way.
+    from src.cohort_flow_mc import resolve_lifetime_spread, sample_relative_triangular_scale
+
+    drivetrains = list(drivetrains)
+    cutoff_year = int(stock_target_uncertainty_start_year)
+    max_rate = float(stock_target_ramp_max_rate_per_year)
+    if max_rate <= 0:
+        raise ValueError(
+            f"stock_target_ramp_max_rate_per_year must be > 0, got {max_rate} "
+            f"(0 would mean the multiplier never finishes ramping in)."
+        )
+
+    seed_seq = np.random.SeedSequence(seed)
+    seed_seq.spawn(len(drivetrains))  # block 1: the CALLER's lifetime axis -- not ours
+    target_child_seeds = seed_seq.spawn(len(drivetrains))
+
+    out_draws: dict[str, np.ndarray] = {}
+    out_mult: dict[str, np.ndarray] = {}
+    out_series: dict[str, pd.Series] = {}
+    out_years: dict[str, np.ndarray] = {}
+    out_det: dict[str, np.ndarray] = {}
+
+    for drivetrain, child_seed in zip(drivetrains, target_child_seeds):
+        stock_series = pd.to_numeric(
+            stock_dict[(region, drivetrain)]["stock"], errors="coerce"
+        ).fillna(0.0)
+        stock_series.index = stock_series.index.astype(int)
+        stock_series = stock_series.sort_index()
+
+        # Replicates EXACTLY the reindex/ffill/bfill `_run_cohort_recurrence` uses
+        # internally to build its own `stock_t` -- deliberately kept in sync, since
+        # the draws array has to exist before that function is called.
+        t0 = int(stock_series.index.min())
+        t_years = np.arange(t0, model_end_year + 1, dtype=int)
+        stock_t_det = stock_series.reindex(t_years).ffill().bfill().to_numpy(dtype=float)
+
+        rng = np.random.default_rng(child_seed)
+        lower, upper = resolve_lifetime_spread(
+            stock_target_relative_spread, drivetrain, default=(0.0, 0.0)
+        )
+        mult_draws = sample_relative_triangular_scale(1.0, lower, upper, n_draws, rng)
+
+        uncertain_mask = t_years >= cutoff_year
+        dev_draws = mult_draws - 1.0
+        # `np.where` guards the near-zero-deviation division only: a draw that landed
+        # essentially on 1.0 needs no real ramp, and the guard value cannot affect the
+        # result because `dev_draws` is ~0 there anyway.
+        ramp_years_needed = np.where(
+            np.abs(dev_draws) < 1e-12, 1.0, np.abs(dev_draws) / max_rate
+        )
+        years_since = (t_years[uncertain_mask] - cutoff_year).astype(float)
+        ramp_fraction = np.clip(
+            years_since[:, None] / ramp_years_needed[None, :], 0.0, 1.0
+        )
+        effective_mult = 1.0 + dev_draws[None, :] * ramp_fraction
+
+        target_draws = np.tile(stock_t_det[:, None], (1, n_draws))
+        target_draws[uncertain_mask, :] = stock_t_det[uncertain_mask, None] * effective_mult
+
+        out_draws[drivetrain] = target_draws
+        out_mult[drivetrain] = mult_draws
+        out_series[drivetrain] = stock_series
+        out_years[drivetrain] = t_years
+        out_det[drivetrain] = stock_t_det
+
+    fleet_mult_draws: np.ndarray | None = None
+    if correlated_mix:
+        # Block 3 of the spawn order documented above. Spawned inside this branch so
+        # the uncorrelated path consumes no randomness for it and stays byte-identical
+        # to the behavior that predates the correlated mix.
+        fleet_rng = np.random.default_rng(seed_seq.spawn(1)[0])
+        lower_tf, upper_tf = resolve_lifetime_spread(
+            total_fleet_relative_spread, "__total_fleet__", default=(0.0, 0.0)
+        )
+        fleet_mult_draws = sample_relative_triangular_scale(
+            1.0, lower_tf, upper_tf, n_draws, fleet_rng
+        )
+        fleet_dev = fleet_mult_draws - 1.0
+        fleet_ramp_years = np.where(
+            np.abs(fleet_dev) < 1e-12, 1.0, np.abs(fleet_dev) / max_rate
+        )
+
+        # Drivetrains need not share a year axis (each starts at its own stock series'
+        # first year), so the composition is assembled year by year over the UNION of
+        # years, matching rows by actual year rather than assuming a common index.
+        row_of_year = {
+            d: {int(y): i for i, y in enumerate(out_years[d])} for d in drivetrains
+        }
+        all_years = sorted({int(y) for d in drivetrains for y in out_years[d]})
+
+        for year in all_years:
+            # Pre-cutoff years are never visited, which makes the historic period a
+            # STRUCTURAL guarantee rather than a float-arithmetic coincidence.
+            if year < cutoff_year:
+                continue
+            present = [d for d in drivetrains if year in row_of_year[d]]
+            if not present:
+                continue
+
+            total_det = float(sum(out_det[d][row_of_year[d][year]] for d in present))
+            total_draw = np.zeros(n_draws, dtype=float)
+            for d in present:
+                total_draw += out_draws[d][row_of_year[d][year]]
+
+            fleet_fraction = np.clip((year - cutoff_year) / fleet_ramp_years, 0.0, 1.0)
+            intended_total = total_det * (1.0 + fleet_dev * fleet_fraction)
+
+            # `total_draw == 0` means every drivetrain's target is zero that year, so
+            # there is nothing to redistribute; scale 1.0 leaves the zeros alone rather
+            # than producing 0/0. A drivetrain individually zero in a year where others
+            # are not stays exactly zero automatically, since the scale is a common
+            # multiplicative factor -- BEV before it existed, and Liquids after the
+            # phase-out, must never have stock conjured into them by the constraint.
+            scale = np.divide(
+                intended_total, total_draw,
+                out=np.ones_like(total_draw), where=total_draw > 0,
+            )
+            for d in present:
+                out_draws[d][row_of_year[d][year]] *= scale
+
+    return StockTargetDraws(
+        stock_target_draws=out_draws,
+        stock_target_mult_draws=out_mult,
+        stock_series=out_series,
+        t_years=out_years,
+        stock_t_det=out_det,
+        fleet_mult_draws=fleet_mult_draws,
+    )
+
+
+def run_stage02_cohort_monte_carlo(
+    *,
+    stock_dict: dict,
+    drivetrains: "list[str] | tuple[str, ...]",
+    model_end_year: int,
+    init_max_age: Any,
+    n_draws: int,
+    seed: int | None,
+    lifetime_by_drv: dict,
+    lifetime_override_by_drv: dict,
+    lifetime_scale_lambda_relative_spread: Any,
+    negative_inflow_policy: str,
+    hard_zero_inflow_from_year_by_drv: dict,
+    hard_zero_inflow_until_year_by_drv: dict,
+    inflow_mode_by_drv: dict,
+    inflow_phaseout_by_drv: dict,
+    inflow_phaseout_max_share_triangular_by_drv: dict,
+    stock_target_relative_spread: Any,
+    stock_target_uncertainty_start_year: int,
+    stock_target_ramp_max_rate_per_year: float,
+    stock_target_correlated_mix: bool,
+    total_fleet_relative_spread: Any,
+    region: str = "EUR",
+) -> Stage02MonteCarlo:
+    """
+    THE ONLY PLACE STAGE 02'S MONTE CARLO COHORT RUN IS ORCHESTRATED. Runs the whole
+    thing -- target sampling, lifetime sampling, the natural pass, and the phase-out cap
+    pass -- and returns each drivetrain's FINAL per-draw result.
+
+    WHY THIS EXISTS AS ONE FUNCTION. Two stages need these results: `02_stockdriven.py`,
+    which summarizes and persists them, and `03_01_flowdriven.py`, which must reproduce
+    them exactly in order to layer its own collected/export/unknown split onto the SAME
+    draws (stage 02 cannot persist the full per-year-per-draw arrays -- they run to
+    hundreds of MB per drivetrain at production draw counts, so 03_01 regenerates them
+    instead). While 03_01 rebuilt that call itself, the two drifted apart repeatedly and
+    silently, because a re-run that is missing an argument still produces perfectly
+    plausible-looking output:
+
+      - the hard-zero overrides were omitted, so Liquids/Hybrid post-2050 and BEV
+        pre-2011 diverged;
+      - `stock_target_draws` was omitted, so NONE of the stock-target uncertainty was
+        present -- measured at up to 20.8% error on per-year inflow;
+      - the `inflow_mode_by_drv` resolution and the phase-out cap pass were never
+        replicated at all, which was latent only because no drivetrain was configured
+        to use them.
+
+    Each was a separate silent divergence with the same root cause: the sequence was
+    written down twice. Now it is written down once, and 03_01 gets stage 02's results
+    by calling the same function rather than by re-deriving them. Adding a new
+    uncertainty axis or policy here reaches both stages automatically -- which is the
+    entire point, and the reason not to inline any part of this back into a stage script.
+
+    THE PASSES:
+      0. Per-draw stock targets (`sample_stock_target_draws`; includes the correlated
+         drivetrain mix and the shared total-fleet axis).
+      1. Per-drivetrain lifetime `scale_lambda` and, for phase-out drivetrains, the
+         cap's own `max_share`; then the natural (uncapped) cohort run. Phase-out
+         drivetrains run exactly like "remind_soft" here, so the cap below never depends
+         on visit order.
+      2. For each "inflow_phaseout" drivetrain, cap its inflow at
+         `other_drivetrains_inflow * max_share / (1 - max_share)` and re-run it with
+         that override. Drivetrains needing no cap in any year are left untouched.
+
+    SEEDING: spawn block 1 off `SeedSequence(seed)` is the lifetime axis (and the cap's
+    max_share, drawn from the same per-drivetrain generator immediately after
+    scale_lambda); blocks 2 and 3 belong to `sample_stock_target_draws`. Both callers
+    reach identical draws because this single function owns the whole order.
+    """
+    from src.cohort_flow_mc import resolve_lifetime_spread, sample_relative_triangular_scale
+
+    drivetrains = list(drivetrains)
+
+    # Block 1 -- this function's lifetime axis. `sample_stock_target_draws` rebuilds the
+    # same sequence internally and takes blocks 2 and 3; see its docstring.
+    seed_seq = np.random.SeedSequence(seed)
+    child_seeds = seed_seq.spawn(len(drivetrains))
+
+    targets = sample_stock_target_draws(
+        stock_dict=stock_dict,
+        drivetrains=drivetrains,
+        model_end_year=model_end_year,
+        n_draws=n_draws,
+        seed=seed,
+        stock_target_relative_spread=stock_target_relative_spread,
+        stock_target_uncertainty_start_year=stock_target_uncertainty_start_year,
+        stock_target_ramp_max_rate_per_year=stock_target_ramp_max_rate_per_year,
+        correlated_mix=stock_target_correlated_mix,
+        total_fleet_relative_spread=total_fleet_relative_spread,
+        region=region,
+    )
+
+    results: dict[str, dict] = {}
+    scale_lambda_by_drv: dict[str, np.ndarray] = {}
+    max_share_by_drv: dict[str, np.ndarray | None] = {}
+    backcast_by_drv: dict[str, BackcastState] = {}
+
+    # ---- PASS 1: natural run ----------------------------------------------------
+    for drivetrain, child_seed in zip(drivetrains, child_seeds):
+        rng = np.random.default_rng(child_seed)
+        base = lifetime_by_drv[drivetrain]
+        stock_series = targets.stock_series[drivetrain]
+
+        lower_spread, upper_spread = resolve_lifetime_spread(
+            lifetime_scale_lambda_relative_spread, drivetrain, default=(0.0, 0.0)
+        )
+        scale_lambda_draws = sample_relative_triangular_scale(
+            base.scale_lambda, lower_spread, upper_spread, n_draws, rng
+        )
+
+        backcast = build_backcast_state(
+            stock_series=stock_series, model_end_year=model_end_year,
+            # Point-estimate backcast, deliberately shared across draws.
+            shape_k=base.shape_k, scale_lambda=base.scale_lambda,
+            init_max_age=init_max_age,
+        )
+
+        mode, pass1_policy, pass1_from, pass1_until = resolve_inflow_mode_settings(
+            drivetrain, inflow_mode_by_drv, negative_inflow_policy,
+            hard_zero_inflow_from_year_by_drv, hard_zero_inflow_until_year_by_drv,
+        )
+
+        # Drawn from the SAME generator immediately after scale_lambda, so the seed
+        # reproduces both; a non-phase-out drivetrain consumes no extra randomness at
+        # all, keeping the default configuration regression-safe.
+        if mode == "inflow_phaseout":
+            point_max_share = inflow_phaseout_by_drv[drivetrain][1]
+            cap_low, cap_mode, cap_high = inflow_phaseout_max_share_triangular_by_drv.get(
+                drivetrain, (point_max_share, point_max_share, point_max_share)
+            )
+            if cap_mode > 0:
+                lower_cap = max(0.0, (cap_mode - cap_low) / cap_mode)
+                upper_cap = max(0.0, (cap_high - cap_mode) / cap_mode)
+            else:
+                lower_cap = upper_cap = 0.0
+            max_share_draws = sample_relative_triangular_scale(
+                cap_mode, lower_cap, upper_cap, n_draws, rng
+            )
+        else:
+            max_share_draws = None
+
+        results[drivetrain] = run_cohort_survival_monte_carlo(
+            stock_series=stock_series, model_end_year=model_end_year, drivetrain=drivetrain,
+            shape_k_draws=np.full(n_draws, base.shape_k),
+            scale_lambda_draws=scale_lambda_draws,
+            lifetime_override=lifetime_override_by_drv.get(drivetrain), backcast=backcast,
+            negative_inflow_policy=pass1_policy,
+            hard_zero_inflow_from_year=pass1_from,
+            hard_zero_inflow_until_year=pass1_until,
+            stock_target_draws=targets.stock_target_draws[drivetrain],
+        )
+        scale_lambda_by_drv[drivetrain] = scale_lambda_draws
+        max_share_by_drv[drivetrain] = max_share_draws
+        backcast_by_drv[drivetrain] = backcast
+
+    # ---- PASS 2: phase-out cap --------------------------------------------------
+    for drivetrain in drivetrains:
+        if inflow_mode_by_drv.get(drivetrain, "remind_soft") != "inflow_phaseout":
+            continue
+        start_year, _point = inflow_phaseout_by_drv[drivetrain]
+        hard_zero_year = hard_zero_inflow_from_year_by_drv.get(drivetrain)
+        own_result = results[drivetrain]
+        own_years = list(own_result["t"])
+        # Already floored >= 0 per draw -- the Monte Carlo counterpart of the
+        # deterministic loop's `flows_df["inflow"].clip(lower=0.0)`.
+        own_inflow = own_result["inflow_applied_by_year"]
+        max_share_draws = max_share_by_drv[drivetrain]
+
+        others = [d for d in drivetrains if d != drivetrain]
+        override_by_year: dict[int, np.ndarray] = {}
+        for i_year, year in enumerate(own_years):
+            if year < start_year:
+                continue
+            if hard_zero_year is not None and year >= hard_zero_year:
+                continue
+            other_total = np.zeros(n_draws, dtype=float)
+            for other in others:
+                other_years = list(results[other]["t"])
+                if year in other_years:
+                    other_total += results[other]["inflow_applied_by_year"][
+                        other_years.index(year)
+                    ]
+            cap = other_total * max_share_draws / (1.0 - max_share_draws)
+            natural = own_inflow[i_year]
+            needs_cap = natural > cap
+            if np.any(needs_cap):
+                override_by_year[year] = np.where(needs_cap, cap, natural)
+
+        if override_by_year:
+            base = lifetime_by_drv[drivetrain]
+            results[drivetrain] = run_cohort_survival_monte_carlo(
+                stock_series=targets.stock_series[drivetrain],
+                model_end_year=model_end_year, drivetrain=drivetrain,
+                shape_k_draws=np.full(n_draws, base.shape_k),
+                scale_lambda_draws=scale_lambda_by_drv[drivetrain],
+                lifetime_override=lifetime_override_by_drv.get(drivetrain),
+                backcast=backcast_by_drv[drivetrain],
+                negative_inflow_policy=negative_inflow_policy,
+                hard_zero_inflow_from_year=hard_zero_inflow_from_year_by_drv.get(drivetrain),
+                hard_zero_inflow_until_year=hard_zero_inflow_until_year_by_drv.get(drivetrain),
+                stock_target_draws=targets.stock_target_draws[drivetrain],
+                inflow_override_by_year=override_by_year,
+            )
+
+    return Stage02MonteCarlo(
+        results=results,
+        scale_lambda_draws=scale_lambda_by_drv,
+        max_share_draws=max_share_by_drv,
+        backcast=backcast_by_drv,
+        targets=targets,
+    )
+
+
 def build_backcast_state(
     stock_series: pd.Series,
     model_end_year: int,
