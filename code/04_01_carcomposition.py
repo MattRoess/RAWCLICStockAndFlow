@@ -2094,11 +2094,21 @@ def _plot_mass_by_year_stacked(
             ax_small.spines["top"].set_visible(False)
             ax_small.spines["right"].set_visible(False)
             ax_small.spines["left"].set_visible(False)
-            # Small tonnes-formatted x-axis so each panel's own scale is still legible.
             ax_small.ticklabel_format(axis="x", style="sci", scilimits=(-2, 3))
-        fig.text(0.99, 0.5, "Period total (MC) -- one independently-scaled panel per "
-                 "category, x-axis in Mt", rotation=90, va="center", ha="right",
-                 fontsize=8, color="#666666")
+            # The unit belongs ON the panel. It used to live in a single 90-degree
+            # rotated note at the right edge of the figure, where it was clipped and
+            # effectively unreadable -- so these panels showed bare numbers with no
+            # stated unit at all.
+            ax_small.set_xlabel("Mt", fontsize=6, labelpad=1)
+        # Horizontal caption BELOW the panel block, replacing the old rotated note.
+        # Below rather than above: the panel titles already occupy the space above the
+        # top row, and a caption there overlaps them.
+        bottoms, tops, lefts, rights = gs_right.get_grid_positions(fig)
+        fig.text(
+            (lefts[0] + rights[-1]) / 2, bottoms[-1] - 0.075,
+            "Period total (Monte Carlo) -- each panel scaled independently",
+            ha="center", va="top", fontsize=8, color="#666666",
+        )
 
     plt.tight_layout()
     fig_path.parent.mkdir(parents=True, exist_ok=True)

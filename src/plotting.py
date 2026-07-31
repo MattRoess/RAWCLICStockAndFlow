@@ -1201,6 +1201,10 @@ def plot_flows_split_collected_unknown_all_trackers(
         )
 
         axes[i].set_title(scenario_name)
+        # One panel per SCENARIO here (the sibling function panels per drivetrain);
+        # both show inflow and outflow together, hence the neutral "Vehicles".
+        axes[i].set_xlabel("Year")
+        axes[i].set_ylabel("Vehicles [million/year]")
 
     # hide unused axes
     for j in range(len(scenarios), len(axes)):
@@ -1275,6 +1279,9 @@ def plot_flows_by_drivetrain_single_scenario(
             entity_bands=entity_bands,
         )
         axes[i].set_title(drv, fontsize=12)
+        # "Vehicles", not "Inflow": each panel shows inflow AND outflow together.
+        axes[i].set_xlabel("Year")
+        axes[i].set_ylabel("Vehicles [million/year]")
 
     for j in range(len(drivetrains), len(axes)):
         axes[j].axis("off")

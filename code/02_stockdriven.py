@@ -1049,7 +1049,7 @@ def main() -> dict[str, Path]:
 
         ax_used.axhline(0, color="black", linewidth=0.8)
         ax_used.set_title(
-            f"Adjusted inflow: floored at 0, zero from 2050 -- used downstream (n={n_draws:,})",
+            f"Adjusted inflow: floored at 0, starting in 2050 -- used downstream (n={n_draws:,})",
             fontsize=11,
         )
         ax_used.set_ylabel("Inflow [million/year]")
