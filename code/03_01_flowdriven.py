@@ -219,7 +219,6 @@ def main() -> dict[str, Any]:
     p02 = params.stock_flow
     p03 = params.disaggregation
     p04 = params.materials
-    p06 = params.visualization
 
     # [IMPORTANT, flagged not silently changed]: `fdm.build_p02_mapped_inputs` is a
     # function inside `src/flowdriven_model.py`, which has NOT been shared -- I do not
@@ -243,8 +242,10 @@ def main() -> dict[str, Any]:
     output_dir = str((SCRIPT_DIR / p03.output_dir).resolve()) + "/"
     start_year_model = int(p03.start_year_model)
     end_year_model = int(p03.end_year_model)
-    YEAR_PLOT_START = int(p06.year_plot_start)
-    YEAR_PLOT_END = int(p06.year_plot_end)
+    # Plot window now lives with this stage's own settings (`params.disaggregation`),
+    # not in a separate visualization section.
+    YEAR_PLOT_START = int(p03.year_plot_start)
+    YEAR_PLOT_END = int(p03.year_plot_end)
     segment_map = p04.segment_map
     drv_prefix_map = p04.drv_prefix_map
     materials_region = p04.region

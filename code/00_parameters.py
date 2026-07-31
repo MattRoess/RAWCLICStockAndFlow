@@ -136,7 +136,6 @@ def _flatten_params(params: Params) -> list[list[Any]]:
         ("03_02_adjusted_flows", params.adjusted_flows),
         ("03_disaggregation", params.disaggregation),
         ("04_materials", params.materials),
-        ("visualization", params.visualization),
         ("07_monte_carlo", params.monte_carlo),
     ):
         for f in fields(section_obj):

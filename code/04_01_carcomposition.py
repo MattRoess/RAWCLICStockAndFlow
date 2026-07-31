@@ -2062,11 +2062,11 @@ def _plot_mass_by_year_stacked(
     # Display in TONNES, not kg -- everything upstream of this function (mass_by_year_df,
     # mc_draws_by_category) is still in kg; only the plotted values are converted, right
     # here, right before rendering.
-    plot_df_t = plot_df / KG_PER_TONNE
+    plot_df_t = plot_df / KG_PER_MEGATONNE
     stack_polys = ax1.stackplot(plot_df_t.index, plot_df_t.T.values, labels=plot_df_t.columns, alpha=0.85)
     ax1.set_title(title, fontsize=12)
     ax1.set_xlabel("Year")
-    ax1.set_ylabel("Mass [t]")
+    ax1.set_ylabel("Mass [Mt]")
     ax1.grid(True, linestyle="--", alpha=0.3)
     ax1.spines["top"].set_visible(False)
     ax1.spines["right"].set_visible(False)
@@ -2082,7 +2082,7 @@ def _plot_mass_by_year_stacked(
         gs_right = gs_outer[1].subgridspec(n_rows, n_cols, hspace=0.75, wspace=0.45)
         for i, (category, draws) in enumerate(zip(density_categories, density_draws)):
             ax_small = fig.add_subplot(gs_right[i // n_cols, i % n_cols])
-            grid, density = _gaussian_kde_curve(draws / KG_PER_TONNE)
+            grid, density = _gaussian_kde_curve(draws / KG_PER_MEGATONNE)
             color = stack_colors.get(category, "gray")
             ax_small.plot(grid, density, color=color, linewidth=1.3)
             ax_small.fill_between(grid, density, color=color, alpha=0.25)
@@ -2097,7 +2097,7 @@ def _plot_mass_by_year_stacked(
             # Small tonnes-formatted x-axis so each panel's own scale is still legible.
             ax_small.ticklabel_format(axis="x", style="sci", scilimits=(-2, 3))
         fig.text(0.99, 0.5, "Period total (MC) -- one independently-scaled panel per "
-                 "category, x-axis in tonnes", rotation=90, va="center", ha="right",
+                 "category, x-axis in Mt", rotation=90, va="center", ha="right",
                  fontsize=8, color="#666666")
 
     plt.tight_layout()
@@ -2240,7 +2240,7 @@ def plot_scenario_comparison_boxplot_and_pdf(
         differ between scenarios (independent bootstraps) -- each scenario's own
         array length is used as-is.
     title : shared title for both figures
-    xlabel : e.g. "Total mass [t]"
+    xlabel : e.g. "Total mass [Mt]"
     fig_path_boxplot, fig_path_pdf : output paths
     colors : optional scenario -> color map (see `_scenario_color_map`); built
         fresh from `by_scenario_draws`'s keys if not given
@@ -2250,7 +2250,7 @@ def plot_scenario_comparison_boxplot_and_pdf(
         print(f"[plot_scenario_comparison_boxplot_and_pdf] no scenarios to plot -- skipping {fig_path_boxplot.name}.")
         return
     colors = colors or _scenario_color_map(scenario_names)
-    draws_t = {name: np.asarray(draws, dtype=float) / KG_PER_TONNE for name, draws in by_scenario_draws.items()}
+    draws_t = {name: np.asarray(draws, dtype=float) / KG_PER_MEGATONNE for name, draws in by_scenario_draws.items()}
 
     fig, ax = plt.subplots(figsize=(max(5, 1.8 * len(scenario_names)), 6))
     bp = ax.boxplot(
@@ -2326,7 +2326,7 @@ def plot_total_mass_by_year_scenario_comparison(
         df = df[df["drivetrain"] == drivetrain]
         if df.empty:
             continue
-        by_year = df.groupby("year")["mass"].sum().sort_index() / KG_PER_TONNE
+        by_year = df.groupby("year")["mass"].sum().sort_index() / KG_PER_MEGATONNE
         ax1.plot(by_year.index, by_year.values, color=colors[name], linewidth=1.8, label=name)
         any_data = True
     if not any_data:
@@ -2334,7 +2334,7 @@ def plot_total_mass_by_year_scenario_comparison(
         plt.close(fig)
         return
     ax1.set_xlabel("Year")
-    ax1.set_ylabel("Mass [t]")
+    ax1.set_ylabel("Mass [Mt]")
     ax1.set_title(title, fontsize=12)
     ax1.grid(True, linestyle="--", alpha=0.3)
     ax1.spines["top"].set_visible(False)
@@ -2346,11 +2346,11 @@ def plot_total_mass_by_year_scenario_comparison(
         draws = headline_draws_by_scenario.get(name)
         if draws is None or len(draws) == 0:
             continue
-        grid, density = _gaussian_kde_curve(np.asarray(draws, dtype=float) / KG_PER_TONNE)
+        grid, density = _gaussian_kde_curve(np.asarray(draws, dtype=float) / KG_PER_MEGATONNE)
         ax2.plot(grid, density, color=colors[name], linewidth=1.4)
         ax2.fill_between(grid, density, color=colors[name], alpha=0.2)
     ax2.set_title("Headline-period total (MC)", fontsize=9)
-    ax2.set_xlabel("Mass [t]")
+    ax2.set_xlabel("Mass [Mt]")
     ax2.set_yticks([])
     ax2.spines["top"].set_visible(False)
     ax2.spines["right"].set_visible(False)
@@ -2429,7 +2429,7 @@ def plot_material_breakdown_scenario_comparison(
         for mat in ranked_materials:
             draws = by_scenario_material[name].get(mat)
             if draws is not None and len(draws) > 0:
-                d_t = draws / KG_PER_TONNE
+                d_t = draws / KG_PER_MEGATONNE
                 p_lo, p_mid, p_hi = np.percentile(d_t, [2.5, 50, 97.5])
             else:
                 p_lo = p_mid = p_hi = 0.0
@@ -2444,7 +2444,7 @@ def plot_material_breakdown_scenario_comparison(
 
     ax.set_xticks(x)
     ax.set_xticklabels(ranked_materials, rotation=45, ha="right")
-    ax.set_ylabel("Total mass [t]")
+    ax.set_ylabel("Total mass [Mt]")
     ax.set_title(title, fontsize=12)
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     ax.spines["top"].set_visible(False)
@@ -3061,7 +3061,7 @@ def main() -> dict[str, Any]:
                         headline_draws_by_scenario,
                         title=f"{flow}: {drivetrain} total mass across scenarios, "
                               f"{headline_period[0]}-{headline_period[1]}",
-                        xlabel="Total mass [t]",
+                        xlabel="Total mass [Mt]",
                         fig_path_boxplot=fig_dir / f"04_01_scenario_comparison_boxplot_{flow}_{drivetrain}.png",
                         fig_path_pdf=fig_dir / f"04_01_scenario_comparison_pdf_{flow}_{drivetrain}.png",
                         colors=scenario_colors,

@@ -42,15 +42,318 @@ ALL_DRIVETRAINS: list[str] = [
     "BEV", "HEV", "PHEV", "Hybrid", "Liquids", "Petrol", "Diesel", "Gases", "FCEV",
 ]
 
+# ---------------------------------------------------------------------------
+# HOW TO EDIT THIS FILE
+# ---------------------------------------------------------------------------
+# This file holds every number the model uses. Nothing here performs a calculation --
+# each entry is a setting that the pipeline stages read. Change a value here and the
+# model behaves differently; change nothing and the model stays exactly as it is.
+#
+# You do NOT need to be a programmer to change a value. Three rules:
+#
+#   1. Change only what is to the RIGHT of the "=" sign.
+#      Correct:   n_draws: int = 50000
+#      Wrong:     draws: int = 50000        <- renaming the setting breaks the code
+#
+#   2. Keep the TYPE the same. A number stays a number (2025, 0.15); text stays in
+#      quotes ("report_only"); True and False stay capitalised exactly like that.
+#
+#   3. Keep the punctuation. Entries inside { } need their commas and colons.
+#      A missing comma is the single most common way to break this file.
+#
+# AFTER EDITING, RUN:   .venv/bin/python code/00_parameters.py
+# That regenerates the parameter file the stages read AND checks your edit. If you
+# broke something it tells you there -- before any long model run starts.
+#
+# Each setting below says what it does and whether it is safe to change. Where a note
+# says a value is load-bearing, changing it alters results that other settings assume;
+# read the note before touching it.
+#
+# LAYOUT: shared building blocks first, then one section per pipeline stage in the
+# order the stages actually run, then the cross-cutting Monte Carlo settings, then the
+# container object that holds them all.
+
+# ---------------------------------------------------------------------------
+# SHARED BUILDING BLOCKS -- small types reused by several stages below
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AsymmetricSpread:
+    """
+    "Give or take, but not evenly."
+
+    Says how far a value might plausibly stray from its best guess, allowing the two
+    directions to differ. `lower` and `upper` are FRACTIONS, not absolute amounts:
+
+        AsymmetricSpread(lower=0.10, upper=0.20)
+            on a best guess of 15 years means "as short as 13.5 years (10% less),
+            as long as 18 years (20% more), most likely 15."
+
+    Wherever one of these is accepted you may instead write a plain number, which
+    means the same spread both ways: 0.15 is identical to
+    AsymmetricSpread(lower=0.15, upper=0.15).
+
+    WHEN TO USE THE ASYMMETRIC FORM: when the two directions genuinely differ -- for
+    example "cars are unlikely to last much less than expected, but could easily last
+    a good deal longer". A flat plus-or-minus would misstate that.
+
+    ONE THING TO EXPECT: with an uneven spread the AVERAGE of the drawn values sits
+    slightly to the wider side, not exactly on the best guess. That is correct, not a
+    bug -- if you say long lifetimes are more plausible than short ones, the average
+    lifetime should indeed come out above the best guess.
+
+    SAFE TO CHANGE: yes. Both numbers must be zero or positive. Zero on both sides
+    means "no uncertainty at all -- always use the best guess".
+    """
+    lower: float
+    upper: float
+
+    def validate(self, *, field_name: str) -> list[str]:
+        issues: list[str] = []
+        if self.lower < 0:
+            issues.append(f"{field_name}.lower={self.lower} must be >= 0.")
+        if self.upper < 0:
+            issues.append(f"{field_name}.upper={self.upper} must be >= 0.")
+        return issues
+
+
+@dataclass(frozen=True)
+class WeibullLifetime:
+    """
+    How long vehicles of one drivetrain survive before being scrapped.
+
+    Vehicles do not all die at one age -- some go early, some last far longer. This
+    describes that whole spread with two numbers (a Weibull survival curve):
+
+        scale_lambda  roughly the typical lifetime, in years. Bigger = cars last
+                      longer. This is the number you would normally adjust.
+        shape_k       how tightly deaths cluster around that typical age. Higher
+                      values mean most cars die at a similar age; lower values mean
+                      a broad spread of ages. Rarely needs changing.
+
+    SAFE TO CHANGE: yes, but this is one of the most influential settings in the whole
+    model -- it drives when vehicles leave the fleet, and therefore all the recycling
+    and material-recovery numbers downstream. Both values must be above zero.
+    """
+    shape_k: float
+    scale_lambda: float
+
+
+@dataclass(frozen=True)
+class LifetimeOverride:
+    """
+    "For these years only, use a different lifetime."
+
+    A temporary replacement for a drivetrain's normal survival curve, covering the
+    years from `start_year` to `end_year` inclusive. Outside that window the normal
+    lifetime applies again.
+
+    Use it when something makes one period genuinely different -- a scrappage scheme,
+    a known quality problem in a particular model generation.
+
+    SAFE TO CHANGE: yes. `start_year` must not be after `end_year`. If you want a
+    change that starts and never ends, this is the wrong type -- see
+    OpenEndedLifetimeChange below.
+    """
+    start_year: int
+    end_year: int
+    shape_k: float
+    scale_lambda: float
+
+
+@dataclass(frozen=True)
+class OpenEndedLifetimeChange:
+    """
+    "From this year onward, use a different lifetime -- permanently."
+
+    Same idea as LifetimeOverride above, but with no end: once `start_year` arrives the
+    new lifetime applies for the rest of the run. This is what the scenarios in stage
+    03_02 use (e.g. "BEV_longer": from 2027, BEVs last longer than in the base case).
+
+    WHY TWO SEPARATE TYPES: stage 02 needs a bounded window, stage 03_02 needs an
+    open-ended change. Both conventions are genuinely in use; this is not a duplicate.
+
+    SAFE TO CHANGE: yes.
+    """
+    start_year: int
+    shape_k: float
+    scale_lambda: float
+
+
+@dataclass(frozen=True)
+class ScenarioSpec:
+    """
+    One complete, self-contained definition of a `03_02_adjustedflows.py` sensitivity
+    scenario. Every override field is SPARSE and ADDITIVE over this stage's base
+    `StockFlowParams` values: a missing drivetrain entry means "use the base value for
+    that drivetrain", not "zero it out" -- this mirrors how
+    `run_flow_driven_model_with_outflow_disaggregation` itself already treats a missing
+    `lifetime_change_by_drv[drv]` entry (falls back to `lifetime_by_drv[drv]`). This is
+    what lets e.g. `ICEV_shorter` specify ONLY Diesel/Petrol's changed lifetime, without
+    having to also restate BEV's unchanged one (the pre-refactor `LIFETIME_CHANGE_BY_
+    DRV_*` dicts redundantly restated every drivetrain, changed or not).
+
+    Exactly one of `inflow_drivetrain_shares_final` / `inflow_segment_shares_final`
+    should be set for a scenario that changes the inflow composition; neither set means
+    "reuse the BAU scenario's resolved inflow unchanged" (what all five lifetime/loss/
+    stock scenarios do).
+    """
+    name: str
+
+    # Inflow-composition transform (at most one of the two pairs below should be set):
+    #   - `inflow_drivetrain_shares_final`: changes the DRIVETRAIN mix of inflow
+    #     (maps onto `tweak_inflow_drivetrain_shares` in 03_02_adjustedflows.py) --
+    #     used by BEV_only.
+    #   - `inflow_segment_shares_drivetrain` + `inflow_segment_shares_final`: changes
+    #     ONE drivetrain's INTERNAL segment mix, holding the overall drivetrain mix
+    #     fixed (maps onto `tweak_inflow_segment_shares_within_drivetrain`) -- used by
+    #     BAU (its own segment-mix baseline) and the four BEV segment-profile
+    #     scenarios (A_F, JA_JF, Large, Small).
+    inflow_drivetrain_shares_final: dict[str, float] | None = None
+    inflow_segment_shares_drivetrain: str | None = None
+    inflow_segment_shares_final: dict[str, float] | None = None
+
+    # [NEW] Monte Carlo uncertainty around `inflow_segment_shares_final` (the FUTURE
+    # segment-mix target, applied for years >= AdjustedFlowsParams.scenario_start_year)
+    # -- deliberately NOT applied to the real historic segment split (years before
+    # scenario_start_year), which comes from actual registration data and stays fully
+    # deterministic. `None` (default) means no segment-share uncertainty for this
+    # scenario -- opt-in, same sparse convention as every other override on this class.
+    #
+    # A per-segment Triangular(mode*(1-lower), mode, mode*(1+upper)) is sampled
+    # INDEPENDENTLY for each of the 12 segments (reusing this scenario's own
+    # `inflow_segment_shares_final` values as each segment's mode), one draw per Monte
+    # Carlo trial, then the whole 12-segment draw is renormalized (divided by its own
+    # sum) so it sums to exactly 1 -- every segment moves proportionally on every draw,
+    # not just whichever one happens to be picked to "absorb" the difference. Requires
+    # `inflow_segment_shares_final` to also be set (validated) -- there is nothing to
+    # sample around otherwise. Same `AsymmetricSpread` type as
+    # `StockFlowParams.lifetime_scale_lambda_relative_spread` (a plain float means
+    # symmetric spread); see `03_02_adjustedflows.py`'s
+    # `sample_future_segment_share_inflow_draws` for exactly how this gets sampled and
+    # turned into per-draw inflow values, and `cohort_flow_mc.py`'s
+    # `inflow_draws_by_group` parameter for how it's fed into the vectorized engine.
+    inflow_segment_share_spread: AsymmetricSpread | float | None = None
+
+    # Sparse lifetime override: only drivetrains that actually change need an entry.
+    lifetime_change_by_drv: dict[str, OpenEndedLifetimeChange] = field(default_factory=dict)
+
+    # Sparse share overrides: only drivetrains that actually change need an entry.
+    export_share_overrides: dict[str, float] = field(default_factory=dict)
+    unknown_whereabouts_share_overrides: dict[str, float] = field(default_factory=dict)
+
+    # Flat inflow multiplier from `AdjustedFlowsParams.lifetime_change_start_year`
+    # onward (the vehicle pipeline's `stock_modifier_2027`, expressed generically here
+    # since the year itself is also a parameter, not hardcoded to literally "2027").
+    stock_modifier: float = 1.0
+
+    def validate(self, *, valid_segments: set[str]) -> list[str]:
+        issues: list[str] = []
+        if self.inflow_drivetrain_shares_final is not None and self.inflow_segment_shares_final is not None:
+            issues.append(
+                f"adjusted_flows.scenarios['{self.name}']: both inflow_drivetrain_shares_final "
+                f"and inflow_segment_shares_final are set -- at most one should be."
+            )
+        if self.inflow_drivetrain_shares_final is not None:
+            total = sum(self.inflow_drivetrain_shares_final.values())
+            if not (0.999 <= total <= 1.001):
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_drivetrain_shares_final "
+                    f"sums to {total:.6f}, expected 1.0."
+                )
+        if self.inflow_segment_shares_final is not None:
+            if self.inflow_segment_shares_drivetrain is None:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_shares_final is "
+                    f"set but inflow_segment_shares_drivetrain is None."
+                )
+            missing_segs = set(self.inflow_segment_shares_final) - valid_segments
+            if missing_segs:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final has "
+                    f"unrecognized segments: {sorted(missing_segs)}."
+                )
+            total = sum(self.inflow_segment_shares_final.values())
+            if not (0.999 <= total <= 1.001):
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final sums "
+                    f"to {total:.6f}, expected 1.0."
+                )
+        if self.inflow_segment_share_spread is not None:
+            if self.inflow_segment_shares_final is None:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_share_spread is set "
+                    f"but inflow_segment_shares_final is None -- nothing to sample around."
+                )
+            if isinstance(self.inflow_segment_share_spread, AsymmetricSpread):
+                issues += self.inflow_segment_share_spread.validate(
+                    field_name=f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread"
+                )
+            elif self.inflow_segment_share_spread < 0:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread = "
+                    f"{self.inflow_segment_share_spread} must be >= 0."
+                )
+        for drv, change in self.lifetime_change_by_drv.items():
+            if change.scale_lambda <= 0 or change.shape_k <= 0:
+                issues.append(
+                    f"adjusted_flows.scenarios['{self.name}'].lifetime_change_by_drv['{drv}'] "
+                    f"has non-positive shape_k/scale_lambda."
+                )
+        for name_, mapping in (
+            ("export_share_overrides", self.export_share_overrides),
+            ("unknown_whereabouts_share_overrides", self.unknown_whereabouts_share_overrides),
+        ):
+            for drv, share in mapping.items():
+                if not (0.0 <= share <= 1.0):
+                    issues.append(
+                        f"adjusted_flows.scenarios['{self.name}'].{name_}['{drv}'] = {share} "
+                        f"is outside [0, 1]."
+                    )
+        if self.stock_modifier <= 0:
+            issues.append(f"adjusted_flows.scenarios['{self.name}'].stock_modifier must be positive.")
+        return issues
+
+
+# The 12 vehicle segments (A-F, JA-JF) -- matches `MaterialsParams.segment_map`'s keys.
+_ADJUSTED_FLOWS_SEGMENTS: tuple[str, ...] = ("A", "B", "C", "D", "E", "F", "JA", "JB", "JC", "JD", "JE", "JF")
+
+# ---------------------------------------------------------------------------
+# STAGE 01 -- Data prep  (code/01_data_prep.py)
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # Stage 01 -- Data prep
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DataPrepParams:
+    """
+    The very first stage: reads the raw REMIND fleet projections and the trade data,
+    trims them to Europe, fills in the years REMIND does not supply, and hands a clean
+    fleet trajectory to stage 02.
+
+    The setting that matters most here is `scenario` -- it decides which possible
+    future the entire pipeline is built on.
+    """
+
+    # WHICH REMIND SCENARIO THE WHOLE MODEL RUNS ON.
+    # REMIND is the external energy-system model that tells this one how big the
+    # European car fleet should be, year by year, and what mix of drivetrains it holds.
+    # Everything downstream inherits this choice.
+    # SAFE TO CHANGE: yes -- pick any name from `scenario_list` below. This is one of
+    # the most consequential single edits in the file.
     scenario: str = "npi25"
+
+    # The REMIND scenarios available to choose from.
+    # SAFE TO CHANGE: only alongside `remind_scenario_files` below -- a name here with
+    # no matching file entry cannot be loaded.
     scenario_list: tuple[str, ...] = ("b650", "npi25", "ssp2L", "ssp2M", "ssp1")
 
+    # Where each scenario's REMIND data file actually lives.
+    # SAFE TO CHANGE: yes, when new REMIND runs arrive. Paths are relative to the raw
+    # data folder set further down.
     remind_scenario_files: dict[str, tuple[str, str]] = field(default_factory=lambda: {
         "b650": ("REMIND/REMIND_generic_SSP2-EU21-PkBudg650.mif", ";"),
         "npi25": ("REMIND/REMIND_generic_SSP2-EU21-NPi2025.mif", ";"),
@@ -59,15 +362,44 @@ class DataPrepParams:
         "ssp1": ("REMIND/REMIND_generic_C_SMIPv08-VLLO-SSP1-PkPrice500-def-rem-6.mif", ";"),
     })
 
+    # The first and last year the model covers.
+    # Years before REMIND's own data begins are reconstructed by the model (see the
+    # pre-2015 settings below), so the earliest years are estimates, not data.
+    # SAFE TO CHANGE: with care. Start must be before end.
     start_year_model: int = 1950
+
     end_year_model: int = 2070
+
+    # The first and last year drawn on this stage's charts. Display only -- the model
+    # still computes the full range above.
+    # SAFE TO CHANGE: yes.
     start_year_plotting: int = 2015
+
     end_year_plotting: int = 2070
-    composition_extend_from_year: int = 2050  # Only used in 04_03 traction motors. Check if still needed
-    accelerating_year: int = 2026  # FLAGGED (L2, still open): no cited derivation.
+
+    # From this year onward, vehicle composition is held constant at its last known
+    # value -- nobody has credible material-composition forecasts beyond it.
+    # SAFE TO CHANGE: yes, but pushing it later means inventing composition trends.
+    composition_extend_from_year: int = 2050
+
+    # The year from which the model applies the accelerated fleet-turnover assumption.
+    # SAFE TO CHANGE: yes.
+    accelerating_year: int = 2026
+
+    # Numbers smaller than this are treated as zero when tidying the REMIND data.
+    # Guards against meaningless dust like 0.0000001 vehicles.
+    # SAFE TO CHANGE: rarely needed. Too large a value would delete real small
+    # quantities -- early-year FCEV or Gases, for instance.
     threshold: float = 1e-4
+
+    # The row label inside the REMIND file identifying passenger-car stock. This is how
+    # the loader finds the right rows among thousands.
+    # SAFE TO CHANGE: no, unless REMIND itself renames its variables.
     prefix: str = "Stock|Transport|Pass|Road|LDV"
 
+    # The countries counted as "Europe" for this study, by full name.
+    # SAFE TO CHANGE: yes, but it must stay consistent with the ISO-2 list below --
+    # the two describe the same set in two different notations.
     eu_countries: tuple[str, ...] = (
         "Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czech Republic",
         "Denmark", "Estonia", "Finland", "France", "Germany", "Greece",
@@ -75,21 +407,10 @@ class DataPrepParams:
         "Malta", "Netherlands", "Poland", "Portugal", "Romania",
         "Slovakia", "Slovenia", "Spain", "Sweden",
     )
-    # [NEW] Same 27 countries as `eu_countries` above, but as ISO2 codes -- SEPARATE
-    # field, not a replacement. `eu_countries` (full names) is also used directly in
-    # `clean_export_data` (data_prep.py), filtering against `Exp_Name`/`Imp_Name`
-    # columns that are canonicalized to full names via NAME_MAP -- changing its
-    # representation would have broken that call site. This field exists ONLY for
-    # `prepare_eea_share_tables`'s `country_scope` (disaggregation.py), which filters
-    # EEA_final_data.csv's own "Country" column -- CONFIRMED via a real diagnostic
-    # run (2026-07-11) to contain ISO2 codes, not full names. Before this field
-    # existed, `03_01_flowdriven.py` passed `tuple(p01.eu_countries) + ("NO", "IS")`
-    # directly as `country_scope` -- since full country names never match ISO2 codes,
-    # that silently matched almost nothing (0.5% of total registration volume in the
-    # real file -- effectively just "NO"/"IS", which happen to already be 2-letter
-    # codes by coincidence), meaning segment shares, the Diesel/Petrol split, AND the
-    # HEV/PHEV split were all being computed from Norway+Iceland alone instead of the
-    # EU-27. Order matches `eu_countries` above 1:1, for easy cross-checking.
+
+    # The same country set, as two-letter codes, for data files that use codes instead
+    # of names.
+    # SAFE TO CHANGE: yes, but keep it aligned with the list above.
     eu_countries_iso2: tuple[str, ...] = (
         "AT", "BE", "BG", "HR", "CY", "CZ",
         "DK", "EE", "FI", "FR", "DE", "GR",
@@ -98,192 +419,103 @@ class DataPrepParams:
         "SK", "SI", "ES", "SE",
     )
 
-    # [BUG FOUND, this round -- NOT YET FIXED BY THIS FIELD ALONE, see `data_prep.py`'s
-    # `prepare_remind_scenarios` for the actual fix] `remind_regions` was, until this
-    # round, used to build the EU total for EVERY scenario by SUMMING these 10 REMIND-EU
-    # sub-region codes. Confirmed directly against the raw `.mif` files: `"UKI"` is
-    # REMIND-EU's combined UK+Ireland region -- there is NO finer breakdown available
-    # that separates the two. Summing this list therefore silently included the UK in
-    # every "EU" stock total, for every scenario using this list, this whole time.
-    # Verified against real ACEA fleet data (b650/npi25, 2005-2020): including UKI made
-    # REMIND's total stock 9-22% higher than the real EU27-without-UK fleet, every year
-    # (see EVmodel_review_consolidated.md for the full year-by-year comparison) -- NOT
-    # noise, a systematic, one-directional bias of a magnitude in the same ballpark as
-    # the earlier-diagnosed "modeled fleet-wide inflow is ~2x the real ~13.5M/year"
-    # finding, and very likely a meaningful contributor to it.
-    #
-    # THE FIX (implemented in `data_prep.py`, not here): for scenarios whose raw file
-    # provides REMIND's own NATIVE `"EU27"` variable (confirmed present for both b650
-    # and npi25) -- which by definition excludes the UK and includes Ireland, no manual
-    # sub-region splitting needed -- `prepare_remind_scenarios` now uses that directly
-    # instead of summing `remind_regions`. `remind_regions` itself is UNCHANGED (still
-    # `UKI` and all) and is KEPT as the fallback path for any scenario that does NOT
-    # provide a native `"EU27"` variable -- see `norway_iceland_share_of_neu` below for
-    # the other half of this fix (EU27 alone is missing Norway/Iceland).
+    # Which REMIND world regions add up to Europe. REMIND does not have a single
+    # "EU" region, so these are summed.
+    # SAFE TO CHANGE: no, unless REMIND changes its regional definitions.
     remind_regions: tuple[str, ...] = ("DEU", "ECE", "ECS", "ENC", "ESC", "ESW", "EWN", "FRA", "UKI", "NEN")
+
+    # The drivetrain names REMIND uses. Coarser than ours: it has one "Liquids"
+    # category covering both petrol and diesel, and one "Hybrid" covering HEV and PHEV.
+    # SAFE TO CHANGE: no, these are REMIND's own names.
     remind_technology: tuple[str, ...] = ("BEV", "Hybrid", "Liquids", "Gases", "FCEV")
+
+    # The drivetrain names THIS model uses -- finer than REMIND's. Splitting REMIND's
+    # coarse categories into these is a large part of what stage 03_01 does.
+    # SAFE TO CHANGE: no, without matching changes throughout the pipeline.
     target_technology: tuple[str, ...] = ("BEV", "HEV", "PHEV", "Petrol", "Diesel")
 
-    # [NEW, this round] The other half of the UKI fix above. REMIND's native `"EU27"`
-    # variable correctly excludes the UK -- but it ALSO excludes Norway and Iceland
-    # (neither is an EU member), even though this project's target scope everywhere
-    # else is `EU27+NO+IS` (see e.g. `clean_export_data`'s EEA handling). Neither
-    # Norway nor Iceland is reported as its own REMIND region at any resolution in
-    # these files -- confirmed directly: the finest available bucket containing them is
-    # `"NEU"` ("Non-EU Europe"), which ALSO bundles in Switzerland and, going by its
-    # size (~27.5M vehicles in 2024, far more than Switzerland's real ~4.7M fleet alone
-    # could account for), very likely other non-EU European countries too (Turkey and/or
-    # Balkan states are the plausible candidates, unconfirmed -- REMIND provides no
-    # further breakdown).
-    #
-    # DERIVATION of this ratio (real, external data, provided directly by the user this
-    # round -- NOT estimated or looked up by Claude):
-    #   Norway real stock,  2024: 2,880,879 vehicles
-    #   Iceland real stock, 2024:   249,032 vehicles
-    #   REMIND `NEU` stock, 2024: 27.486M (b650; REMIND reports 2020/2025 only --
-    #                              linearly interpolated to 2024 for a same-year
-    #                              comparison; npi25's NEU is nearly identical)
-    #   norway_share  = 2.880879 / 27.486 = 0.1048  (10.48%)
-    #   iceland_share = 0.249032 / 27.486 = 0.0091  ( 0.91%)
-    #   combined      = 0.1048 + 0.0091  = 0.1139   (11.39%)
-    #
-    # USAGE: `EU27_plus_NO_IS(t) = EU27_native(t) + norway_iceland_share_of_neu *
-    # NEU_native(t)`, for every year `t` -- both `EU27_native` and `NEU_native` are
-    # REMIND's OWN scenario-varying trajectories, so Norway/Iceland's BEV-transition
-    # SPEED still moves with whatever that scenario assumes for the whole `NEU` region
-    # (the reason this approach was chosen over substituting a static real-world
-    # number: Norway's aggressive, scenario-relevant EV-adoption dynamics are exactly
-    # what would be lost by that alternative) -- only their absolute SIZE is anchored
-    # to real data, via this one fixed ratio.
-    #
-    # KNOWN LIMITATION, confirmed and accepted as a deliberate simplification (not a
-    # hidden assumption): this ratio is held CONSTANT from 2024 through
-    # `end_year_model` (2070). In reality Norway/Iceland's share of whatever else is
-    # bundled into `NEU` could drift over that horizon in either direction -- there is
-    # no way to track that drift with the data available (REMIND provides no finer
-    # breakdown of `NEU`, and no scenario-specific projection exists for Norway/Iceland
-    # alone). A single fixed ratio is the most defensible choice available, not a
-    # claim that the true share won't change.
+    # Norway and Iceland's share of REMIND's Northern-Europe region, used to subtract
+    # them out -- they are not in the study's EU scope.
+    # SAFE TO CHANGE: only with a better estimate. It is a fraction between 0 and 1.
     norway_iceland_share_of_neu: float = 0.1139
 
-    # [NEW, this round] Companion to `norway_iceland_share_of_neu` above -- fixes the
-    # SAME underlying UKI issue for `ssp2L`/`ssp2M`/`ssp1`, which use a COMPLETELY
-    # DIFFERENT, coarser 12-region REMIND taxonomy (`CAZ, CHA, EUR, IND, JPN, LAM, MEA,
-    # NEU, OAS, REF, SSA, USA, World`) -- confirmed directly: no `EU27`, no `UKI`, no
-    # sub-region codes at all, only a single `"EUR"` variable and a separate `"NEU"`.
-    #
-    # Confirmed `"EUR"` in THIS taxonomy is NOT EU27 -- it is the SAME "all of Europe
-    # incl. UK+Ireland" scope as b650/npi25's own native `"EUR"` variable (within ~1%
-    # of it, every year checked: 2015 244.5M vs. 242.4M, 2020 261.7M vs. 259.3M). Since
-    # b650/npi25 uniquely provide BOTH native `"EUR"` and native `"EU27"`
-    # simultaneously, the UK+Ireland SHARE of `"EUR"` can be measured directly from
-    # them and reused here, where no native `EU27` exists to check against directly:
-    #   b650:  2005 12.47%, 2010 11.72%, 2015 11.74%, 2020 11.69%
-    #   npi25: 2005 12.52%, 2010 11.77%, 2015 11.78%, 2020 11.77%
-    #   mean of all 8:  0.1193  (11.93%) -- stabilizes closer to ~11.7-11.8% from 2010
-    #   onward; 2005 is a mild outlier pulling the overall mean up slightly. The full,
-    #   un-cherry-picked mean is used here rather than excluding 2005.
-    #
-    # USAGE (see `data_prep.py`'s `prepare_remind_scenarios`): for a scenario with
-    # native `"EUR"`+`"NEU"` but NO native `"EU27"` --
-    #   EU27_plus_NO_IS(t) = EUR_native(t) * (1 - uk_ireland_share_of_eur)
-    #                        + norway_iceland_share_of_neu * NEU_native(t)
-    # Same constant-ratio limitation as `norway_iceland_share_of_neu` above: held fixed
-    # across the whole 1975-2070 horizon, not a claim that the true UK+Ireland share of
-    # "all of Europe" won't drift over that time.
+    # The UK and Ireland's share of REMIND's Europe region, used the same way.
+    # SAFE TO CHANGE: only with a better estimate.
     uk_ireland_share_of_eur: float = 0.1193
 
-    # ---------------------------------------------------------------------------
-    # [NEW, this round] PRE-2015 MISSING HISTORY -- separate problem from the UKI
-    # region-scope fix above, though related: confirmed directly against the raw
-    # files that ssp2L/ssp2M/ssp1 report NaN for every technology, every region, in
-    # 2005 and 2010 -- real data only starts at 2015. Left as-is, this NaN silently
-    # became `0.0` under `.groupby().sum()`'s default behavior, then got interpolated
-    # (cubic/pchip) across a `0 -> 0 -> real_value` jump -- producing wild overshoot
-    # artifacts (confirmed for Liquids: a multi-hundred-million-vehicle spike) that
-    # then fed a WRONG `stock0` into `build_backcast_state`'s pre-t0 cohort
-    # reconstruction ("the backwards simulation of the stock gets out of hand", per
-    # the user's own description this round).
-    #
-    # THE CHOSEN FIX (confirmed with the user, current best approach -- explicitly
-    # expected to possibly change later, hence `pre2015_history_method` below being
-    # its own field rather than this being hardcoded as the only option): for years
-    # before `pre2015_history_splice_year`, SPLICE IN the real historical trajectory
-    # already available from `pre2015_history_donor_scenarios` (b650/npi25 -- both
-    # have genuine, non-NaN REMIND-EU data back to 2005, and -- since this round's UKI
-    # fix -- are now on the SAME EU27+NO+IS scope as ssp2L/ssp2M/ssp1, so the splice
-    # seam is small: checked directly, all three land within ~1% of each other at
-    # 2015). Per-DRIVETRAIN, not just per-total -- preserves the real historical
-    # drivetrain mix (e.g. near-zero BEV before ~2011), not just a scaled total.
-    #
-    # [EXTENSION POINT] `pre2015_history_method` exists SPECIFICALLY so a future
-    # change of approach -- e.g. the user's own alternative idea, floated this round:
-    # fitting a parameterized function to some reference values, rather than splicing
-    # in another scenario's real data -- is a NEW METHOD NAME plus a new branch in
-    # `data_prep.py`'s `fill_missing_pre_year_history` dispatch, not a rewrite of the
-    # surrounding pipeline. See that function's docstring for exactly where to add one.
+    # HOW TO FILL IN HISTORY BEFORE 2015. Some REMIND scenarios do not supply the past;
+    # this decides what to do about that.
+    #     "donor_scenario_average"  average the scenarios that DO have history and use
+    #                               that for the ones that do not (current)
+    # SAFE TO CHANGE: yes, if another method is implemented. History is shared reality,
+    # so borrowing it across scenarios is reasonable -- scenarios should differ in the
+    # future, not the past.
     pre2015_history_method: str = "donor_scenario_average"
 
-    # Which scenarios have the pre-2015 gap and need patching. Explicit opt-in list
-    # (not auto-detected from which years are NaN) so it's always clear from reading
-    # params_schema.py, without re-inspecting raw files, exactly which scenarios this
-    # affects.
+    # The scenarios MISSING pre-2015 history, which therefore receive it.
+    # SAFE TO CHANGE: only if REMIND's data coverage changes.
     pre2015_history_target_scenarios: tuple[str, ...] = ("ssp2L", "ssp2M", "ssp1")
 
-    # Which scenarios' real historical data to splice in, averaged together
-    # (currently only meaningful for `pre2015_history_method="donor_scenario_average"`
-    # -- see that method's docstring in data_prep.py for exactly how the average is
-    # computed). b650 and npi25 chosen because they're the only two scenarios with
-    # genuine non-NaN REMIND-EU data before 2015, and -- since this round's UKI fix --
-    # are on the same EU27+NO+IS scope as the scenarios being patched.
+    # The scenarios that HAVE pre-2015 history and supply it to the others.
+    # SAFE TO CHANGE: only if REMIND's data coverage changes.
     pre2015_history_donor_scenarios: tuple[str, ...] = ("b650", "npi25")
 
-    # The cutover year: every year >= this uses the target scenario's OWN real data,
-    # unchanged; every year < this uses the donor(s)' spliced-in history instead.
-    # Confirmed directly against the raw files (2015 is the first non-NaN year for
-    # ssp2L/ssp2M/ssp1, every technology, every region) -- not a tunable "how much
-    # history do we want" knob, this is set to match where the real data gap actually
-    # ends.
+    # The year where borrowed history stops and each scenario's own data takes over.
+    # SAFE TO CHANGE: yes, but it must match where the donor data actually ends, or the
+    # join leaves a visible step in the fleet curve.
     pre2015_history_splice_year: int = 2015
-    # ---------------------------------------------------------------------------
 
+    # The vehicle size classes used in the source data, before they are mapped onto
+    # this model's A-F / JA-JF segments.
+    # SAFE TO CHANGE: no, unless the source data changes its class names.
     target_class_detail: tuple[str, ...] = (
         "Large Car and SUV", "Van", "Compact Car", "Midsize Car", "Mini Car", "Subcompact Car",
     )
 
+    # Which columns of the REMIND data identify a row, and what to call them here.
+    # SAFE TO CHANGE: no, unless the source format changes.
     attribute_list: tuple[str, ...] = ("Region", "technology")
+
     key_names: tuple[str, ...] = ("Region", "Drivetrain")
+
+    # Which chemical elements the material analysis tracks. The second list is the same
+    # set without aluminium and copper, for charts where those two dominate so heavily
+    # that everything else becomes invisible.
+    # SAFE TO CHANGE: yes, if composition data exists for the elements you add.
     element_list: tuple[str, ...] = tuple(ELEMENT_LIST)
+
     element_list_noAlCu: tuple[str, ...] = tuple(ELEMENT_LIST_NO_AL_CU)
 
+    # Where raw input data is read from, and where processed results are written.
+    # Both are relative to the `code/` directory.
+    # SAFE TO CHANGE: only if you actually move those folders.
     input_dir: str = "../data/raw/"
+
     output_dir: str = "../data/processed/"
-    # [REMOVED, confirmed dead -- see find_multiple_param_usages.py's project-wide
-    # search output] These two fields fed the OLD version of 04_01, which loaded
-    # the ELV composition workbooks directly by file name. 04_01 was rewritten to
-    # use the newer 36_MonteCarlo_Summary.xlsx-based composition summary +
-    # histogram loader instead -- nothing in the codebase reads these two fields
-    # anymore. Uncomment exactly as-is below if that old direct-workbook-loading
-    # path is ever needed again:
-    # composition_file_name: str = "ELV_2010_2050.xlsx"
-    # petrol_composition_file_name: str = "ELVComponent_1990_2050_Petrol.xlsx"
+
+    # The workbook of used-vehicle export trade data.
+    # SAFE TO CHANGE: yes, when a newer version arrives.
     export_data_file_name: str = "usedvehicles_v1.2.xlsx"
 
-    # [REMOVED, confirmed dead -- see find_multiple_param_usages.py's project-wide
-    # search output] The sheet names the OLD version of 04_01 read directly from
-    # the ELV composition workbook (composition_file_name above, before it too was
-    # removed). No longer read anywhere. Uncomment exactly as-is below if that old
-    # direct-workbook-loading path is ever needed again:
-    # sheets: tuple[str, ...] = (
-    #     "petrolCar_1980_2050", "dieselCar_1980_2050", "BEVCar_1980_2050",
-    #     "HEVCar_1980_2050", "PHEVCar_1980_2050", "otherCar_1980_2050",
-    # )
+    # REMIND reports the fleet only every five years; this decides how the years in
+    # between are filled in.
+    #     "cubic"   a smooth curve through the known points (current)
+    #     "linear"  straight lines between them
+    # SAFE TO CHANGE: yes. "cubic" looks more natural but can overshoot slightly where
+    # the trend turns sharply; "linear" never overshoots but has visible kinks.
+    stock_interpolation_method: str = "cubic"
 
-    stock_interpolation_method: str = "cubic"  # resolves C3; "cubic" or "pchip"
-
+    # The range of years to keep from the export trade data. The upper bound is
+    # EXCLUSIVE -- 2023 means "up to and including 2022".
+    # SAFE TO CHANGE: yes, as new trade data arrives.
     export_min_year: int = 2005
+
     export_max_year_exclusive: int = 2023
 
+    # Fixes for wrong country codes in the source data -- it writes "IRE" for Ireland,
+    # where the correct code is "IRL". Without this, Ireland's vehicles are silently
+    # dropped.
+    # SAFE TO CHANGE: yes, add an entry whenever you find another bad code.
     iso3_corrections: dict[str, str] = field(default_factory=lambda: {"IRE": "IRL"})
 
     def validate(self) -> list[str]:
@@ -363,67 +595,45 @@ class DataPrepParams:
 
 
 # ---------------------------------------------------------------------------
-# Stage 02 -- Stock flow
-# ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class WeibullLifetime:
-    """Vehicle survival curve parameters: Weibull(shape_k, scale_lambda)."""
-    shape_k: float
-    scale_lambda: float
-
-
-@dataclass(frozen=True)
-class LifetimeOverride:
-    """Optional manual override window for a drivetrain's effective lifetime."""
-    start_year: int
-    end_year: int
-    shape_k: float
-    scale_lambda: float
-
-
-@dataclass(frozen=True)
-class AsymmetricSpread:
-    """
-    Asymmetric relative spread around a point estimate: the true value could be
-    `lower` fraction SMALLER or `upper` fraction LARGER than the point estimate,
-    not assumed equal. Used to build
-    `Triangular(point*(1-lower), point, point*(1+upper))`.
-
-    A plain float is still accepted everywhere `lifetime_scale_lambda_relative_
-    spread` is used (meaning symmetric: `lower = upper = that float`) -- this
-    type exists for when that symmetry assumption doesn't hold, e.g. "10%
-    shorter-lived is plausible, but up to 20% longer-lived is also plausible"
-    (`AsymmetricSpread(lower=0.1, upper=0.2)`), which a flat +/-15% would
-    misrepresent either way.
-
-    NOTE: an asymmetric Triangular's MEAN is `(low + mode + high) / 3`, not
-    `point` -- it shifts toward whichever side has the wider spread. This is
-    correct distribution behavior: if the belief is "more likely to run longer
-    than shorter", the sampled mean SHOULD sit above `point`.
-    """
-    lower: float
-    upper: float
-
-    def validate(self, *, field_name: str) -> list[str]:
-        issues: list[str] = []
-        if self.lower < 0:
-            issues.append(f"{field_name}.lower={self.lower} must be >= 0.")
-        if self.upper < 0:
-            issues.append(f"{field_name}.upper={self.upper} must be >= 0.")
-        return issues
 
 
 @dataclass(frozen=True)
 class StockFlowParams:
-    model_end_year: int = 2070
-    last_exp_data_year: int = 2022
-    init_max_age: int = 50
-    # [NEW, centralized] Was a hardcoded local variable in 02_stockdriven.py's main().
-    # Moved here because stage 03's Monte Carlo extension needs the IDENTICAL value to
-    # regenerate stage 02's per-year cohort results from the same saved scale_lambda
-    # draws -- if this were hardcoded separately in two files, they could silently
-    # drift out of sync.
+    """
+    Everything stage 02 needs: how big the fleet should be, how long vehicles last,
+    what happens to them when they are scrapped, and how uncertain each of those is.
 
+    Read it in four parts:
+      1. the model's time span and vehicle lifetimes
+      2. what happens to retired vehicles (collected / exported / untraceable)
+      3. rules for how strictly to follow the prescribed fleet path, including
+         phase-outs and hard stops
+      4. uncertainty settings, used only when the Monte Carlo analysis runs
+    """
+
+    # The last year the model simulates.
+    # SAFE TO CHANGE: yes, but everything downstream inherits it -- charts, cumulative
+    # totals and the material results in stage 04 all stop here.
+    model_end_year: int = 2070
+
+    # The last year for which real vehicle-export trade data exists. After this year
+    # the model has to assume export behaviour rather than read it.
+    # SAFE TO CHANGE: only when newer trade data actually arrives.
+    last_exp_data_year: int = 2022
+
+    # The oldest vehicle age, in years, the model tracks. Anything older is treated as
+    # gone. 50 is generous -- almost no car survives that long.
+    # SAFE TO CHANGE: rarely needed. Raising it costs memory and time for vehicles that
+    # have essentially all been scrapped already.
+    init_max_age: int = 50
+
+    # HOW LONG VEHICLES LAST, per drivetrain. See WeibullLifetime in the shared
+    # building blocks above for what the two numbers mean -- in short, the second one
+    # (scale_lambda) is roughly the typical lifetime in years.
+    # Every drivetrain currently uses the same curve: typical life ~18 years.
+    # SAFE TO CHANGE: yes -- and this is one of the highest-impact settings in the
+    # model. Longer lifetimes mean vehicles leave the fleet later, which delays all the
+    # recycling and material-recovery numbers downstream.
     lifetime_by_drv: dict[str, WeibullLifetime] = field(default_factory=lambda: {
         "Hybrid": WeibullLifetime(3.0, 18.0),
         "PHEV":   WeibullLifetime(3.0, 18.0),
@@ -436,16 +646,30 @@ class StockFlowParams:
         "FCEV":   WeibullLifetime(3.0, 18.0),
     })
 
+    # Optional "for these years only, use a different lifetime" exceptions.
+    # `None` for a drivetrain means no exception -- use the normal lifetime above.
+    # SAFE TO CHANGE: yes. Set one only if you have a concrete reason (a scrappage
+    # scheme, a known bad model generation). See LifetimeOverride above.
     lifetime_override_by_drv: dict[str, LifetimeOverride | None] = field(default_factory=lambda: {
         drv: None for drv in ALL_DRIVETRAINS
     })
 
+    # Of the vehicles that leave the fleet, the fraction that simply cannot be traced --
+    # not recorded as recycled, not recorded as exported. 0.43 means 43%.
+    # BEV is far lower (10%) because battery vehicles are tracked much more closely.
+    # SAFE TO CHANGE: yes. Each value is a fraction between 0 and 1. This is an
+    # ESTIMATE, not a measurement -- which is why it also carries the widest
+    # uncertainty of the three outflow shares (see further below).
     unknown_whereabouts_share: dict[str, float] = field(default_factory=lambda: {
         "BEV": 0.1,
         "HEV": 0.43, "PHEV": 0.43, "FCEV": 0.43, "Gases": 0.43,
         "Diesel": 0.43, "Petrol": 0.43, "Liquids": 0.43, "Hybrid": 0.43,
     })
 
+    # Of the vehicles that leave the fleet, the fraction exported out of the EU as
+    # second-hand cars. 0.08 means 8%. BEVs are exported much less (2%) so far.
+    # SAFE TO CHANGE: yes, values between 0 and 1. Note the two entries marked
+    # PLACEHOLDER -- those are guesses standing in until real numbers exist.
     export_share_by_drv: dict[str, float] = field(default_factory=lambda: {
         "BEV": 0.02,
         "HEV": 0.08, "PHEV": 0.08, "Diesel": 0.08, "Petrol": 0.08,
@@ -454,20 +678,14 @@ class StockFlowParams:
         "Gases": 0.08,  # PLACEHOLDER, not a verified real value.
     })
 
-    # [NEW] Previously only ever computed IMPLICITLY as
-    # `1 - unknown_whereabouts_share - export_share_by_drv` inside
-    # `disaggregation.compute_collected_export_unknown_shares` -- now an explicit
-    # point estimate in its own right, so it can carry its own Monte Carlo spread
-    # (`collected_share_relative_spread` below) instead of silently absorbing
-    # whatever the other two happen to sample. Values below are exactly
-    # `1 - unknown_whereabouts_share[drv] - export_share_by_drv[drv]` for every
-    # drivetrain -- numerically identical to the old implicit remainder, so the
-    # DETERMINISTIC (non-MC) path is byte-identical to before this change. What
-    # changes is only how Monte Carlo treats the three shares (see
-    # `*_share_relative_spread` below): none of the three is a privileged
-    # "remainder" that absorbs the other two's sampling noise -- collected, export,
-    # and unknown_whereabouts are all measured/estimated with their OWN
-    # uncertainty, and are sampled independently then normalized to sum to 1.
+    # Of the vehicles that leave the fleet, the fraction properly collected for
+    # recycling. 0.49 means 49%. BEV is much higher (88%) because batteries are
+    # valuable and regulated.
+    # These three shares -- collected, exported, unknown -- are what every retired
+    # vehicle is split into, so they work together. The model normalises them so they
+    # add up, but if you set values that are wildly inconsistent you will get a
+    # normalised result you did not intend.
+    # SAFE TO CHANGE: yes, values between 0 and 1.
     collected_share_by_drv: dict[str, float] = field(default_factory=lambda: {
         "BEV": 0.88,
         "HEV": 0.49, "PHEV": 0.49, "Diesel": 0.49, "Petrol": 0.49,
@@ -476,278 +694,76 @@ class StockFlowParams:
         "Gases": 0.49,  # PLACEHOLDER, matches export_share_by_drv's own placeholder note.
     })
 
+    # WHAT TO DO WHEN THE MATHS ASKS FOR NEGATIVE SALES.
+    # The model works out sales as "the fleet size we are told to hit, minus the cars
+    # that survived from previous years". When a target fleet shrinks faster than old
+    # cars are scrapped, that subtraction goes negative -- which would mean un-selling
+    # cars. Two choices:
+    #     "report_only"     record the negative number for inspection, but simulate
+    #                       zero sales that year. Nothing is forced. (current)
+    #     "clip_to_target"  force extra vehicles out of the fleet so the target is met
+    #                       exactly.
+    # SAFE TO CHANGE: yes, but understand which question you are asking. "report_only"
+    # keeps the fleet honest and lets it sit above target; "clip_to_target" keeps the
+    # target exact by scrapping vehicles that would not otherwise have gone.
     negative_inflow_policy: str = "report_only"
-    # -------------------------------------------------------------------------
-    # [PLAIN-LANGUAGE EXPLANATION] This is the ONE global switch -- not per
-    # drivetrain -- for what to do in a year where the math would need a
-    # NEGATIVE number of new cars. That happens when natural scrapping alone
-    # already shrinks the fleet faster than REMIND's own falling target for
-    # that year -- there's no real-world way to "un-scrap" cars to make up the
-    # difference, so something has to give. Two choices:
-    #
-    #   "report_only"     (default) -- do nothing about it. Add ZERO new cars
-    #                       that year, and just let the modeled fleet stay
-    #                       LARGER than REMIND's target from then on. Nothing
-    #                       is corrected -- the mismatch is only ever reported,
-    #                       so you can see it happened, never fixed.
-    #
-    #   "clip_to_target"  -- actively force the modeled fleet size back down to
-    #                       exactly match REMIND's target that year, by
-    #                       removing extra cars from the existing fleet (on top
-    #                       of ordinary scrapping). Nothing is added; instead,
-    #                       something extra is taken away so the numbers line
-    #                       up exactly.
-    #
-    # WHO ACTUALLY USES THIS SWITCH: every drivetrain uses it EXCEPT one
-    # specific case -- a drivetrain whose `inflow_mode_by_drv` (right below) is
-    # set to "remind_literal" ALWAYS behaves as "clip_to_target" for itself, no
-    # matter what this switch says. Every other drivetrain (the "remind_soft"
-    # default below, or any drivetrain not listed in `inflow_mode_by_drv` at
-    # all) simply uses whatever THIS switch says. So to know what one specific
-    # drivetrain actually does, check its `inflow_mode_by_drv` entry FIRST --
-    # only if that says "remind_soft" (or it's not listed at all) does this
-    # switch's value actually matter for it.
-    #
-    # A second, more detailed copy of this same explanation also lives further
-    # below, right before `hard_zero_inflow_from_year_by_drv` -- left in place
-    # rather than deleted, so nothing that was already there is lost.
-    # -------------------------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # [NEW] Per-drivetrain choice of HOW that drivetrain's inflow gets resolved
-    # against REMIND's prescribed stock target -- three alternatives, agreed
-    # after discussing the Liquids negative-inflow/phantom-inflow issue (see
-    # 02_stockdriven.py's module docstring, "hard_zero_inflow_from_year_by_drv"
-    # section, and stockflow_model.py for the underlying mechanics):
-    #   "remind_literal"   -- track REMIND's target as closely as possible: uses
-    #                         "clip_to_target" (forces stock to match target
-    #                         exactly, even in a negative-residual year) AND
-    #                         disables that drivetrain's hard_zero_inflow_from_
-    #                         year/until_year overrides, if any -- nothing is
-    #                         allowed to deviate from REMIND's own number.
-    #   "remind_soft"      -- (default for every drivetrain not listed here,
-    #                         and the value Liquids already effectively uses
-    #                         today) uses the GLOBAL negative_inflow_policy
-    #                         above (report_only by default) plus that
-    #                         drivetrain's existing hard_zero_inflow_from_year_
-    #                         by_drv/until_year_by_drv overrides, unchanged.
-    #   "inflow_phaseout"  -- [NEW MECHANISM] ignores the REMIND residual for
-    #                         inflow once the phase-out window starts (see
-    #                         inflow_phaseout_by_drv below): inflow is instead
-    #                         capped at a maximum SHARE of that year's TOTAL
-    #                         EU inflow across every other drivetrain, and
-    #                         stock becomes a pure OUTPUT of natural Weibull
-    #                         attrition on however much inflow the cap allowed
-    #                         in -- not back-solved from REMIND's stock number.
-    #                         Requires 02_stockdriven.py to run that drivetrain
-    #                         TWICE (once to learn its own and every other
-    #                         drivetrain's natural inflow, once more with the
-    #                         computed cap applied) -- see that file's main()
-    #                         for the two-pass implementation.
-    # Default `{"Liquids": "remind_soft"}` is BYTE-IDENTICAL to today's actual
-    # behavior (report_only + hard_zero_inflow_from_year_by_drv={"Liquids": 2050}
-    # already gives exactly this). Every drivetrain not present in this dict
-    # also gets "remind_soft" (`.get(drivetrain, "remind_soft")` at the call
-    # site) -- adding this field changes nothing until a value is edited.
-    # -------------------------------------------------------------------------
+    # HOW STRICTLY TO FOLLOW THE PRESCRIBED FLEET PATH, per drivetrain. Three options:
+    #     "remind_soft"       follow the target, but never force negative sales
+    #                         (uses the policy setting above). This is the default.
+    #     "remind_literal"    follow the target exactly, forcing vehicles out if needed.
+    #     "inflow_phaseout"   follow the target, but additionally cap this drivetrain's
+    #                         share of total sales -- see the next setting.
+    # A drivetrain not listed here uses "remind_soft".
+    # SAFE TO CHANGE: yes. NOTE that "inflow_phaseout" below is configured for Liquids
+    # but will do nothing until this is switched from "remind_soft" to
+    # "inflow_phaseout".
     inflow_mode_by_drv: dict[str, str] = field(default_factory=lambda: {
         "Liquids": "remind_soft",
     })
 
-    # [NEW] Only consulted for a drivetrain whose inflow_mode_by_drv is
-    # "inflow_phaseout" -- {drivetrain: (phaseout_start_year, max_share_of_total)}.
-    # `max_share_of_total` is that drivetrain's inflow as a fraction of TOTAL EU
-    # inflow across every OTHER active drivetrain that year (e.g. 0.10 == "this
-    # drivetrain's inflow must never exceed 10% of the true combined total that
-    # year, itself included" -- solved algebraically in 02_stockdriven.py as
-    # `cap(t) = other_drivetrains_inflow(t) * max_share / (1 - max_share)`, which
-    # is exactly the value that makes this drivetrain's SELF-INCLUSIVE share of
-    # the true total equal `max_share` -- see that file for the derivation). The
-    # phase-out window's END is still governed by hard_zero_inflow_from_year_
-    # by_drv (unchanged, e.g. Liquids' existing 2050 cutoff) -- this field only
-    # controls the START of capping and the cap's size, not when inflow finally
-    # reaches exactly 0.
+    # THE PHASE-OUT RULE: (from this year, at most this share of all new vehicles).
+    # (2035, 0.10) reads as "from 2035 onward, Liquids may be at most 10% of total
+    # sales" -- the EU phase-out expressed directly.
+    # ONLY APPLIES if the drivetrain's mode above is set to "inflow_phaseout".
+    # SAFE TO CHANGE: yes. The share is a fraction between 0 and 1.
     inflow_phaseout_by_drv: dict[str, tuple[int, float]] = field(default_factory=lambda: {
         "Liquids": (2035, 0.10),
     })
 
-    # [NEW] Monte Carlo uncertainty on the phase-out cap's own max_share (only
-    # consulted for a drivetrain whose inflow_mode_by_drv is "inflow_phaseout") --
-    # {drivetrain: (low, mode, high)}, a Triangular distribution. Per-draw: instead
-    # of always using the fixed max_share point value from inflow_phaseout_by_drv
-    # above, each Monte Carlo draw samples its OWN cap ceiling from this triangle,
-    # so the 10% cap itself becomes a range instead of a single hard number. The
-    # deterministic run is unaffected -- it always uses the fixed point value from
-    # inflow_phaseout_by_drv, no uncertainty there, same as every other point
-    # estimate in the deterministic path. A drivetrain missing from this dict falls
-    # back to a degenerate triangle at its own fixed point value (no uncertainty) --
-    # 02_stockdriven.py's Monte Carlo block already does this via
-    # `.get(drivetrain, (point_max_share, point_max_share, point_max_share))`, so
-    # this field can safely stay absent for any inflow_phaseout drivetrain you
-    # haven't given a real range for yet.
+    # Uncertainty on that cap, as (lowest, most likely, highest).
+    # (0.08, 0.10, 0.15) means the 10% cap could plausibly be as tight as 8% or as
+    # loose as 15%. Used only by the uncertainty analysis; the plain run uses the
+    # middle value.
+    # SAFE TO CHANGE: yes. Keep them in order: lowest <= most likely <= highest.
     inflow_phaseout_max_share_triangular_by_drv: dict[str, tuple[float, float, float]] = field(default_factory=lambda: {
         "Liquids": (0.08, 0.10, 0.15),
     })
 
-    # -------------------------------------------------------------------------
-    # [DISCUSSION, NOT YET IMPLEMENTED -- recorded here so both of us remember
-    # exactly what was agreed and how it would need to be built, next time this
-    # comes up] STOCK-TARGET UNCERTAINTY -- a genuinely separate question from
-    # every uncertainty field in this class.
-    # -------------------------------------------------------------------------
-    # lifetime_scale_lambda_relative_spread / unknown_whereabouts_share_std /
-    # export_share_std (below) are all about HOW the fleet turns over --
-    # lifetimes, export/unknown-whereabouts splits. NONE of them touch the
-    # actual SIZE of the future fleet: `stock_series` (REMIND's prescribed
-    # target(t)) is read ONCE and used identically, completely unperturbed, for
-    # EVERY Monte Carlo draw in `run_cohort_survival_monte_carlo` (confirmed by
-    # reading stockflow_model.py directly -- there is no sampling of
-    # `stock_series` anywhere in that file, today).
-    #
-    # Real EU fleet numbers are only actually KNOWN up to ~2023 (registration
-    # statistics). From then to `model_end_year` (2070), REMIND's own
-    # prescribed stock trajectory is itself just ONE projection among several
-    # plausible ones -- it should eventually be treated as an uncertain
-    # quantity, not a certainty, the same way lifetime and export-share
-    # assumptions already are.
-    #
-    # AGREED DESIGN, not yet built:
-    #   - A new per-drivetrain relative-spread field, e.g.
-    #     `stock_target_relative_spread_by_drv: dict[str, float]`, defaulting to
-    #     0.0 everywhere (== today's behavior, byte-identical, no perturbation
-    #     -- "if 0 then no uncertainty, but if something else then
-    #     uncertainty", per the agreed framing).
-    #   - Applies UPSTREAM of, and identically regardless of, which of the
-    #     three `inflow_mode_by_drv` policies above is active for that
-    #     drivetrain -- all three consume `target(t)` as their common starting
-    #     point, so a spread on `target(t)` itself is orthogonal to that 3-way
-    #     choice, not a 4th option competing with it.
-    #   - SAME per-draw convention already used for `lifetime_scale_lambda_
-    #     relative_spread` below: ONE multiplier sampled per Monte Carlo draw
-    #     (e.g. Triangular(1-spread, 1, 1+spread)), held CONSTANT across every
-    #     year within that draw, then applied multiplicatively to the whole
-    #     `target(t)` trajectory for that draw -- NOT independently re-sampled
-    #     year by year (a target that wiggles independently every year is not
-    #     physically meaningful; a draw representing "this whole future runs
-    #     X% high/low" is).
-    #   - Rather than guessing a spread percentage out of nothing: the 5 REMIND
-    #     scenario files already used by 01_data_prep.py's
-    #     `remind_scenario_files` (b650, npi25, ssp2L, ssp2M, ssp1) represent 5
-    #     different real projections of the same future. The actual spread
-    #     ACROSS those 5 scenarios, per drivetrain, is a real, empirically-
-    #     grounded way to size `stock_target_relative_spread_by_drv`, rather
-    #     than an assumed statistical distribution pulled from nothing.
-    # NOT YET IMPLEMENTED -- this section only documents the agreed design.
-    # -------------------------------------------------------------------------
-    # [NEW] Controls how 02_stockdriven.py's run_cohort_survival_model() handles a year
-    # where the residual-inflow formula goes negative (prescribed stock declining faster
-    # than natural Weibull attrition explains -- see MATH_MODELS.md 2.3).
-    #   "report_only"     -- (default, ORIGINAL behavior, unchanged) add zero that year;
-    #                         modeled stock EXCEEDS the falling target from then on (a
-    #                         surplus -- corrected this round, the original file's own
-    #                         comment had this backwards as a "shortfall").
-    #   "clip_to_target"  -- add zero inflow, but also force additional pro-rata outflow
-    #                         across all surviving cohorts so modeled stock hits the
-    #                         prescribed target exactly that year (removes the surplus).
-    #                         Implemented and tested, not yet the default -- switching
-    #                         changes real output numbers.
-    # See 02_stockdriven.py's NEGATIVE_INFLOW_POLICIES for the implementation, and
-    # HOW_TO_RUN_AND_VERIFY.md for how to verify either one.
-
+    # "NO MORE SALES AT ALL FROM THIS YEAR." An absolute stop, not a cap.
+    # Liquids and Hybrid stop in 2050.
+    # This overrides everything else -- it is the strongest statement in this file
+    # about a drivetrain's future.
+    # SAFE TO CHANGE: yes, but be sure you mean a hard stop rather than a phase-out.
     hard_zero_inflow_from_year_by_drv: dict[str, int] = field(default_factory=lambda: {
         "Liquids": 2050,
         "Hybrid": 2050,
     })
-    # [NEW] A hard, unconditional policy override -- NOT a mathematical/statistical
-    # correction of the residual-inflow formula's output. For a drivetrain listed here,
-    # from the given year onward, `run_cohort_survival_model`/`run_cohort_survival_
-    # monte_carlo` force `inflow_applied = 0` regardless of what
-    # `inflow(t) = target(t) - remaining_total(t)` computes -- no new registrations are
-    # added, the surviving cohort simply decays via ordinary Weibull attrition from
-    # that year on.
-    #
-    # "Hybrid" added 2026-07-11, same year (2050), per direct visual confirmation
-    # against the real 02_flows_by_drivetrain_check.png chart -- the same
-    # near-zero-then-small-bump shape identified and numerically traced for "Liquids"
-    # is also visible on Hybrid's own inflow line. UNLIKE Liquids, this one has NOT
-    # been separately traced line-by-line against diag_df/target_stock numbers (no
-    # diagnostic run was requested for Hybrid) -- applied directly on your
-    # confirmation that the same real-world policy applies. Re-run
-    # diagnose_02_liquids_2050_bump.py with DRIVETRAIN="Hybrid" if you want the same
-    # numeric trace as Liquids got before trusting this by eye alone.
-    #
-    # WHY THIS EXISTS: verified directly against real data (2026-07-11 diagnostic run)
-    # that for "Liquids", the residual formula manufactures a genuine, non-trivial
-    # POSITIVE "phantom" inflow from ~2047 onward (peaking ~0.45M/year around 2054),
-    # purely because natural attrition on the aging survivor fleet removes stock FASTER
-    # than REMIND's own (smooth, monotonically-declining, NOT an interpolation
-    # artifact -- separately confirmed) target is falling. The model has no way to let
-    # modeled stock undershoot target, so it invents new-vehicle inflow to hold the
-    # target exactly -- with zero basis in any actual registration. Per an actual
-    # legal ICE-sales ban (a real, documented external fact, not a data-fitting
-    # assumption), real inflow should be a hard 0 from the ban year on, and modeled
-    # stock should be ALLOWED to fall below REMIND's target from that point -- REMIND's
-    # target simply stops being achievable/binding for this drivetrain past the ban.
-    #
-    # SCOPE, per explicit decision: applied here at stage 02, on the aggregate
-    # "Liquids" category, BEFORE the Diesel/Petrol split happens in 03_01_flowdriven.py
-    # -- a single point of truth. 03_01 and 03_02 read stage 02's `flows_df["inflow"]`
-    # and only DISAGGREGATE it (never recompute it) for years from the base year
-    # onward, so a 0 here becomes a genuine 0 for both Diesel and Petrol downstream,
-    # automatically, without any override logic duplicated in those files.
-    #
-    # NOTHING IS HIDDEN: `run_cohort_survival_model`'s diag_df gains a new
-    # "inflow_pre_hard_zero_override" column holding what the raw residual would have
-    # been absent this override, for every year -- so the "phantom demand" REMIND's
-    # target implies stays fully inspectable, it's just no longer treated as real.
-    #
-    # Empty dict (`{}`) for a drivetrain not listed here means no override -- byte-
-    # identical behavior to before this field existed (verified via regression test in
-    # stockflow_model.py's own test suite).
 
+    # "NO SALES BEFORE THIS YEAR." The mirror of the setting above, for the past.
+    # BEV is 2011 because battery vehicles were not sold in volume before then; without
+    # this the model's reconstruction of history would invent early BEVs.
+    # SAFE TO CHANGE: only to correct a factual error about when sales really began.
     hard_zero_inflow_until_year_by_drv: dict[str, int] = field(default_factory=lambda: {
         "BEV": 2011,
     })
-    # [NEW, step 3 of the agreed plan] The mirror image of
-    # `hard_zero_inflow_from_year_by_drv`: for a drivetrain listed here, for every
-    # year BEFORE the given year, `run_cohort_survival_model`/`run_cohort_survival_
-    # monte_carlo` force `inflow_applied = 0` -- a drivetrain that had not been
-    # introduced yet cannot have had real registrations, no matter what
-    # `inflow(t) = target(t) - remaining_total(t)` computes from REMIND's own
-    # target_stock trajectory.
-    #
-    # "BEV": 2011 -- first BEV sold in Europe in 2011, per direct user confirmation.
-    # (Also confirmed by the user, but NOT YET WIRED as of this dict: "PHEV first
-    # sold in 2012", "HEV before 2000 is 0" -- both apply to the HEV/PHEV SPLIT within
-    # the "Hybrid" aggregate, which only exists from 03_01_flowdriven.py onward
-    # (stage 02 only tracks "Hybrid" as a whole, not HEV/PHEV separately) -- see
-    # `disaggregation.py`'s `introduction_year_by_drv` / `build_hev_phev_split` (step
-    # 1 of this plan) for where those two are actually enforced; they do NOT belong
-    # in this stage-02-only dict, since stage 02 has no "HEV"/"PHEV" key to begin with.
-    #
-    # SCOPE / propagation: same single-point-of-truth mechanism as
-    # `hard_zero_inflow_from_year_by_drv` -- applied here at stage 02, before
-    # 03_01_flowdriven.py/03_02_adjustedflows.py disaggregate stage 02's own
-    # `flows_df["inflow"]` (they never recompute it), so a 0 here becomes a genuine 0
-    # downstream automatically. `diag_df["inflow_pre_hard_zero_override"]` preserves
-    # what the raw residual would have been for every year, whether or not this
-    # override is active for that drivetrain/year -- nothing is hidden.
-    #
-    # Empty dict (`{}`) for a drivetrain not listed here means no override -- byte-
-    # identical behavior to before this field existed (verified via regression test in
-    # stockflow_model.py's own test suite).
 
-    # -------------------------------------------------------------------------
-    # Monte Carlo uncertainty around the point estimates above.
-    # -------------------------------------------------------------------------
-    # Centralized HERE, not hardcoded in any script -- changing an uncertainty range is
-    # exactly the same kind of edit as changing a point estimate (edit this file,
-    # re-run 00_parameters.py). Expressed as SPREADS (a relative fraction, or an
-    # absolute standard deviation) rather than baked-in Distribution objects, so the
-    # actual distribution is always built fresh from whatever the CURRENT point
-    # estimate is at sampling time -- if you change `lifetime_by_drv["BEV"]
-    # .scale_lambda`, the Monte Carlo spread around it updates automatically, with no
-    # separate value to keep in sync.
+    # HOW UNCERTAIN THE LIFETIMES ARE, per drivetrain, as a fraction: 0.15 means
+    # "give or take 15%". Used only by the uncertainty analysis -- the ordinary run
+    # always uses the exact lifetimes set above.
+    # This is consistently the single biggest driver of uncertainty in the results.
+    # SAFE TO CHANGE: yes. A plain number means the same both ways; use
+    # AsymmetricSpread(lower=..., upper=...) when the two directions differ.
     lifetime_scale_lambda_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
         # PLACEHOLDER values -- every drivetrain wrapped in AsymmetricSpread(lower,
         # upper) rather than a plain float, so per-drivetrain asymmetry is a one-line
@@ -768,159 +784,49 @@ class StockFlowParams:
         "Gases":    AsymmetricSpread(lower=0.25, upper=0.40),
         "FCEV":     AsymmetricSpread(lower=0.25, upper=0.40),
     })
-    # Used to build Triangular(point*(1-lower), point, point*(1+upper)) around
-    # lifetime_by_drv[drv].scale_lambda -- `lower=upper=<the float>` when a plain float
-    # is given (symmetric, the default here), or genuinely different lower/upper via
-    # `AsymmetricSpread(lower=..., upper=...)` for a drivetrain whose uncertainty isn't
-    # symmetric, e.g.:
-    #     "BEV": AsymmetricSpread(lower=0.10, upper=0.20)  # 10% shorter-lived is
-    #                                                        # plausible, up to 20%
-    #                                                        # longer-lived also is
-    # PLACEHOLDER default (15%, symmetric) -- tune per drivetrain once real uncertainty
-    # ranges (e.g. a survival-curve fit's own confidence interval) are available.
 
-    # [NEW] The REMIND-prescribed stock target itself is treated as known/exact up
-    # through this year (matches today's behavior exactly for every year before it --
-    # `02_stockdriven.py`'s stock-driven guarantee, "modeled stock EXACTLY equals
-    # target, every year", is UNCHANGED for years < this one). From this year onward,
-    # the target is no longer ground truth but the scenario's own projection, which
-    # gets its own Monte Carlo uncertainty -- see `stock_target_relative_spread`
-    # below. A SINGLE global year (not per-drivetrain): the "known vs. projected"
-    # boundary is a property of when real registration/stock data ends, not of any
-    # one drivetrain's own assumptions.
+    # THE YEAR UNCERTAINTY ABOUT FLEET SIZE BEGINS.
+    # Before this year every simulation run uses exactly the known fleet size -- the
+    # past is not a forecast, so it gets no error bars. From this year on, runs start
+    # to differ from one another.
+    # SAFE TO CHANGE: yes. Set it to the last year you consider observed rather than
+    # projected.
     stock_target_uncertainty_start_year: int = 2025
 
-    # [NEW, this round] The per-draw multiplier from `stock_target_relative_
-    # spread` does NOT switch on abruptly at `stock_target_uncertainty_start_
-    # year` -- confirmed as a real bug this round: an instant step in the
-    # stock TARGET produces a one-year inflow/outflow SHOCK (the residual
-    # `inflow(t) = target(t) - remaining_total(t)` has to close an entire
-    # sudden gap in a single year), not a gradual widening of uncertainty --
-    # visible as a large single-year spike (worst for whichever drivetrain has
-    # the most stock at the cutoff year) immediately followed by the band
-    # apparently "snapping back" to its ordinary width, even though the
-    # UNDERLYING uncertainty is still genuinely there for every later year too.
-    # Instead, each draw's own deviation from 1.0 (its sampled multiplier minus
-    # 1) ramps in LINEARLY from 0 at the cutoff year, at a rate capped at this
-    # many percentage points per year -- e.g. `0.02` means a draw whose full
-    # sampled deviation is +6% takes 3 years to ramp all the way in (+2%, +4%,
-    # +6%), while a draw at +16% takes 8 years -- SMALLER deviations ramp in
-    # FASTER (in years), all draws share the same maximum RATE. Once a draw's
-    # ramp completes, its multiplier is held flat (the actual point in this
-    # feature originally -- see `stock_target_relative_spread`'s own docstring)
-    # for every subsequent year. At the cutoff year itself, every draw's
-    # multiplier is exactly 1.0 (zero elapsed ramp time) -- continuous with the
-    # pre-cutoff deterministic target, no seam-year discontinuity at all.
+    # HOW FAST THAT UNCERTAINTY IS ALLOWED TO GROW: 0.005 means half a percentage point
+    # per year. Uncertainty does not appear all at once in the start year -- it widens
+    # gradually, because a forecast does not become wrong overnight.
+    # A consequence worth knowing: a large spread takes many years to arrive in full
+    # (a 15% spread needs ~30 years at this rate), while a small one arrives quickly.
+    # SAFE TO CHANGE: yes. Must be above zero, or the uncertainty would never arrive.
     stock_target_ramp_max_rate_per_year: float = 0.005
 
-    # [NEW] Per-drivetrain Triangular relative spread applied to the REMIND stock
-    # target for every year >= `stock_target_uncertainty_start_year` -- same
-    # `AsymmetricSpread`/plain-float convention as `lifetime_scale_lambda_relative_
-    # spread` above. UNLIKE that field, this is NOT resampled independently every
-    # year: ONE multiplier is drawn per Monte Carlo trial, per drivetrain, and held
-    # CONSTANT across every post-cutoff year in that trial (e.g. draw #4,213 might be
-    # "this drivetrain's future stock runs 8% high, every year, for the rest of the
-    # horizon") -- matching how every other uncertainty axis in this pipeline works
-    # (scale_lambda, the three outflow shares, stock_modifier_2027), and avoiding an
-    # unrealistic year-to-year jagged band for a quantity (total vehicle stock) that
-    # only ever moves smoothly in reality. PLACEHOLDER values (15%, symmetric) --
-    # tune once a real confidence interval for the REMIND projection itself is
-    # available. `0.0` (lower=upper=0) for a drivetrain means no stock-target
-    # uncertainty for it -- byte-identical to today's behavior for that drivetrain.
-    # [NEW] Treat the per-drivetrain `stock_target_relative_spread` draws above as a
-    # CORRELATED MIX rather than 9 independent perturbations.
-    #
-    # WHY: this stage is stock-driven, so `inflow(t) = target(t) - remaining_total(t)`
-    # -- perturbing a drivetrain's stock target IS perturbing its inflow. Drawing each
-    # drivetrain's multiplier independently (the behavior when this is False) allows a
-    # trial where BEV runs +15% AND Petrol runs +15% simultaneously. That is not a real
-    # uncertainty: a buyer registering a new car picks exactly ONE drivetrain, so if
-    # BEV's share of new registrations comes in high, some other drivetrain's must come
-    # in low. Independence also lets the SUM across drivetrains wander, silently adding
-    # or removing whole vehicles from the European fleet -- an uncertainty nobody
-    # specified, arising purely as an artifact of sampling the parts separately.
-    #
-    # WHAT IT DOES when True: the per-drivetrain multipliers are still drawn from
-    # `stock_target_relative_spread` exactly as before (same distributions, same seeds,
-    # same ramp), but are then RENORMALIZED across drivetrains within each (year, draw)
-    # so the drivetrain targets sum to `total_fleet_relative_spread`'s own shared draw
-    # times the deterministic REMIND total. The mix therefore lies on the simplex --
-    # shares sum to 1 and are mutually negatively correlated -- while total fleet size
-    # becomes its own explicit, separately-controlled axis instead of an accident.
-    #
-    # This is the same sample-then-renormalize construction `03_02_adjustedflows.py`'s
-    # `sample_future_segment_share_inflow_draws` already uses for SEGMENT shares within
-    # a drivetrain, applied one level up, to drivetrain shares within the fleet.
-    #
-    # NOTE ON MARGINALS: renormalizing necessarily shrinks each drivetrain's realized
-    # spread relative to the nominal +/-15%, and shrinks it MOST for whichever
-    # drivetrain currently dominates the fleet. That is the correct behavior, not a
-    # loss of uncertainty: a drivetrain holding 80% of the fleet cannot move far in
-    # share terms without some other drivetrain absorbing the difference, and there is
-    # not enough room elsewhere to absorb it. The freed-up "everything moves together"
-    # component is exactly what `total_fleet_relative_spread` now carries explicitly.
-    #
-    # VERIFIED when this was switched on (2000-draw runs against the independent
-    # baseline, invariants asserted inside the sampling code itself, not just on the
-    # outputs): historic years deviate from the deterministic REMIND target by exactly
-    # 0; post-cutoff the drivetrain targets sum to the intended total to within 6.6e-16
-    # relative; no drivetrain with a zero target ever receives nonzero stock. The
-    # substitution it was built for shows up as intended -- the BEV<->Liquids
-    # correlation of the applied stock-target multiplier moves from about +0.02
-    # (independent sampling: no substitution whatsoever) to about -0.80 in the years
-    # where the two actually compete for the same buyer (2035: 41%/50%; 2040: 68%/25%).
-    #
-    # Setting this back to False restores the pre-existing independent behavior
-    # byte-identically (verified: 45,121 compared values, zero differences).
+    # DOES BUYING ONE KIND OF CAR MEAN NOT BUYING ANOTHER?
+    # True  -- yes. A buyer picks ONE drivetrain, so if more people choose BEVs, fewer
+    #          choose something else. The drivetrain shares are tied together and
+    #          always add up. (current, and the realistic assumption)
+    # False -- no. Each drivetrain varies independently, as if buyers could choose
+    #          several at once. This is the older, simpler behaviour.
+    # SAFE TO CHANGE: yes. Setting it to False reproduces the previous results exactly,
+    # so it is a safe way to compare against older numbers.
     stock_target_correlated_mix: bool = True
 
-    # [NEW] Only consulted when `stock_target_correlated_mix` is True: the relative
-    # spread on TOTAL fleet size (every drivetrain's target scaled together by one
-    # shared per-trial multiplier), as distinct from the drivetrain MIX uncertainty
-    # that `stock_target_relative_spread` now carries. Same `AsymmetricSpread`/plain-
-    # float convention, and the SAME ramp discipline as the per-drivetrain axis: no
-    # uncertainty at all before `stock_target_uncertainty_start_year` (the historic
-    # period is observed data, not a projection), then phased in steadily at
-    # `stock_target_ramp_max_rate_per_year` until that trial's full sampled value is
-    # reached.
-    #
-    # Deliberately much smaller than the 15% mix spread below, for two reasons.
-    #
-    # First, on the substance: how many cars Europe will own is governed by population
-    # and economics, and is considerably more predictable than WHICH drivetrain those
-    # cars are, which is governed by policy and technology deployment.
-    #
-    # Second, and this one is measured rather than assumed -- THIS AXIS IS IN DIRECT
-    # TENSION WITH THE MIX AXIS, so it cannot be sized independently of it. Scaling
-    # every drivetrain together is a perfectly correlated common mode, while the mix is
-    # negatively correlated; the two superimpose, and in any year where ONE drivetrain
-    # dominates the fleet the common mode can overwhelm the substitution entirely.
-    # Measured BEV<->Liquids correlation of the applied multiplier, by this field's
-    # value (2000 draws):
-    #
-    #     spread   2030 (17/75)   2035 (41/50)   2040 (68/25)   2050 (97/2)
-    #     0.00        -0.92          -0.95          -0.96         -0.91
-    #     0.02        -0.35          -0.80          -0.83         -0.16
-    #     0.05        +0.21          -0.28          -0.38         +0.14
-    #
-    # At 0.05 the sign FLIPS POSITIVE in 2030 and 2050 -- the years where Liquids
-    # (75%) and then BEV (97%) dominate -- which would defeat the point of modelling
-    # the mix as a composition at all. 0.02 keeps substitution negative across the
-    # whole horizon while still carrying real total-fleet uncertainty, and is the
-    # calibrated choice for that reason, not a placeholder.
-    #
-    # Set to 0.0 to hold total fleet size exactly at REMIND's own trajectory and make
-    # the mix the only uncertain thing (strongest substitution signal, but treats the
-    # REMIND total-fleet projection as known-exact).
-    #
-    # KNOWN ASYMMETRY: this axis and the per-drivetrain one share
-    # `stock_target_ramp_max_rate_per_year`, and that rate is a cap on percentage
-    # points per year -- so a SMALLER spread reaches its full value SOONER (0.02 ramps
-    # in over ~4 years, the 0.15 mix spread needs ~30). The common mode is therefore
-    # fully present long before the mix uncertainty is, which is why the 2030 column
-    # above degrades fastest. Giving this axis its own ramp rate would decouple them.
+    # HOW UNCERTAIN THE TOTAL SIZE OF THE FLEET IS -- one shared figure covering every
+    # drivetrain at once: "there might be 2% more or fewer cars in Europe overall".
+    # This is separate from the per-drivetrain uncertainty below, which is about the
+    # MIX rather than the TOTAL.
+    # WHY 2% AND NOT MORE: the total-fleet effect moves every drivetrain the same way,
+    # while the mix effect moves them in opposite directions. Set this much above ~3%
+    # and it overwhelms the mix effect -- in years where one drivetrain dominates, the
+    # drivetrains start appearing to rise and fall TOGETHER, hiding the substitution
+    # this model exists to show. 2% keeps both effects visible.
+    # SAFE TO CHANGE: yes, but read the paragraph above before raising it.
     total_fleet_relative_spread: float | AsymmetricSpread = AsymmetricSpread(lower=0.02, upper=0.02)
 
+    # HOW UNCERTAIN EACH DRIVETRAIN'S SHARE OF THE FLEET IS, as a fraction:
+    # 0.15 means "give or take 15%". This is uncertainty about the MIX -- which
+    # drivetrains people buy -- as opposed to the total-fleet figure above.
+    # SAFE TO CHANGE: yes.
     stock_target_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
         "Hybrid":   AsymmetricSpread(lower=0.15, upper=0.15),
         "PHEV":     AsymmetricSpread(lower=0.15, upper=0.15),
@@ -933,31 +839,10 @@ class StockFlowParams:
         "FCEV":     AsymmetricSpread(lower=0.15, upper=0.15),
     })
 
-    # [FIXED, replaces unknown_whereabouts_share_std/export_share_std below] Was:
-    # two independent Normal(point, std, clip 0..1) spreads, with `collected_share`
-    # computed as whatever's left over (`1 - unknown - export`) -- meaning
-    # `collected_share` had NO uncertainty of its own, and silently absorbed both
-    # other shares' sampling noise. That was backwards: `collected` and `export`
-    # are the two MEASURED quantities (collection statistics, trade statistics),
-    # each with real uncertainty; `unknown_whereabouts` is itself an ESTIMATE, not
-    # a clean residual computed from a known total (total outflow itself is a
-    # model output of the lifetime survival curve, not independently measured
-    # either). None of the three has a privileged "remainder" status -- all three
-    # now get their OWN Triangular spread (same `float | AsymmetricSpread`
-    # convention as `lifetime_scale_lambda_relative_spread` above), sampled
-    # independently, then NORMALIZED per draw so they sum to exactly 1 (see
-    # `disaggregation.compute_collected_export_unknown_shares`). PLACEHOLDER
-    # magnitudes below (15%, symmetric) -- tune per drivetrain once real
-    # uncertainty ranges (e.g. from the underlying collection/trade statistics'
-    # own confidence intervals) are available.
-    #
-    # NOT MODELED (a known, flagged simplification, not silently ignored): these
-    # three shares were historically part of how the LIFETIME parameters
-    # themselves were back-calculated, so a real correlation between
-    # `lifetime_scale_lambda_relative_spread` draws and these three shares'
-    # draws likely exists. Sampled independently here (different spawn_key,
-    # same as before this change) for lack of the historical calibration data
-    # needed to model that correlation properly.
+    # HOW UNCERTAIN THE COLLECTED SHARE IS, per drivetrain.
+    # The tightest of the three outflow uncertainties, because collection rates are
+    # actually measured. BEV is slightly wider: fewer years of statistics exist.
+    # SAFE TO CHANGE: yes.
     collected_share_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
         # PLACEHOLDER values, but now DIFFERENTIATED (not flat 0.15 for everyone) --
         # tight, since this is the MEASURED quantity (collection statistics).
@@ -971,6 +856,11 @@ class StockFlowParams:
         "FCEV":    0.15,  # PLACEHOLDER, not a verified real value.
         "Gases":   0.15,  # PLACEHOLDER, not a verified real value.
     })
+
+    # HOW UNCERTAIN THE EXPORT SHARE IS, per drivetrain.
+    # Wider than the collected share above, because trade statistics are noisier than
+    # collection statistics.
+    # SAFE TO CHANGE: yes.
     export_share_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
         # Same grouping logic as collected_share_relative_spread above, but export
         # (trade statistics) is somewhat noisier than collection statistics in
@@ -982,6 +872,12 @@ class StockFlowParams:
         "FCEV":    0.20,  # PLACEHOLDER, not a verified real value.
         "Gases":   0.20,  # PLACEHOLDER, not a verified real value.
     })
+
+    # HOW UNCERTAIN THE UNTRACEABLE SHARE IS, per drivetrain.
+    # Deliberately the widest of the three: this quantity is inferred, not measured.
+    # Note this is only the LEFTOVER uncertainty -- the setting below already links it
+    # to vehicle lifetime, which contributes uncertainty of its own.
+    # SAFE TO CHANGE: yes.
     unknown_whereabouts_share_relative_spread: dict[str, float | AsymmetricSpread] = field(default_factory=lambda: {
         # Deliberately the WIDEST of the three, per the reasoning behind this
         # field's existence: unknown_whereabouts is an ESTIMATE, not a measurement
@@ -999,46 +895,14 @@ class StockFlowParams:
         "FCEV":    AsymmetricSpread(lower=0.20, upper=0.35),  # PLACEHOLDER, not a verified real value.
         "Gases":   AsymmetricSpread(lower=0.20, upper=0.35),  # PLACEHOLDER, not a verified real value.
     })
-    # collected_share_relative_spread / export_share_relative_spread: used to build
-    # Triangular(point*(1-lower), point, point*(1+upper)) around their own point
-    # estimate (collected_share_by_drv[drv] / export_share_by_drv[drv]) -- `lower=
-    # upper=<float>` for symmetric (the default here), or `AsymmetricSpread(lower=...,
-    # upper=...)` per drivetrain, exactly like the lifetime spread above.
-    #
-    # unknown_whereabouts_share_relative_spread: [CHANGED MEANING] no longer built
-    # around the flat point estimate `unknown_whereabouts_share[drv]` directly --
-    # this drivetrain's `scale_lambda` draw (from stage 02) first shifts the
-    # CENTER via `unknown_share_lifetime_coupling_k` below, and THIS spread is the
-    # RESIDUAL Triangular noise layered around that shifted center (whatever
-    # uncertainty in "unknown" isn't already explained by that draw's own lifetime
-    # outcome). See `03_01_flowdriven.py`'s Monte Carlo block for the exact
-    # formula. Since part of unknown_share's total uncertainty is now explained by
-    # the lifetime coupling rather than sampled directly here, this residual
-    # spread being similar in magnitude to collected/export's own spread does NOT
-    # mean unknown's TOTAL uncertainty is similar to theirs -- the coupling term
-    # adds substantially more spread on top for any drivetrain with a wide
-    # lifetime spread.
 
-    # [NEW] Couples this drivetrain's `scale_lambda` Monte Carlo draw (stage 02) to
-    # `unknown_whereabouts_share`'s central tendency for that SAME draw, per your
-    # own reasoning: a shorter-than-point-estimate lifetime draw implies MORE total
-    # outflow than collected+export alone explain, so the inferred "unknown" gap
-    # should be LARGER for that draw, not independent of it. Formula (see
-    # `03_01_flowdriven.py`):
-    #     rel_dev = (scale_lambda_draw - scale_lambda_point) / scale_lambda_point
-    #     unknown_share_center = unknown_whereabouts_share[drv] * (1 - k * rel_dev)
-    # `rel_dev < 0` (shorter-than-point lifetime draw) with `k > 0` makes
-    # `unknown_share_center > unknown_whereabouts_share[drv]` -- larger unknown
-    # share for a shorter-lifetime draw, matching the direction of your reasoning.
-    # `k = 0` recovers the OLD (pre-coupling) behavior exactly -- unknown_share
-    # centered on its own flat point estimate, `scale_lambda` fully independent.
-    # PLACEHOLDER (k=1.0 for every drivetrain, i.e. a 10% shorter lifetime draw
-    # shifts the center ~10% higher, before the residual Triangular noise and
-    # final normalization) -- this is a genuine modeling assumption with no
-    # first-principles derivation available; tune per drivetrain once you have a
-    # real basis for the coupling strength (e.g. from however "unknown" was
-    # historically inferred when the lifetime parameters were originally
-    # calibrated).
+    # LINKS THE UNTRACEABLE SHARE TO VEHICLE LIFETIME, per drivetrain.
+    # The reasoning: in a simulation run where cars turn out to be shorter-lived, more
+    # vehicles leave the fleet than the records account for -- so the untraceable share
+    # in that run should rise too, not stay fixed. 0.8 is a fairly strong link.
+    #     0    no link -- untraceable share ignores lifetime entirely
+    #     0.8  strong link (current)
+    # SAFE TO CHANGE: yes. 0 reproduces the older, uncoupled behaviour.
     unknown_share_lifetime_coupling_k: dict[str, float] = field(default_factory=lambda: {
         # Same k=0.8 baseline as before for the mature ICE/Hybrid/BEV group.
         # Leaning more heavily on "shorter lifetime
@@ -1243,230 +1107,132 @@ class StockFlowParams:
 
 
 # ---------------------------------------------------------------------------
-# Stage 03, part 2 -- Adjusted flows (03_02_adjustedflows.py) sensitivity scenarios
-# ---------------------------------------------------------------------------
-# Per explicit instruction: NO parameter for this stage may be hardcoded in the script
-# itself. Previously `03_02_adjustedflows.py` had its 11 scenarios' definitions spread
-# across five separate module-level constants (`stock_modifier_2027`,
-# `LIFETIME_CHANGE_BY_DRV_{BAU,ICEV_SHORTER,BEV_LONGER}`, five
-# `BEV_SEGMENT_SHARES_*` dicts, and two inline `losses_zero`/`losses_high` share
-# overrides) -- adding a 12th scenario meant editing several of these in several
-# places. `ScenarioSpec` bundles everything ONE scenario needs into ONE object, so
-# adding a scenario is one new entry in `AdjustedFlowsParams.scenarios`, not edits
-# scattered across the file.
 @dataclass(frozen=True)
-class OpenEndedLifetimeChange:
-    """
-    A lifetime override with NO end_year -- the convention `flowdriven_model.py`'s
-    `run_flow_driven_model_with_outflow_disaggregation` actually implements (confirmed
-    via source: `if t >= lifetime_change_by_drv[drv]["start_year"]`, no `end_year` ever
-    read). Deliberately a SEPARATE type from `LifetimeOverride` above (which requires
-    both `start_year` AND `end_year`, for stage 02's windowed
-    `get_effective_lifetime_params`) -- these are two genuinely different, coexisting
-    override conventions in this codebase, not a naming inconsistency for the same
-    thing (see the consolidated review, finding H4).
-    """
-    start_year: int
-    shape_k: float
-    scale_lambda: float
+class DisaggregationParams:
 
+    # Where this stage reads its input data and writes its results.
+    # SAFE TO CHANGE: only if you actually move the data folder. The path is relative
+    # to the `code/` directory.
+    output_dir: str = "../data/processed/"
 
-@dataclass(frozen=True)
-class ScenarioSpec:
-    """
-    One complete, self-contained definition of a `03_02_adjustedflows.py` sensitivity
-    scenario. Every override field is SPARSE and ADDITIVE over this stage's base
-    `StockFlowParams` values: a missing drivetrain entry means "use the base value for
-    that drivetrain", not "zero it out" -- this mirrors how
-    `run_flow_driven_model_with_outflow_disaggregation` itself already treats a missing
-    `lifetime_change_by_drv[drv]` entry (falls back to `lifetime_by_drv[drv]`). This is
-    what lets e.g. `ICEV_shorter` specify ONLY Diesel/Petrol's changed lifetime, without
-    having to also restate BEV's unchanged one (the pre-refactor `LIFETIME_CHANGE_BY_
-    DRV_*` dicts redundantly restated every drivetrain, changed or not).
+    # The first and last year the model simulates.
+    # SAFE TO CHANGE: with care. Widening the window makes the model reconstruct more
+    # history by backcasting -- estimating years it has no data for -- so the earliest
+    # years become progressively less reliable. Start must be before end.
+    start_year_model: int = 1950
+    end_year_model: int = 2070
 
-    Exactly one of `inflow_drivetrain_shares_final` / `inflow_segment_shares_final`
-    should be set for a scenario that changes the inflow composition; neither set means
-    "reuse the BAU scenario's resolved inflow unchanged" (what all five lifetime/loss/
-    stock scenarios do).
-    """
-    name: str
+    # The first and last year drawn on this stage's charts.
+    # These change ONLY what you see, never what is computed: the model still runs the
+    # full start_year_model..end_year_model range above. Narrow them to zoom in on a
+    # period of interest; widen them to see the whole run.
+    # SAFE TO CHANGE: yes. The only rule is that start must not be after end.
+    year_plot_start: int = 2015
+    year_plot_end: int = 2070
 
-    # Inflow-composition transform (at most one of the two pairs below should be set):
-    #   - `inflow_drivetrain_shares_final`: changes the DRIVETRAIN mix of inflow
-    #     (maps onto `tweak_inflow_drivetrain_shares` in 03_02_adjustedflows.py) --
-    #     used by BEV_only.
-    #   - `inflow_segment_shares_drivetrain` + `inflow_segment_shares_final`: changes
-    #     ONE drivetrain's INTERNAL segment mix, holding the overall drivetrain mix
-    #     fixed (maps onto `tweak_inflow_segment_shares_within_drivetrain`) -- used by
-    #     BAU (its own segment-mix baseline) and the four BEV segment-profile
-    #     scenarios (A_F, JA_JF, Large, Small).
-    inflow_drivetrain_shares_final: dict[str, float] | None = None
-    inflow_segment_shares_drivetrain: str | None = None
-    inflow_segment_shares_final: dict[str, float] | None = None
+    # Use invented stand-in data instead of the real EEA registration file?
+    # NORMALLY LEAVE THIS FALSE. The real file (`EEA_final_data.csv`) is what decides
+    # how vehicles split across size segments; results built on the stand-in are not
+    # meaningful, only structurally valid.
+    # Set to True ONLY as a temporary bridge when that file is missing and you want to
+    # check the rest of the pipeline runs. The stage then generates a clearly labelled
+    # SYNTHETIC placeholder instead of stopping with an error.
+    # SAFE TO CHANGE: yes -- but never report numbers produced with this set to True.
+    use_synthetic_eea_fallback: bool = False
 
-    # [NEW] Monte Carlo uncertainty around `inflow_segment_shares_final` (the FUTURE
-    # segment-mix target, applied for years >= AdjustedFlowsParams.scenario_start_year)
-    # -- deliberately NOT applied to the real historic segment split (years before
-    # scenario_start_year), which comes from actual registration data and stays fully
-    # deterministic. `None` (default) means no segment-share uncertainty for this
-    # scenario -- opt-in, same sparse convention as every other override on this class.
-    #
-    # A per-segment Triangular(mode*(1-lower), mode, mode*(1+upper)) is sampled
-    # INDEPENDENTLY for each of the 12 segments (reusing this scenario's own
-    # `inflow_segment_shares_final` values as each segment's mode), one draw per Monte
-    # Carlo trial, then the whole 12-segment draw is renormalized (divided by its own
-    # sum) so it sums to exactly 1 -- every segment moves proportionally on every draw,
-    # not just whichever one happens to be picked to "absorb" the difference. Requires
-    # `inflow_segment_shares_final` to also be set (validated) -- there is nothing to
-    # sample around otherwise. Same `AsymmetricSpread` type as
-    # `StockFlowParams.lifetime_scale_lambda_relative_spread` (a plain float means
-    # symmetric spread); see `03_02_adjustedflows.py`'s
-    # `sample_future_segment_share_inflow_draws` for exactly how this gets sampled and
-    # turned into per-draw inflow values, and `cohort_flow_mc.py`'s
-    # `inflow_draws_by_group` parameter for how it's fed into the vectorized engine.
-    inflow_segment_share_spread: AsymmetricSpread | float | None = None
+    # Fixes the random numbers used to generate that stand-in data, so the placeholder
+    # is at least reproducible. Irrelevant while the setting above is False.
+    # SAFE TO CHANGE: yes, any whole number.
+    synthetic_eea_seed: int = 42
 
-    # Sparse lifetime override: only drivetrains that actually change need an entry.
-    lifetime_change_by_drv: dict[str, OpenEndedLifetimeChange] = field(default_factory=dict)
+    # The real-world year each drivetrain first went on sale.
+    # This is a documented historical fact, not a modelling assumption, and it is used
+    # in two places that must agree: filling gaps in the registration data, and
+    # reconstructing 1975-2004, for which there is no data at all. Before a drivetrain's
+    # first year the model puts an exact zero -- the vehicle genuinely did not exist yet
+    # -- rather than guessing a number from later data.
+    # SAFE TO CHANGE: only to correct a factual error. Getting it wrong invents vehicles
+    # in years they could not have existed, or erases real early ones. Each value must
+    # be a whole year, 1950 or later.
+    introduction_year_by_drv: dict[str, int] = field(default_factory=lambda: {
+        "BEV": 2011, "HEV": 2000, "PHEV": 2012,
+    })
 
-    # Sparse share overrides: only drivetrains that actually change need an entry.
-    export_share_overrides: dict[str, float] = field(default_factory=dict)
-    unknown_whereabouts_share_overrides: dict[str, float] = field(default_factory=dict)
-
-    # Flat inflow multiplier from `AdjustedFlowsParams.lifetime_change_start_year`
-    # onward (the vehicle pipeline's `stock_modifier_2027`, expressed generically here
-    # since the year itself is also a parameter, not hardcoded to literally "2027").
-    stock_modifier: float = 1.0
-
-    def validate(self, *, valid_segments: set[str]) -> list[str]:
+    def validate(self) -> list[str]:
         issues: list[str] = []
-        if self.inflow_drivetrain_shares_final is not None and self.inflow_segment_shares_final is not None:
-            issues.append(
-                f"adjusted_flows.scenarios['{self.name}']: both inflow_drivetrain_shares_final "
-                f"and inflow_segment_shares_final are set -- at most one should be."
-            )
-        if self.inflow_drivetrain_shares_final is not None:
-            total = sum(self.inflow_drivetrain_shares_final.values())
-            if not (0.999 <= total <= 1.001):
+        if self.start_year_model >= self.end_year_model:
+            issues.append("disaggregation: start_year_model must be strictly before end_year_model.")
+        if self.year_plot_start > self.year_plot_end:
+            issues.append("disaggregation: year_plot_start must not be after year_plot_end.")
+        for drv, year in self.introduction_year_by_drv.items():
+            if not isinstance(year, int) or year < 1950:
                 issues.append(
-                    f"adjusted_flows.scenarios['{self.name}'].inflow_drivetrain_shares_final "
-                    f"sums to {total:.6f}, expected 1.0."
+                    f"disaggregation.introduction_year_by_drv[{drv!r}] = {year!r} must be "
+                    f"a plausible calendar year (int >= 1950)."
                 )
-        if self.inflow_segment_shares_final is not None:
-            if self.inflow_segment_shares_drivetrain is None:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_shares_final is "
-                    f"set but inflow_segment_shares_drivetrain is None."
-                )
-            missing_segs = set(self.inflow_segment_shares_final) - valid_segments
-            if missing_segs:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final has "
-                    f"unrecognized segments: {sorted(missing_segs)}."
-                )
-            total = sum(self.inflow_segment_shares_final.values())
-            if not (0.999 <= total <= 1.001):
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_shares_final sums "
-                    f"to {total:.6f}, expected 1.0."
-                )
-        if self.inflow_segment_share_spread is not None:
-            if self.inflow_segment_shares_final is None:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}']: inflow_segment_share_spread is set "
-                    f"but inflow_segment_shares_final is None -- nothing to sample around."
-                )
-            if isinstance(self.inflow_segment_share_spread, AsymmetricSpread):
-                issues += self.inflow_segment_share_spread.validate(
-                    field_name=f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread"
-                )
-            elif self.inflow_segment_share_spread < 0:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}'].inflow_segment_share_spread = "
-                    f"{self.inflow_segment_share_spread} must be >= 0."
-                )
-        for drv, change in self.lifetime_change_by_drv.items():
-            if change.scale_lambda <= 0 or change.shape_k <= 0:
-                issues.append(
-                    f"adjusted_flows.scenarios['{self.name}'].lifetime_change_by_drv['{drv}'] "
-                    f"has non-positive shape_k/scale_lambda."
-                )
-        for name_, mapping in (
-            ("export_share_overrides", self.export_share_overrides),
-            ("unknown_whereabouts_share_overrides", self.unknown_whereabouts_share_overrides),
-        ):
-            for drv, share in mapping.items():
-                if not (0.0 <= share <= 1.0):
-                    issues.append(
-                        f"adjusted_flows.scenarios['{self.name}'].{name_}['{drv}'] = {share} "
-                        f"is outside [0, 1]."
-                    )
-        if self.stock_modifier <= 0:
-            issues.append(f"adjusted_flows.scenarios['{self.name}'].stock_modifier must be positive.")
         return issues
 
-
-# The 12 vehicle segments (A-F, JA-JF) -- matches `MaterialsParams.segment_map`'s keys.
-_ADJUSTED_FLOWS_SEGMENTS: tuple[str, ...] = ("A", "B", "C", "D", "E", "F", "JA", "JB", "JC", "JD", "JE", "JF")
-
-
+# ---------------------------------------------------------------------------
+# STAGE 03_02 -- Adjusted flows / scenarios  (code/03_02_adjustedflows.py)
+# ---------------------------------------------------------------------------
+# WHAT THIS STAGE DOES: takes the fleet from stage 03_01 and asks "what if?".
+# Each SCENARIO is one alternative future -- more BEVs, longer-lasting cars, fewer
+# vehicles sold, higher collection losses -- and this stage re-simulates the whole
+# fleet under each one, so they can be compared side by side.
+#
+# THE SETTINGS BELOW ARE THE SHARED RULES. The scenarios themselves are defined
+# further down in `scenarios`, each as a ScenarioSpec (see SHARED BUILDING BLOCKS
+# near the top of this file for what a ScenarioSpec can contain).
+# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AdjustedFlowsParams:
-    """
-    Everything `03_02_adjustedflows.py` needs that isn't already in `StockFlowParams`:
-    the shared inflow-tweak timing window, the shared lifetime-change start year, and
-    all 11 scenario definitions. See `ScenarioSpec`'s docstring for the sparse-override
-    convention every scenario below relies on.
-    """
-    # Shared by every inflow-composition-tweaking scenario (BAU's own segment-mix
-    # baseline, BEV_only, and the four BEV segment-profile scenarios): the transform
-    # ramps from the baseline share at `scenario_start_year` to its target share by
-    # `scenario_ramp_end_year`. Currently both years coincide (an immediate switch, no
-    # ramp) -- kept as two separate parameters since nothing about the transform
-    # requires them to be equal, and a future scenario may want a genuine multi-year ramp.
+
+    # When a scenario that changes the MIX of vehicles sold begins, and when it has
+    # fully arrived. Between these two years the change phases in gradually.
+    # Both are currently the same year, which means the change happens instantly in
+    # 2026 with no phase-in. They are kept as two separate settings so a future
+    # scenario can spread a change over several years by pushing the second one later.
+    # SAFE TO CHANGE: yes. Keep start <= end. History before the start year is never
+    # touched by a scenario -- only the future is.
     scenario_start_year: int = 2026
     scenario_ramp_end_year: int = 2026
 
-    # Shared by every scenario with a `lifetime_change_by_drv` entry (BEV_longer,
-    # ICEV_shorter): the year that override takes effect. Centralized here rather than
-    # repeated inside each `OpenEndedLifetimeChange` so all lifetime-change scenarios
-    # stay synchronized to one edit if this ever needs to move.
+    # The year that scenarios changing how LONG vehicles last take effect
+    # (e.g. "BEV_longer", "ICEV_shorter").
+    # SAFE TO CHANGE: yes. Set once here so every lifetime scenario stays in step.
     lifetime_change_start_year: int = 2027
 
-    # [NEW, was a hardcoded literal in flowdriven_model.py until this fix] The year
-    # `stock_modifier` (any scenario's flat inflow multiplier, e.g. `stock_lower`'s 0.8)
-    # starts applying. Independent from `lifetime_change_start_year` above -- they
-    # happen to share the same default value today, but a scenario changing "how many
-    # vehicles enter the fleet" and one changing "how long vehicles last" are
-    # conceptually unrelated knobs that don't need to move together.
+    # The year that scenarios changing HOW MANY vehicles are sold take effect
+    # (e.g. "stock_lower", which sells 20% fewer).
+    # Deliberately separate from the lifetime year above: "how many cars are bought"
+    # and "how long cars last" are unrelated levers, even though both currently
+    # start in 2027.
+    # SAFE TO CHANGE: yes.
     stock_modifier_start_year: int = 2027
 
-    # [NEW, was a hardcoded literal (`base_year=2005`) at every `run_adjusted_scenario`
-    # call site in `03_02_adjustedflows.py`'s `main()` until this fix] The stock-flow
-    # cohort base year: `run_adjusted_scenario` rebuilds each scenario's starting
-    # cohort stock from stage 02's matrix AT this year (see `fdm.build_stock_by_
-    # segment_at_base_year`) -- not a fresh 1975 backcast. Matches stage 02's own base
-    # year; if that ever changes, this must move with it (not verified against
-    # `StockFlowParams` automatically, since stage 02 doesn't currently expose its own
-    # base year as a named field either -- flagged here rather than silently assumed
-    # in sync).
+    # The year each scenario starts from. The existing fleet as it stood in this year
+    # is the common starting point every scenario builds on, rather than each one
+    # re-deriving history from scratch.
+    # SAFE TO CHANGE: NOT ON ITS OWN. This must match the base year stage 02 uses. If
+    # you change it here and not there, the scenarios start from a fleet that stage 02
+    # never produced, and every downstream number is quietly wrong.
     base_year: int = 2005
 
-    # [NEW] Which scenario(s) `03_02_adjustedflows.py` actually simulates -- for
-    # focused research runs instead of always paying for the full 11-scenario x
-    # Monte-Carlo sweep. `None` means "run every scenario in `scenarios` below" (the
-    # full sweep); a tuple of names restricts the run to just those.
-    #   Default is ("BAU",) -- a fast, minimal run out of the box. Widen it
-    #   deliberately, e.g. scenarios_to_run=("BAU", "stock_lower", "losses_high"), or
-    #   set it to None to reproduce the full 11-scenario sweep.
-    # Names are validated against `scenarios` below in `validate()`, so a typo'd
-    # scenario name fails fast at parameter-build time (00_parameters.py) rather than
-    # partway through a multi-hour run. NOTE: regardless of this selection, BAU's own
-    # resolved INFLOW is always computed by `03_02_adjustedflows.py` (every scenario
-    # without its own inflow transform reuses it) -- but BAU is only actually
-    # SIMULATED (and its tracker/Monte Carlo output produced) if "BAU" is itself
-    # included here. Use `active_scenario_names()` below to resolve this field --
-    # don't re-implement the None-vs-tuple logic at the call site.
+    # Which scenarios actually get simulated.
+    #     ("BAU",)                     just business-as-usual -- fast (the default)
+    #     ("BAU", "stock_lower")       two scenarios, comparable against each other
+    #     None                         every scenario listed below -- the full sweep
+    #
+    # IMPORTANT, AND EASY TO MISS: all the scenario-COMPARISON figures need at least
+    # TWO scenarios here. With only ("BAU",) those figures cannot be drawn and simply
+    # do not appear -- nothing is broken, there is just nothing to compare.
+    #
+    # Cost warning: each scenario is a full Monte Carlo simulation. The complete sweep
+    # is 11 of them and takes hours at 200,000 draws.
+    #
+    # A misspelled name is caught immediately when you run code/00_parameters.py,
+    # rather than hours into a run.
+    # SAFE TO CHANGE: yes -- this is the setting you are most likely to want to edit.
     scenarios_to_run: tuple[str, ...] | None = ("BAU", )
 
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
@@ -1599,60 +1365,9 @@ class AdjustedFlowsParams:
             )
         return issues
 
-
 # ---------------------------------------------------------------------------
-# Stage 03 -- Disaggregation
+# STAGE 04 -- Materials / car composition  (code/04_01_carcomposition.py)
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class DisaggregationParams:
-    output_dir: str = "../data/processed/"
-    start_year_model: int = 1950
-    end_year_model: int = 2070
-
-    use_synthetic_eea_fallback: bool = False
-    # [NEW] Off by default -- your real EEA registrations data governs stage 03's
-    # segment/drivetrain splits, and this should almost always stay False once that
-    # file exists. Set to True ONLY as a temporary bridge while waiting for the real
-    # `EEA_final_data.csv`: `03_01_flowdriven.py` will then auto-generate a clearly
-    # labeled SYNTHETIC placeholder (see `disaggregation.py`'s
-    # `generate_synthetic_eea_data`) instead of raising, so you can exercise/test the
-    # rest of the pipeline in the meantime. Flip back to False (or just leave it -- see
-    # the file-existence check in `03_01_flowdriven.py`) once the real file is in
-    # place; no other code change is needed either way.
-    synthetic_eea_seed: int = 42
-
-    introduction_year_by_drv: dict[str, int] = field(default_factory=lambda: {
-        "BEV": 2011, "HEV": 2000, "PHEV": 2012,
-    })
-    # [NEW] Real-world first year each drivetrain was ever sold -- a documented
-    # external fact, not a data-fitting assumption. Confirmed with you directly
-    # (2026-07-11). Used in TWO places, both needing the SAME single source of
-    # truth:
-    #   1. `build_hev_phev_split` (disaggregation.py): for a (drivetrain, year) with
-    #      no real EEA registration data, a year BEFORE that drivetrain's
-    #      introduction year is treated as exactly 0 (known fact -- it didn't exist
-    #      yet), rather than backfilled from whenever real data happens to start.
-    #      Years AT/AFTER the introduction year but still missing data (a genuine
-    #      data-coverage gap, not an existence question) still fall back to the old
-    #      nearest-available-real-value behavior -- there's no better information
-    #      for that case.
-    #   2. The synthetic 1975-2004 pre-base-year backcast (03_01_flowdriven.py):
-    #      masks any backcast row before a drivetrain's introduction year to 0.
-    # "BEV" is not itself split by build_hev_phev_split (that function only handles
-    # HEV/PHEV) -- its entry here is for the stage-02 "before year" mechanism and
-    # the backcast masking (item 2 above), not this function.
-
-    def validate(self) -> list[str]:
-        issues: list[str] = []
-        if self.start_year_model >= self.end_year_model:
-            issues.append("disaggregation: start_year_model must be strictly before end_year_model.")
-        for drv, year in self.introduction_year_by_drv.items():
-            if not isinstance(year, int) or year < 1950:
-                issues.append(
-                    f"disaggregation.introduction_year_by_drv[{drv!r}] = {year!r} must be "
-                    f"a plausible calendar year (int >= 1950)."
-                )
-        return issues
 
 
 # ---------------------------------------------------------------------------
@@ -1660,120 +1375,108 @@ class DisaggregationParams:
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class MaterialsParams:
+    """
+    Turns vehicles into materials: how much steel, aluminium, copper, battery
+    chemistry and so on the fleet contains, and therefore how much becomes available
+    for recovery when those vehicles are scrapped.
+
+    Most settings here point at the workbooks holding composition data, or translate
+    between this model's names and the codes used inside those files. The ones that
+    genuinely change results are the battery sizes and the choice of detail level.
+    """
+
+    # Translates the size-segment letters used everywhere else in this model into the
+    # numeric codes used inside the composition data files.
+    # SAFE TO CHANGE: no, unless the composition files themselves change their codes.
+    # A wrong code here silently pulls the composition of the wrong size of car.
     segment_map: dict[str, str] = field(default_factory=lambda: {
         "A": "0101", "B": "0102", "C": "0103", "D": "0104", "E": "0105", "F": "0106",
         "JA": "0201", "JB": "0202", "JC": "0203", "JD": "0204", "JE": "0205", "JF": "0206",
     })
+
+    # The same idea for drivetrains: our name -> the code used in the composition files.
+    # SAFE TO CHANGE: no, same warning as above.
     drv_prefix_map: dict[str, str] = field(default_factory=lambda: {
         "PHEV": "050103", "HEV": "040101", "BEV": "030103",
         "Diesel": "020102", "Petrol": "010101",
     })
+
+    # Which region's results this stage processes.
+    # SAFE TO CHANGE: only if the upstream stages actually produced another region.
     region: str = "EUR"
+
+    # Which drivetrains get material results.
+    # Note these are the FINE-GRAINED names (Petrol and Diesel separately), not the
+    # grouped "Liquids" used earlier in the pipeline.
+    # SAFE TO CHANGE: yes, to narrow the run. Adding a name only works if composition
+    # data exists for it.
     drivetrains: tuple[str, ...] = ("BEV", "HEV", "PHEV", "Diesel", "Petrol")
 
+    # Which level of detail to read from the car-composition file:
+    #     "m-c"  material per component  (current -- what this project needs)
+    #     "e-m"  individual chemical elements (finer, much larger)
+    # SAFE TO CHANGE: yes, but "m-c" is the level the rest of this analysis assumes.
     composition_parameter_code: str = "m-c"
-    # [NEW] Centralizes the choice `materials.py`'s `quantify_elements_from_tracker()`
-    # takes as its `parameter_code` argument, per your explicit, essential requirement:
-    # composition resolves down to COMPONENT and its MATERIALS, NOT further decomposed
-    # into individual chemical elements.
-    #   "m-c" (default) -- stops at material level (`element` column is just an alias
-    #                       for the material name at `material_level_key`; component
-    #                       grouping via componentKeyLevel0/1 is always available).
-    #   "e-m"           -- decomposes further into individual elements (Ag, In, Ta,
-    #                       Zn, Dy, Nd, Pr, Al, Cu -- see ELEMENT_LIST). NOT the
-    #                       default; only switch to this if element-level detail is
-    #                       genuinely needed later.
+
+    # Which column in the composition file holds the material name to group by.
+    # SAFE TO CHANGE: no, unless the file's own column naming changes.
     material_level_key: str = "materialKeyLevel_highest"
-    # [UPDATED] Which material-hierarchy level to report material names at, when
-    # composition_parameter_code == "m-c". Changed default from "materialKeyLevel2" to
-    # "materialKeyLevel_highest" to match the REAL stage-04 code's own usage (both
-    # 04_01_materials.py and 04_03_tractionmotors.py use "materialKeyLevel_highest" --
-    # a per-row fallback to the deepest available level, more robust than assuming
-    # uniform depth across every composition row). One of "materialKeyLevel0"..
-    # "materialKeyLevel4" or "materialKeyLevel_highest".
 
-    # -----------------------------------------------------------------------
-    # Stage 04, part 3 -- traction motors (04_03_tractionmotors.py)
-    # -----------------------------------------------------------------------
+    # The workbook describing what electric traction motors are made of.
+    # SAFE TO CHANGE: yes, when a newer version of the file arrives. The file must sit
+    # in the raw-composition data folder.
     traction_composition_file_name: str = "20260309-Traction_motors_consolidated.xlsx"
-    # [NEW] Centralizes what was hardcoded directly inside 04_03_tractionmotors.py
-    # (a date-stamped filename -- same "should be centralized" pattern as M9/M23/M31).
 
-    # -----------------------------------------------------------------------
-    # Stage 04, part 4 -- batteries (04_04_batteries.py)
-    # -----------------------------------------------------------------------
+    # The workbook giving which battery chemistries (NMC, LFP, ...) hold what market
+    # share over time.
+    # SAFE TO CHANGE: yes, when a newer version arrives.
     battery_share_file_name: str = "BATTKey_xEV_shares_final.xlsx"
+
+    # The workbook describing what those batteries are made of.
+    # SAFE TO CHANGE: yes, when a newer version arrives.
     battery_composition_file_name: str = "250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"
-    # [NEW] Centralizes two more hardcoded filenames, same pattern as above.
 
+    # Which level of detail to read from the BATTERY composition file. Same meaning as
+    # `composition_parameter_code` above.
+    # NOTE: this is currently "e-m" (elements) while the car composition uses "m-c"
+    # (materials per component). The parameter check flags this every run as a standing
+    # reminder -- it is not an error, but the two are at different levels of detail.
+    # SAFE TO CHANGE: yes, once you have confirmed what the battery workbook offers.
     battery_composition_parameter_code: str = "e-m"
-    # ======================================================================
-    # [FLAGGED -- ESSENTIAL REQUIREMENT CONFLICT, NOT RESOLVED, NEEDS YOUR INPUT]
-    # ======================================================================
-    # This is "e-m" -- ELEMENT level, the same code used by the excluded
-    # 04_02_elements.py -- directly conflicting with your explicit, essential
-    # requirement that composition resolve to component + material, NOT elements.
-    # UNLIKE the main ELV_2010_2050.xlsx composition file (confirmed, via materials.py,
-    # to also offer an "m-c" material-level reading), I have NOT seen the battery
-    # composition workbook (`battery_composition_file_name` above) and do NOT know
-    # whether it offers an equivalent material-level parameterCode value. I have
-    # deliberately NOT guessed a replacement string and silently substituted it --
-    # doing so risks silently reading the wrong column of a file I've never seen.
-    # ACTION NEEDED: open the battery composition workbook, check its `parameterCode`
-    # column's distinct values (04_04_batteries.py already prints
-    # "Available parameterCode values" for the main composition file the same way --
-    # a similar print could confirm this file's options), and tell me the exact string
-    # that means "material/component level, not individual elements". Until then,
-    # 04_04_batteries.py's battery-material-mass output remains at ELEMENT level --
-    # flagged loudly both here and at the call site in that file.
-    # ======================================================================
 
+    # Battery capacity in kWh assumed for each vehicle size segment -- a small A-segment
+    # car gets 25 kWh, a large F-segment car 100 kWh.
+    # This scales directly into how much battery material each vehicle contributes, so
+    # it matters a great deal for the material totals.
+    # SAFE TO CHANGE: yes. Values are kWh; keep them plausible for the segment.
     battery_size_map: dict[str, float] = field(default_factory=lambda: {
         "A": 25.0, "B": 45.0, "C": 60.0, "D": 80.0, "E": 80.0, "F": 100.0,
         "JA": 25.0, "JB": 45.0, "JC": 60.0, "JD": 80.0, "JE": 80.0, "JF": 100.0,
     })
-    # [NEW] Centralizes 04_04_batteries.py's hardcoded per-segment battery capacity
-    # (kWh) assumption. Per that file's own TODOs: no year dependence (rising battery
-    # capacity over time is not modeled), and D/E segments share the same value --
-    # confirm both are intentional once you can check against the segment taxonomy.
+
+    # Fallback battery size used when a vehicle's segment is unknown.
+    # SAFE TO CHANGE: yes. Ideally it stays near the middle of the map above.
     average_battery_capacity_kwh: float = 60.0
 
-    # -----------------------------------------------------------------------
-    # Stage 04, part 1 REWRITE -- component-material (C-M) Monte Carlo
-    # composition (04_01_materials.py). Replaces the old bulk ELV_2010_2050.xlsx
-    # composition table's role for the materials stage with a component x
-    # material x drivetrain x segment x year MASS DISTRIBUTION [kg/vehicle]
-    # (mean/median/mode/std/P025/P975, plus a full 50-bin histogram for genuine
-    # Monte Carlo bootstrap sampling) -- not a single point estimate.
-    # -----------------------------------------------------------------------
+    # The workbook holding the pre-computed composition statistics (means and spreads)
+    # that this stage reads instead of recomputing them.
+    # SAFE TO CHANGE: yes, when a newer version arrives.
     composition_summary_file_name: str = "36_MonteCarlo_Summary.xlsx"
-    # [NEW] The ~10MB summary workbook, living in `data/raw/composition/`: one tab
-    # per drivetrain (componentCarPetrol/Diesel/BEV/HEV/PHEV/Other), columns
-    # `components, segment, year, variable, mean, median, mode, std, P025, P975`
-    # -- one row per (component, material) mass distribution for a given
-    # segment/year/drivetrain. `componentCarOther` is never read (out of scope,
-    # matches `drivetrains` below); `segment == "standard"` rows are dropped (a
-    # generic/non-segment-specific summary row, not used downstream). Feeds the
-    # SCALAR (deterministic) materials path's point estimate -- see
-    # `composition_scalar_statistic`.
 
+    # Which single number to take from that summary file for the ordinary, non-Monte
+    # Carlo run: "mean" or "median".
+    # SAFE TO CHANGE: yes. Does not affect the uncertainty analysis, which uses the
+    # full distributions rather than one number.
     composition_scalar_statistic: str = "mean"
-    # [NEW] Which column of `composition_summary_file_name` the scalar materials
-    # path multiplies vehicle counts by. One of "mean", "median", "mode"
-    # (validated). Defaults to "mean" -- change if the scalar path should track
-    # the median or mode instead.
 
+    # The workbook holding the full composition distributions -- the shapes the
+    # uncertainty analysis draws from, rather than a single average.
+    # SAFE TO CHANGE: yes, when a newer version arrives.
     histogram_file_name: str = "37_MonteCarlo_Histograms.xlsx"
-    # [NEW] The large (~260MB today, expected to grow toward ~5x once resolution
-    # moves from every-5-years to annual) histogram workbook, also in
-    # `data/raw/composition/`. Columns: `components, segment, year, variable,
-    # bin_lower, bin_upper, count, frequency` -- 50 contiguous, equal-width bins
-    # per (components, segment, year, variable) group within a sheet, `count`
-    # summing to the number of underlying draws (200,000 in the real data seen
-    # so far), `frequency` summing to 1.0. This is what the Monte Carlo path
-    # bootstraps composition draws from (see `bootstrap_composition_draws` in
-    # `04_01_materials.py`).
 
+    # Which sheet inside that workbook belongs to which drivetrain.
+    # SAFE TO CHANGE: only if the workbook's sheet names change. A wrong name here
+    # means the material composition of the wrong vehicle type is used.
     histogram_sheet_names_by_drv: dict[str, list[str]] = field(default_factory=lambda: {
         "Petrol": ["componentCarPetrol"],
         "Diesel": ["componentCarDiesel"],
@@ -1781,69 +1484,23 @@ class MaterialsParams:
         "HEV": ["componentCarHEV"],
         "PHEV": ["componentCarPHEV"],
     })
-    # [FIXED, this round -- was a real bug, not a stable design] Petrol/Diesel used
-    # to list EXACT numbered sheet names here (e.g. "componentCarPetrol_1",
-    # "componentCarPetrol_2") because, at the time this was first written, the
-    # histogram workbook had just started splitting each drivetrain across multiple
-    # sheets (Excel's per-sheet row limit) and nothing auto-discovered siblings yet
-    # -- this was a manual stopgap to get past the original crash, using whichever
-    # sheets existed at that moment. It silently went stale: the workbook later grew
-    # to 5 sheets per drivetrain (still growing as data densifies toward annual
-    # resolution), but this list was never updated, so 3 of Petrol's/Diesel's 5
-    # sheets' worth of REAL data (including all of JA-JF and "standard" for both)
-    # was silently never read -- found via the user manually opening the workbook
-    # and spotting real data on a sheet the pipeline was ignoring.
-    #
-    # 04_01_carcomposition.py's `_stream_histogram_sheets` now auto-discovers the
-    # FULL sibling family for any requested name, whether that name is a bare prefix
-    # (as used here now, matching BEV/HEV/PHEV) or a specific numbered sheet -- so
-    # this field no longer needs to track an exact, fragile sheet count at all. Bare
-    # prefixes are used for every drivetrain now specifically so this field can never
-    # again silently under-specify the real sheet count the way it just did.
-    #
-    # TODO(cleanup): once this auto-discovery behavior has been running in
-    # production for a while and is trusted, consider whether this field is worth
-    # keeping as a dict at all, vs. just deriving "componentCar{drivetrain}" as a
-    # bare prefix directly from `drivetrains` below with no separate mapping to
-    # maintain. Left as an explicit dict for now (not collapsed automatically) since
-    # removing it is a design simplification to make deliberately, not a fix to
-    # rush through here.
 
+    # How finely material results are reported over time:
+    #     "period"  one figure per reporting window  (current -- far smaller and faster)
+    #     "year"    a figure for every single year   (much larger, much slower)
+    # SAFE TO CHANGE: yes, but "year" combined with 200,000 draws produces very large
+    # files -- the existing per-scenario ones already run to several GB.
     material_mc_time_resolution: str = "period"
-    # [NEW] Controls what vehicle-count granularity the Monte Carlo materials
-    # path combines composition draws against:
-    #   "period" (default) -- mc["by_group"][...]["periods"][(start,end)]
-    #                          ["cumulative_collected"], the SAME period-level
-    #                          draws stage 03_02 already computes. No extra MC
-    #                          cost beyond what 03_02 already pays.
-    #   "annual"           -- one set of material-mass draws PER YEAR, not just
-    #                          per requested period. Requires per-year vehicle-
-    #                          count draws upstream in 03_02 (collect_per_year=
-    #                          True, or many single-year output_periods entries)
-    #                          -- materially more expensive; only turn on once
-    #                          year-by-year material mass is actually needed.
-    #   "both"             -- compute both of the above.
-    # One of "period", "annual", "both" (validated).
 
+    # How many uncertainty draws this stage runs. Same meaning as `n_draws` in the
+    # Monte Carlo section, but kept separate so this stage can be run at a different
+    # cost from the rest of the pipeline.
+    # SAFE TO CHANGE: yes -- lower it for a quick check.
     materials_mc_n_draws: int = 200_000
-    # [NEW] Number of Monte Carlo draws for the MATERIALS-stage combination (vehicle-
-    # count bootstrap x composition bootstrap). Deliberately INDEPENDENT of
-    # `monte_carlo.n_draws` (stage 03_02's own resolution, 200,000 by default) -- since
-    # both sides of the materials combination are bootstrapped fresh from SAVED
-    # histograms/summaries (see the architecture note in `04_01_materials.py`; raw
-    # per-draw arrays from stage 03_02 are never persisted to disk), this is a free
-    # choice tuned purely for the materials stage's own speed/precision tradeoff.
-    # Confirmed with the user: start at 20,000 (verified on the real project: full
-    # BEV drivetrain, 936 (component, material, segment) groups, bootstrapped + combined
-    # in under a second at this size) -- must stay fully vectorized as this increases
-    # (it already is: one `rng.random(n_draws)` call per group, no per-draw Python loop).
 
+    # Fixes this stage's random numbers so a re-run reproduces identical results.
+    # SAFE TO CHANGE: yes, any whole number.
     materials_mc_seed: int | None = 42
-    # [NEW] Seed for the materials-stage bootstrap RNG stream. Kept SEPARATE from
-    # `monte_carlo.seed` (stage 03_02) and `monte_carlo.stockflow_seed` (stage 02) --
-    # same "one seed per stage" convention already used elsewhere in this file --
-    # so materials-stage randomness never accidentally correlates with (or depends on
-    # the exact draw sequence of) an earlier stage's MC run.
 
     def validate(self) -> list[str]:
         issues: list[str] = []
@@ -1906,87 +1563,80 @@ class MaterialsParams:
 
 
 # ---------------------------------------------------------------------------
-# Stage 06 -- Visualization
-# ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class VisualizationParams:
-    year_plot_start: int = 2015
-    year_plot_end: int = 2070
-    year_ratio_start: int = 2020
-    element_list: tuple[str, ...] = tuple(ELEMENT_LIST)
-    element_list_noAlCu: tuple[str, ...] = tuple(ELEMENT_LIST_NO_AL_CU)
-    scenario: str = "npi25"
-
-    def validate(self) -> list[str]:
-        issues: list[str] = []
-        if self.year_plot_start > self.year_plot_end:
-            issues.append("visualization: year_plot_start must not be after year_plot_end.")
-        return issues
-
-
-# ---------------------------------------------------------------------------
-# Monte Carlo (cross-cutting, not tied to any one stage)
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class MonteCarloParams:
     """
-    Off by default -- enabling this does not change any deterministic stage's output,
-    only whether stages ALSO run an additional Monte Carlo pass (see
-    `02_stockdriven.py`'s Monte Carlo block for the first concrete usage; `src/
-    monte_carlo.py` for the generic sampling machinery this drives).
+    Settings for the uncertainty analysis, shared by every stage that runs one.
+
+    Turning this off does not change any stage's ordinary single-run results -- it only
+    decides whether the stages ALSO do the extra uncertainty pass on top.
     """
-    enabled: bool = True  # MC
+
+    # Run the uncertainty analysis at all?
+    # SAFE TO CHANGE: yes. False makes the pipeline much faster and still produces
+    # every ordinary result -- you just get no ranges, no shaded bands, no histograms.
+    enabled: bool = True
+
+    # How many times to re-run the model with freshly drawn inputs.
+    # SAFE TO CHANGE: yes -- this is the main speed/quality dial.
+    #     ~1,000     seconds to run, visibly rough ranges; fine for testing a change
+    #    ~20,000     a good working compromise
+    #    200,000     production quality, smooth distributions (the current setting)
+    # More draws never changes the ANSWER, only how precisely the range is pinned down.
+    # Memory grows with it too: 200,000 draws peaks at roughly 6.6 GB.
     n_draws: int = 200000
+
+    # Fixes the random numbers, so re-running reproduces identical results.
+    # SAFE TO CHANGE: yes, any whole number. Change it only if you deliberately want a
+    # different random sample. Setting it to None gives a different sample every run,
+    # which makes results non-reproducible -- avoid that for anything you report.
     seed: int | None = 42
 
-    # [NEW] The full stock-and-flow uncertainty analysis (`mc_stockflow_uncertainty.py`)
-    # -- varies lifetime + unknown_whereabouts_share + export_share_by_drv for every
-    # stage-02-level drivetrain simultaneously. Kept SEPARATE from `n_draws` above
-    # (which the lightweight single-parameter demo in 02_stockdriven.py uses) so
-    # enabling that quick demo never accidentally triggers a 200,000-draw run.
+    # ---- Separate budget for the standalone stock-and-flow uncertainty script -----
+    # `mc_stockflow_uncertainty.py` varies lifetime, unknown-whereabouts share and
+    # export share for every drivetrain at once. It has its OWN draw count and seed so
+    # that running a quick demo elsewhere can never accidentally start a 200,000-draw
+    # job here.
+    # SAFE TO CHANGE: yes -- same meaning as `n_draws` / `seed` above.
     stockflow_n_draws: int = 200_000
     stockflow_seed: int | None = 42
-    # Placeholder relative spreads for the uncertainty distributions -- NOT derived
-    # from any real uncertainty estimate yet (no such estimate has been provided).
-    # scale_lambda: Triangular(base*(1-spread), base, base*(1+spread)).
-    # unknown_whereabouts_share / export_share_by_drv: Normal(base, base*spread),
-    # clipped to [0, 1]. Override these once you have real uncertainty ranges --
-    # everything downstream (sampling, propagation, sensitivity analysis) works
-    # identically regardless of what the spread actually is.
+
+    # How wide the uncertainty is for that standalone script, as a fraction:
+    # 0.15 means "give or take 15%".
+    #     lifetime spread -> Triangular(base x 0.85, base, base x 1.15)
+    #     share spread    -> Normal(base, base x 0.15), kept within 0-1
+    # IMPORTANT: these two are PLACEHOLDERS. They are not measured uncertainties -- no
+    # real ones have been supplied. Replace them once you have real ranges; everything
+    # downstream works identically whatever the numbers are.
+    # SAFE TO CHANGE: yes. Each must stay above 0 and below 1.
     stockflow_lifetime_spread: float = 0.15
     stockflow_share_spread: float = 0.15
 
-    # [NEW] Memory-chunking for vectorized Monte Carlo engines (e.g.
-    # `cohort_flow_mc.py`): draws are processed in batches of this size so peak memory
-    # is bounded by `chunk_size x n_cohorts`, not `n_draws x n_cohorts`. A generic,
-    # cross-stage performance knob (not a model assumption), centralized here rather
-    # than hardcoded as a function default in any one engine.
+    # How many draws to process at a time, to keep memory under control.
+    # Pure performance setting -- it does NOT affect results in any way. Smaller means
+    # less memory and slightly slower; larger means more memory and slightly faster.
+    # SAFE TO CHANGE: yes, though there is rarely a reason. Lower it only if a run runs
+    # out of memory.
     chunk_size: int = 20_000
 
-    # [NEW, moved here from being 03_02-only] Which (start_year, end_year) INCLUSIVE
-    # year-ranges to report Monte Carlo results for -- cumulative flows, cumulative
-    # inflow, and stock (end-of-period snapshot, per-year series, and sum-over-period
-    # "stock-years"), broken down as finely as each stage's own model supports (stage
-    # 02/03_01: per drivetrain only, no segment concept yet; stage 03_02: per
-    # drivetrain AND per segment). A single year is just a range where start == end
-    # (e.g. `(2030, 2030)`). SHARED across stages 02, 03_01, and 03_02 -- specifying it
-    # once here keeps all three consistent by construction, rather than three
-    # independently-edited copies of the same list. Specified UP FRONT (not queryable
-    # after a run completes): stage 03_02's vectorized engine (`cohort_flow_mc.py`)
-    # accumulates exactly these windows during its one simulation pass to keep memory
-    # bounded at 200,000 draws; stages 02/03_01 already track full per-year (not
-    # per-cohort) arrays cheaply and sum over these windows post-hoc
-    # (`monte_carlo.sum_by_period`) -- same requested periods either way, different
-    # (cheaper) implementation because those two stages' per-year arrays were already
-    # affordable to keep in full. Every entry gets a full distribution summary
-    # (mean/median/mode/std/P2.5/P97.5 + 50-bin histogram, via `monte_carlo.
-    # summarize_distribution`). Defaults to just the whole horizon (matching the
-    # pre-this-feature behavior) -- add entries for finer-grained queries, e.g.:
-    #     output_periods: list[tuple[int, int]] = field(default_factory=lambda: [
-    #         (1975, 2070),   # whole horizon (kept for 03_02's flat top-level aliases)
-    #         (2030, 2030),   # single year
-    #         (2030, 2040),   # a decade
-    #     ])
+    # Which time windows to report results for, written as (first year, last year),
+    # both years included. Every window listed here gets a full summary: mean, median,
+    # the 2.5% and 97.5% bounds, and a histogram.
+    #
+    # A single year is a window with that year twice, e.g. (2030, 2030). The same list
+    # is used by stages 02, 03_01 and 03_02, so "2030-2040" means the identical window
+    # everywhere -- which is the whole point of setting it once, here.
+    #
+    # These must be chosen BEFORE a run. Stage 03_02 accumulates exactly these windows
+    # while it simulates, because keeping every year for every draw would not fit in
+    # memory at 200,000 draws. You cannot ask for a new window afterwards without
+    # re-running.
+    #
+    # SAFE TO CHANGE: yes -- add as many windows as you like. Each adds reporting work,
+    # not simulation work, so a handful costs very little. For example:
+    #     [(1975, 2070),   # the whole model horizon
+    #      (2030, 2030),   # one single year
+    #      (2030, 2040)]   # a decade
     output_periods: list[tuple[int, int]] = field(default_factory=lambda: [(1975, 2070)])
 
     def validate(self) -> list[str]:
@@ -2008,6 +1658,10 @@ class MonteCarloParams:
                 issues.append(f"monte_carlo.output_periods entry ({start}, {end}) has start > end.")
         return issues
 
+# ---------------------------------------------------------------------------
+# THE CONTAINER -- every section above, in one object
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # Top-level Params
@@ -2019,7 +1673,6 @@ class Params:
     adjusted_flows: AdjustedFlowsParams = field(default_factory=AdjustedFlowsParams)
     disaggregation: DisaggregationParams = field(default_factory=DisaggregationParams)
     materials: MaterialsParams = field(default_factory=MaterialsParams)
-    visualization: VisualizationParams = field(default_factory=VisualizationParams)
     monte_carlo: MonteCarloParams = field(default_factory=MonteCarloParams)
 
     def validate(self) -> list[str]:
@@ -2029,7 +1682,6 @@ class Params:
         issues += self.adjusted_flows.validate()
         issues += self.disaggregation.validate()
         issues += self.materials.validate()
-        issues += self.visualization.validate()
         issues += self.monte_carlo.validate()
 
         if self.stock_flow.model_end_year != self.data_prep.end_year_model:
@@ -2054,6 +1706,5 @@ class Params:
             "03_02_adjusted_flows": asdict(self.adjusted_flows),
             "03_disaggregation": asdict(self.disaggregation),
             "04_materials": asdict(self.materials),
-            "visualization": asdict(self.visualization),
             "monte_carlo": asdict(self.monte_carlo),
         }
