@@ -1131,3 +1131,102 @@ def run_cohort_survival_monte_carlo(
         stock_target_draws=stock_target_draws,
         inflow_override_by_year=inflow_override_by_year,
     )
+
+
+def build_inflow_volume_multipliers(
+    *,
+    stock_dict: dict,
+    params,
+    drivetrain_map: dict[str, str],
+    years: "np.ndarray",
+) -> dict[str, "np.ndarray"]:
+    """
+    Stage 02's per-draw INFLOW VOLUME uncertainty, expressed as a multiplier that a
+    later stage can apply to its own deterministic inflow.
+
+    WHY THIS EXISTS
+    ---------------
+    Stage 02 samples how big the fleet is (`stock_target_relative_spread`, the
+    correlated drivetrain mix, the shared total-fleet axis) and therefore how many
+    vehicles are bought each year. That uncertainty was real but went no further:
+    stage 03_02 reads `flows_03`, a plain table with ONE number per row and no draw
+    dimension at all, so there was nowhere for it to go. Segment shares varied inside
+    03_02, which made individual segments move, but they only ever REDISTRIBUTED a
+    fixed total -- measured at a coefficient of variation of 0.000001% on total BEV
+    inflow, against 9.6% in stage 02's own draws.
+
+    The result was a pipeline that computed inflow uncertainty and then quietly threw
+    it away at one hand-off. Everything downstream -- material flows, electronics --
+    reported bands that were too narrow on the inflow side.
+
+    WHAT IT RETURNS
+    ---------------
+    `{fine_drivetrain: (n_years, n_draws) float32}`, each entry the ratio of that
+    draw's inflow to the mean inflow for that year. Multiply a deterministic inflow
+    by it and you get stage 02's spread back, draw for draw. A multiplier of exactly
+    1.0 everywhere means no uncertainty -- which is what the historic years before
+    `stock_target_uncertainty_start_year` correctly produce.
+
+    A RATIO, NOT THE VOLUME ITSELF, and that matters. Stage 03_01 splits stage 02's
+    coarse drivetrains into finer ones and adjusts levels on the way; stage 03_02's
+    scenarios adjust them again. Handing over absolute vehicle counts would overwrite
+    all of that. Handing over a relative multiplier leaves each stage's own numbers
+    intact and adds only the SHAPE of the uncertainty.
+
+    COARSE TO FINE. Stage 02 models Liquids and Hybrid; later stages split those into
+    Petrol/Diesel and HEV/PHEV. Both halves inherit their parent's multiplier, because
+    the uncertainty is about how many liquid-fuel cars are sold at all, not about how
+    those divide between petrol and diesel -- that split is stage 03_01's own concern
+    and carries its own uncertainty there.
+
+    ZERO YEARS. Where the mean inflow is zero (a drivetrain before it existed, or
+    after a phase-out) the ratio is undefined; the multiplier is set to 1.0, leaving a
+    zero inflow as zero rather than producing a NaN that would poison the run.
+    """
+    p02 = params.stock_flow
+    drivetrains = sorted({drv for (_, drv) in stock_dict.keys()})
+    mc = run_stage02_cohort_monte_carlo(
+        stock_dict=stock_dict,
+        drivetrains=drivetrains,
+        model_end_year=int(p02.model_end_year),
+        init_max_age=p02.init_max_age,
+        n_draws=int(params.monte_carlo.n_draws),
+        seed=params.monte_carlo.seed,
+        lifetime_by_drv=p02.lifetime_by_drv,
+        lifetime_override_by_drv=p02.lifetime_override_by_drv,
+        lifetime_scale_lambda_relative_spread=p02.lifetime_scale_lambda_relative_spread,
+        negative_inflow_policy=p02.negative_inflow_policy,
+        hard_zero_inflow_from_year_by_drv=p02.hard_zero_inflow_from_year_by_drv,
+        hard_zero_inflow_until_year_by_drv=p02.hard_zero_inflow_until_year_by_drv,
+        inflow_mode_by_drv=p02.inflow_mode_by_drv,
+        inflow_phaseout_by_drv=p02.inflow_phaseout_by_drv,
+        inflow_phaseout_max_share_triangular_by_drv=getattr(
+            p02, "inflow_phaseout_max_share_triangular_by_drv", {}
+        ),
+        stock_target_relative_spread=p02.stock_target_relative_spread,
+        stock_target_uncertainty_start_year=p02.stock_target_uncertainty_start_year,
+        stock_target_ramp_max_rate_per_year=p02.stock_target_ramp_max_rate_per_year,
+        stock_target_correlated_mix=p02.stock_target_correlated_mix,
+        total_fleet_relative_spread=p02.total_fleet_relative_spread,
+    )
+
+    out: dict[str, np.ndarray] = {}
+    for coarse, result in mc.results.items():
+        t = np.asarray(result["t"], dtype=int)
+        applied = result["inflow_applied_by_year"]          # (n_years_02, n_draws)
+        mean = applied.mean(axis=1, keepdims=True)
+        ratio = np.divide(applied, mean, out=np.ones_like(applied), where=mean > 0)
+
+        # Line the stage-02 year axis up with the caller's, filling any year stage 02
+        # does not cover with 1.0 (no uncertainty) rather than extrapolating.
+        idx = {int(y): i for i, y in enumerate(t)}
+        aligned = np.ones((len(years), ratio.shape[1]), dtype=np.float32)
+        for j, y in enumerate(years):
+            i = idx.get(int(y))
+            if i is not None:
+                aligned[j] = ratio[i]
+
+        for fine, parent in drivetrain_map.items():
+            if parent == coarse:
+                out[fine] = aligned
+    return out

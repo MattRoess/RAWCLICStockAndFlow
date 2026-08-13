@@ -140,6 +140,11 @@ ARTIFACT_FILES: dict[str, str] = {
     # total, per scenario -- same output shape as before this update, only the
     # simulation behind it changed.
     "mc_stage03_02_sensitivity": "03_02_mc_sensitivity.pkl",
+    # [NEW] Stage 04_02: BEV electronics material flows -- per-year summaries
+    # (mean/median/P2.5/P97.5) for inflow, outflow and collected, by domain and
+    # by segment, plus the segment-split diagnostics. The raw draws are NOT in
+    # here: they are ~1 GB and are read straight from the two .npy sources.
+    "bev_electronics_summary": "04_02_bev_electronics_summary.pkl",
     # [NEW] Same idea as mc_stage02/03_01_sensitivity, PER SCENARIO: for each of the
     # 11 scenarios, Spearman rank correlation between every entity's (drivetrain's)
     # scale_lambda/export_share/unknown_share draws (exposed via `cohort_flow_mc.py`'s

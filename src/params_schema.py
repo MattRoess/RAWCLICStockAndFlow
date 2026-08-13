@@ -758,6 +758,36 @@ class StockFlowParams:
         "BEV": 2011,
     })
 
+    # WHICH COARSE DRIVETRAIN EACH FINE ONE INHERITS ITS INFLOW UNCERTAINTY FROM.
+    #
+    # THE PROBLEM THIS SOLVES. Stage 02 works with five coarse drivetrains -- BEV,
+    # Liquids, Hybrid, Gases, FCEV -- and that is where the uncertainty about HOW
+    # MANY vehicles are sold is sampled. Stages 03_01 and 03_02 work with finer
+    # ones, splitting Liquids into Petrol and Diesel and Hybrid into HEV and PHEV.
+    # Without a mapping, the finer stages have no way to ask "how uncertain was
+    # this drivetrain's sales volume?", because the drivetrain they are modelling
+    # does not exist upstream.
+    #
+    # WHAT INHERITANCE MEANS HERE, AND WHAT IT DELIBERATELY DOES NOT TOUCH.
+    # Petrol and Diesel both inherit Liquids' volume movement: in a Monte Carlo
+    # draw where Europe buys 8% fewer liquid-fuel cars, both petrol and diesel
+    # sales move down together, because they are the same market. What this does
+    # NOT do is decide how Liquids divides between petrol and diesel -- that split,
+    # and its own uncertainty and development over time, is stage 03_01's work and
+    # is left completely untouched. The two effects compose: 03_01 says how the
+    # cake is cut, stage 02 says how big the cake is.
+    #
+    # SAFE TO CHANGE: only if the drivetrain lists themselves change. Every fine
+    # drivetrain used downstream needs an entry, and every value must be a
+    # drivetrain stage 02 actually models.
+    inflow_uncertainty_parent_by_drv: tuple[tuple[str, str], ...] = (
+        ("BEV", "BEV"),
+        ("Petrol", "Liquids"),
+        ("Diesel", "Liquids"),
+        ("HEV", "Hybrid"),
+        ("PHEV", "Hybrid"),
+    )
+
     # HOW UNCERTAIN THE LIFETIMES ARE, per drivetrain, as a fraction: 0.15 means
     # "give or take 15%". Used only by the uncertainty analysis -- the ordinary run
     # always uses the exact lifetimes set above.
@@ -1502,8 +1532,145 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes, any whole number.
     materials_mc_seed: int | None = 42
 
+    # =======================================================================
+    # BEV ELECTRONICS  (code/04_02_BEVelectronics.py)
+    # -----------------------------------------------------------------------
+    # Links this fleet model to the separate BEV-electronics study: how much
+    # wiring, sensor, circuit-board and motor material enters the fleet, leaves
+    # it, and is collected from it, year by year.
+    #
+    # The electronics study reports grams PER VEHICLE as a full distribution;
+    # this model supplies HOW MANY vehicles, also as a distribution. Multiplying
+    # them draw by draw gives the total, with both uncertainties carried
+    # through.
+    # =======================================================================
+
+    # Where the electronics study keeps its raw per-draw arrays, written by its
+    # `tools/mc_composition.py`. One file per segment and series, e.g.
+    # "AB_Total.npy", each shaped (draws, years).
+    # SAFE TO CHANGE: only if you move that repository.
+    bev_electronics_draws_dir: str = (
+        "../../RAWCLICVehicleElectronics/Composition/draws"
+    )
+
+    # Which parts of the electronics to report. "Total" is the sum of the other
+    # four and is what most results use.
+    # SAFE TO CHANGE: yes, to narrow the output. Names must match the .npy files.
+    bev_electronics_series: tuple[str, ...] = ("Total", "Wiring", "Sensors", "PCB", "Motors")
+
+    # HOW THE ELECTRONICS SEGMENTS MAP ONTO THIS MODEL'S SEGMENTS.
+    # The electronics study groups cars into three sizes -- AB, CD, EF -- while
+    # this model uses twelve. Each electronics group covers a PAIR: AB covers
+    # both A and B.
+    #
+    # A and B are not identical, though: within the pair, A is the smaller car
+    # and carries slightly less electronics, B slightly more. So rather than
+    # giving both the same distribution, the pair's distribution is TILTED --
+    # A draws a little more often from its lower end, B from its upper end.
+    # Crucially the two halves still add back up to exactly the original AB
+    # distribution: nothing is invented and nothing is lost.
+    #
+    # The J-segments (JA-JF) have no electronics counterpart of their own, so
+    # each takes its non-J twin: JA uses A's distribution, JB uses B's, and so
+    # on.
+    # SAFE TO CHANGE: only if the electronics study changes its own grouping.
+    # Written as a plain tuple, not a dict, deliberately: a dataclass field with a
+    # dict default needs `default_factory`, and such fields live only on the
+    # INSTANCE. An older saved parameter file would then lack this entry entirely
+    # and fail on load. A tuple is immutable, so it lives on the class and older
+    # files simply inherit it.
+    bev_electronics_segment_pairs: tuple[tuple[str, str, str], ...] = (
+        ("AB", "A", "B"), ("CD", "C", "D"), ("EF", "E", "F"),
+    )
+
+    # HOW STRONGLY TO TILT that split. 0 means no tilt at all -- A and B would
+    # get identical distributions. Larger means the two pull further apart.
+    #
+    # THIS IS NOT A PERCENTAGE, and the difference matters. It is the strength of
+    # the re-weighting, not the resulting gap between the two segments' averages.
+    # Measured on the real AB pool at 200,000 draws:
+    #
+    #     tilt      resulting gap between A's and B's mean
+    #     0.20                3.1%      <- the current setting
+    #     0.40                6.3%
+    #     0.60                9.5%
+    #     0.77               12.3%      <- the ceiling for this pair
+    #
+    # THERE IS A HARD CEILING, and it is not arbitrary. The weight given to the
+    # smaller segment is `share + tilt x (0.5 - rank)`. Push the tilt past
+    # `2 x min(share, 1 - share)` and that weight goes negative for the largest
+    # draws, at which point the two halves no longer add back to the electronics
+    # study's own published distribution -- the model would be reporting a
+    # composition nobody measured. For AB, where A holds about 61.5% of the
+    # vehicles, the ceiling is 0.77 and so the widest achievable separation is
+    # about 12.3%. A 20% separation is not reachable at all. The code stops with
+    # an explanatory error rather than clipping the weight and carrying on.
+    #
+    # HOW GOOD IS THE RECOMBINATION IN PRACTICE? The split resamples the pool
+    # under those weights, so it carries ordinary Monte Carlo noise, which shrinks
+    # with draw count. Measured on the real AB pool:
+    #
+    #        draws        error in reproducing the published mean
+    #          300                    0.10%
+    #       30,000                    0.017%
+    #      200,000                    0.007%
+    #
+    # At the production draw count the split is faithful to seven parts in
+    # 100,000. Figure 04_02_02 prints this error on every panel, so a run that
+    # drifts is visible rather than assumed.
+    #
+    # SAFE TO CHANGE: yes -- this is the dial you are most likely to adjust. Any
+    # value from 0 up to the ceiling described above.
+    bev_electronics_segment_tilt: float = 0.2
+
+    # The "standard" case: one average BEV rather than twelve segment-specific
+    # ones, built as a mixture across A-F so it comes out as a full
+    # distribution, not a single number.
+    # True  -- weight each segment by how many vehicles are actually in it
+    # False -- weight all six equally
+    # SAFE TO CHANGE: yes.
+    bev_electronics_standard_fleet_weighted: bool = True
+
+    # First and last year to report. The electronics study itself only covers
+    # 2020-2070, so asking for earlier years would have nothing to multiply.
+    # SAFE TO CHANGE: yes, within the electronics study's own range.
+    bev_electronics_year_min: int = 2020
+    bev_electronics_year_max: int = 2070
+
+    # Whether stage 03_02 exports the BEV per-year, per-draw vehicle counts that
+    # stage 04_02 needs.
+    #
+    # It costs real time: about twelve extra Monte Carlo calls, one per BEV
+    # segment, on top of the normal 03_02 run. Roughly 1.5 GB lands in
+    # data/processed/bev_draws/.
+    #
+    # It has to happen in 03_02 rather than in 04_02 because the inflow these
+    # draws come from is the scenario's own resolved inflow, which exists only
+    # inside that stage. Exporting from there means 04_02 reads the real numbers
+    # instead of trying to reconstruct them.
+    #
+    # SAFE TO CHANGE: yes. Set False if you are not going to run 04_02 and want
+    # 03_02 back at its normal speed. 04_02 stops with a clear message if the
+    # files are missing.
+    bev_electronics_export_draws: bool = True
+
     def validate(self) -> list[str]:
         issues: list[str] = []
+        if not (0.0 <= self.bev_electronics_segment_tilt <= 1.0):
+            issues.append(
+                f"materials.bev_electronics_segment_tilt="
+                f"{self.bev_electronics_segment_tilt} must be between 0 and 1."
+            )
+        if self.bev_electronics_year_min > self.bev_electronics_year_max:
+            issues.append(
+                "materials.bev_electronics_year_min must not be after "
+                "bev_electronics_year_max."
+            )
+        if "Total" not in self.bev_electronics_series:
+            issues.append(
+                "materials.bev_electronics_series must include 'Total' -- the "
+                "headline results are built from it."
+            )
         if self.materials_mc_n_draws <= 0:
             issues.append(f"materials.materials_mc_n_draws={self.materials_mc_n_draws} must be positive.")
         if self.composition_scalar_statistic not in {"mean", "median", "mode"}:

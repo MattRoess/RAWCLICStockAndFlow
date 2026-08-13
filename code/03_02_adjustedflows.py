@@ -559,6 +559,7 @@ def run_adjusted_scenario(
     unknown_share_lifetime_coupling_k: dict[str, float] | float | None = None,
     mc_seed: int | np.random.SeedSequence | None = None,
     mc_seed_by_drivetrain: int | np.random.SeedSequence | None = None,
+    bev_draw_export_dir: str | Path | None = None,
     mc_chunk_size: int = 20_000,
     output_periods: list[tuple[int, int]] | None = None,
     # [NEW] Precomputed per-draw future segment-share inflow overrides for this
@@ -768,6 +769,91 @@ def run_adjusted_scenario(
         )
         print(f"[{scenario_name}] Monte Carlo run (by-drivetrain) done in {time.time() - t_start_mc_drv:.1f}s")
         mc_result["by_drivetrain"] = mc_result_by_drivetrain["by_group"]
+
+        # -------------------------------------------------------------------
+        # [NEW] Per-YEAR, per-DRAW arrays for BEV, one segment at a time, saved
+        # to disk for stage 04_02 (BEV electronics).
+        #
+        # WHY IT LIVES HERE AND NOT IN 04_02: the inflow these draws come from is
+        # THIS scenario's resolved inflow, which exists only inside this function
+        # and is never persisted. A stage that re-derived it would be reproducing
+        # a long setup by hand -- exactly how 03_01 silently diverged from stage
+        # 02 three separate times. Exporting from the one place that already has
+        # the right numbers removes that whole failure mode.
+        #
+        # WHY ONE SEGMENT PER CALL: the engine returns (n_draws, n_years) arrays
+        # per group when collect_per_year=True. At 200,000 draws that is 154 MB
+        # per array, so all 12 BEV segments at once would need ~9 GB. One segment
+        # at a time peaks at ~0.8 GB and is written out before the next starts.
+        #
+        # SEEDS STILL LINE UP: the engine draws lifetime and share values per
+        # ENTITY (drivetrain), caching them the first time that entity is seen,
+        # and spawns those from `seed` in group order. BEV sorts first either
+        # way, so a BEV-only call with the same `mc_seed` consumes the same first
+        # spawn and therefore the same BEV draws as the full run above. Stage
+        # 04_02 re-checks this against the saved period summary rather than
+        # trusting it.
+        # -------------------------------------------------------------------
+        if bev_draw_export_dir is not None:
+            bev_dir = Path(bev_draw_export_dir) / scenario_name
+            bev_dir.mkdir(parents=True, exist_ok=True)
+            bev_segments = sorted(
+                {g[2] for g in mc_result["by_group"] if g[1] == "BEV"}
+            )
+            print(f"[{scenario_name}] exporting BEV per-year draws for "
+                  f"{len(bev_segments)} segments -> {bev_dir}")
+            for seg in bev_segments:
+                seg_df = inflow_df[
+                    (inflow_df["Drive Train"] == "BEV") & (inflow_df["Segment"] == seg)
+                ]
+                if seg_df.empty:
+                    continue
+                seg_draws = None
+                if inflow_draws_by_group:
+                    seg_draws = {
+                        k: v for k, v in inflow_draws_by_group.items()
+                        if k[1] == "BEV" and k[2] == seg
+                    }
+                t_seg = time.time()
+                seg_mc = fdm.run_flow_driven_model_monte_carlo(
+                    df=seg_df, years=years, t_end=int(years.max()),
+                    lifetime_by_drv=mapped_inputs["lifetime_by_drv"],
+                    unknown_whereabouts_share=unknown_whereabouts_share,
+                    export_share_by_drivetrain=export_share_by_drivetrain,
+                    collected_share_by_drivetrain=collected_share_by_drivetrain,
+                    starting_stock_by_cohort_lookup=starting_stock_by_cohort_lookup,
+                    n_draws=n_draws,
+                    lifetime_scale_lambda_relative_spread=lifetime_scale_lambda_relative_spread,
+                    collected_share_relative_spread=collected_share_relative_spread,
+                    export_share_relative_spread=export_share_relative_spread,
+                    unknown_whereabouts_share_relative_spread=unknown_whereabouts_share_relative_spread,
+                    unknown_share_lifetime_coupling_k=unknown_share_lifetime_coupling_k,
+                    group_cols=["Region", "Drive Train", "Segment"], outflow_timing="post_inflow",
+                    lifetime_change_by_drv=lifetime_change_by_drv,
+                    stock_modifier_2027=stock_modifier_2027,
+                    stock_modifier_start_year=stock_modifier_start_year,
+                    output_periods=output_periods,
+                    inflow_draws_by_group=seg_draws,
+                    seed=mc_seed, chunk_size=mc_chunk_size, collect_per_year=True,
+                    per_year_entity_band_pct=None,
+                    verbose=False, progress_label=f"{scenario_name} [BEV {seg}]",
+                )
+                grp = seg_mc["by_group"][("EUR", "BEV", seg)]
+                yrs = np.asarray(grp["years"], dtype=int)
+                np.save(bev_dir / "years.npy", yrs)
+                # float32: these are vehicle counts in millions, ~1e-3..1e1, and
+                # 7 significant digits is far beyond the model's real precision.
+                # Halves both the file size and stage 04_02's peak memory.
+                for name, key in (("inflow", "per_year_inflow"),
+                                  ("outflow", "per_year_survival"),
+                                  ("collected", "per_year_collected")):
+                    arr = grp.get(key)
+                    if arr is None:
+                        continue
+                    np.save(bev_dir / f"BEV_{seg}_{name}.npy",
+                            np.asarray(arr, dtype=np.float32))
+                print(f"    BEV {seg}: {time.time() - t_seg:.1f}s")
+                del seg_mc, grp
 
     flows_new = results["flows_df"].copy()
     outflow_surv_new = results["outflow_surv_df"].copy()
@@ -1017,6 +1103,16 @@ def main() -> dict[str, Any]:
     unknown_share_lifetime_coupling_k_mc = dict(p02.unknown_share_lifetime_coupling_k)
     mc_chunk_size = params.monte_carlo.chunk_size
 
+    # [NEW] Where BEV per-year, per-draw arrays go for stage 04_02 (BEV
+    # electronics). Set to None to skip the export entirely -- it adds roughly
+    # 12 extra engine calls (one per BEV segment) to a Monte Carlo run, so it is
+    # real time, not free. 04_02 cannot run without it.
+    bev_draw_export_dir_resolved = (
+        PROJECT_ROOT / "data" / "processed" / "bev_draws"
+        if params.monte_carlo.enabled and p04.bev_electronics_export_draws
+        else None
+    )
+
     # Independent seed stream per scenario, spawn_key=(2,) -- matches this stage's
     # existing convention (differs from stage 02's implicit 0 and 03_01's (1,), so
     # this stage's draws aren't correlated with either by accident of sharing a
@@ -1164,6 +1260,7 @@ def main() -> dict[str, Any]:
             unknown_share_lifetime_coupling_k=unknown_share_lifetime_coupling_k_mc,
             mc_seed=mc_scenario_seeds[name],
             mc_seed_by_drivetrain=mc_scenario_seeds_drivetrain[name],
+            bev_draw_export_dir=bev_draw_export_dir_resolved,
             mc_chunk_size=mc_chunk_size, output_periods=params.monte_carlo.output_periods,
             inflow_draws_by_group=inflow_draws_for_scenario,
             # [NEW] 95% per-year, per-drivetrain uncertainty band for the flow
