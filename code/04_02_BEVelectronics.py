@@ -93,6 +93,26 @@ from src.monte_carlo import summarize_distribution  # type: ignore
 #   /1000 -> kilotonnes, which keeps the annual numbers readable.
 TONNES_PER_KILOTONNE = 1_000.0
 
+# THE WIRING SERIES IS COPPER. Not "mostly copper" -- the electronics study's wiring
+# model reports exactly one quantity, `Cu (kg)`, which mc_composition.py converts to
+# grams and stores as the "Wiring" series. So the wiring draws already ARE copper
+# mass per vehicle, per draw, per year, at the full draw count, with no element model
+# or extra assumption involved.
+#
+# Copper's share of a vehicle, measured from the study's own element table:
+#
+#            2025      2070
+#   Wiring   91.1%     85.1%     <- exact, available here
+#   Motors    8.3%     14.0%     <- needs per-draw element fractions
+#   PCB       0.6%      0.8%     <-   "
+#   Sensors   0.1%      0.1%     <-   "
+#
+# So what this stage reports as copper is WIRING copper: the dominant stream and the
+# one that is exactly known. The remaining 9-15% is deliberately NOT estimated here.
+# Adding it from a deterministic element split would put a number in the results that
+# no Monte Carlo produced, and would understate the spread.
+COPPER_SERIES = "Wiring"
+
 FLOWS = ("inflow", "outflow", "collected")
 FLOW_LABEL = {
     "inflow": "entering the fleet",
@@ -634,6 +654,48 @@ def fig_domain_recovery(by_series_by_flow, years, series, path: Path) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
+
+def fig_copper(by_series_by_flow, years, path: Path, n_draws: int) -> None:
+    """
+    FIGURE 11 -- copper, the priority element.
+
+    Copper in wiring harnesses: what enters the fleet, what leaves it, and what is
+    collected for recycling, each with its 95% band.
+
+    This is exact rather than derived. The wiring model reports copper directly, so
+    these are the study's own draws multiplied by the fleet's own draws, with no
+    element split, no fractions and no interpolation between the two years for which
+    element data happens to exist.
+
+    It is also not ALL the copper in a vehicle -- it is 85-91% of it, the rest
+    sitting in motors, boards and sensors. The caption says so, because a chart
+    labelled "copper" that silently omits a seventh of the copper would be worse than
+    one that states its scope.
+    """
+    fig, ax = plt.subplots(figsize=(11, 6))
+    for flow, color in zip(FLOWS, ("#2E86AB", "#E67E22", "#2b8a3e")):
+        df = by_series_by_flow[flow][COPPER_SERIES]
+        ax.plot(years, df["median"], color=color, linewidth=1.8,
+                label=f"{flow} ({FLOW_LABEL[flow]})")
+        ax.fill_between(years, df["p2_5"], df["p97_5"], color=color, alpha=0.20,
+                        linewidth=0)
+    ax.set_title(f"Copper in BEV wiring harnesses -- median and 95% band "
+                 f"(n={n_draws:,})", fontsize=12)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Copper [kt/year]")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+    fig.text(0.01, 0.01,
+             "Wiring copper only -- 85-91% of the copper in a vehicle. The remainder "
+             "is in motors (8-14%), boards (<1%) and sensors (0.1%), and is not shown "
+             "because those need per-draw element fractions that the element models "
+             "do not yet emit.",
+             fontsize=7, color="#666666")
+    plt.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 def main() -> dict[str, Any]:
     params = load_many("params", root=PROJECT_ROOT)["params"]
@@ -758,6 +820,8 @@ def main() -> dict[str, Any]:
          lambda p: fig_domains(by_series_by_flow["outflow"], years, "outflow", p)),
         ("04_02_05c_by_domain_collected.png",
          lambda p: fig_domains(by_series_by_flow["collected"], years, "collected", p)),
+        ("04_02_11_copper.png",
+         lambda p: fig_copper(by_series_by_flow, years, p, n_draws)),
         ("04_02_10_domain_recovery.png",
          lambda p: fig_domain_recovery(by_series_by_flow, years, series, p)),
         ("04_02_06_by_segment.png",
@@ -780,6 +844,15 @@ def main() -> dict[str, Any]:
     saved = save_many(bev_electronics_summary=results, root=PROJECT_ROOT)
     print(f"\n  saved: {saved}")
 
+    print()
+    print("  COPPER in wiring harnesses [kt/year] -- exact, 85-91% of vehicle copper:")
+    for flow in FLOWS:
+        d = by_series_by_flow[flow][COPPER_SERIES]
+        i = list(years).index(2050) if 2050 in years else -1
+        print(f"    {flow:<10} 2050: median {d['median'].iloc[i]:>8,.1f}   "
+              f"95% {d['p2_5'].iloc[i]:>8,.1f} - {d['p97_5'].iloc[i]:>8,.1f}")
+    print("    (copper in motors, boards and sensors is NOT included -- it needs")
+    print("     per-draw element fractions the element models do not yet emit)")
     print()
     print("  collected for recycling, by domain, 2050 [kt/year]:")
     for ser in series:
