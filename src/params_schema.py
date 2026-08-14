@@ -199,6 +199,9 @@ class ScenarioSpec:
     "reuse the BAU scenario's resolved inflow unchanged" (what all five lifetime/loss/
     stock scenarios do).
     """
+    # The scenario's identifier. It appears in every artifact and figure
+    # filename this scenario produces, so keep it short and filename-safe.
+    # It must match the key this spec is stored under in `scenarios`.
     name: str
 
     # Inflow-composition transform (at most one of the two pairs below should be set):
@@ -367,14 +370,12 @@ class DataPrepParams:
     # pre-2015 settings below), so the earliest years are estimates, not data.
     # SAFE TO CHANGE: with care. Start must be before end.
     start_year_model: int = 1950
-
     end_year_model: int = 2070
 
     # The first and last year drawn on this stage's charts. Display only -- the model
     # still computes the full range above.
     # SAFE TO CHANGE: yes.
     start_year_plotting: int = 2015
-
     end_year_plotting: int = 2070
 
     # From this year onward, vehicle composition is held constant at its last known
@@ -509,7 +510,6 @@ class DataPrepParams:
     # EXCLUSIVE -- 2023 means "up to and including 2022".
     # SAFE TO CHANGE: yes, as new trade data arrives.
     export_min_year: int = 2005
-
     export_max_year_exclusive: int = 2023
 
     # Fixes for wrong country codes in the source data -- it writes "IRE" for Ireland,
@@ -1292,6 +1292,20 @@ class AdjustedFlowsParams:
     # SAFE TO CHANGE: yes -- this is the setting you are most likely to want to edit.
     scenarios_to_run: tuple[str, ...] | None = ("BAU", )
 
+    # EVERY SCENARIO THIS STAGE KNOWS HOW TO RUN, defined in one place.
+    #
+    # Each entry is one alternative future, described by a `ScenarioSpec`
+    # (see the shared building blocks above). A scenario only changes what it
+    # explicitly names: leave a field out and the base value applies, so
+    # `ICEV_shorter` states only Diesel and Petrol lifetimes and inherits
+    # everything else untouched.
+    #
+    # Defining a scenario here does NOT run it -- `scenarios_to_run` above
+    # decides that, and each one costs a full Monte Carlo simulation.
+    #
+    # SAFE TO CHANGE: yes. Adding a scenario is one new entry here and
+    # nothing else; the stage discovers it automatically. A misspelled name in
+    # `scenarios_to_run` is caught when you run code/00_parameters.py.
     scenarios: dict[str, ScenarioSpec] = field(default_factory=lambda: {
         "BAU": ScenarioSpec(
             name="BAU",
@@ -1862,6 +1876,12 @@ class MonteCarloParams:
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Params:
+    # One section per pipeline stage, plus the cross-cutting Monte Carlo
+    # settings. Each is a group of related parameters, documented in its own
+    # class above. Access them as `params.data_prep`, `params.stock_flow` and
+    # so on; every stage script does exactly that at the top of its `main()`.
+    # SAFE TO CHANGE: no -- these are the sections themselves, not settings.
+    # Change values inside the sections, not this list.
     data_prep: DataPrepParams = field(default_factory=DataPrepParams)
     stock_flow: StockFlowParams = field(default_factory=StockFlowParams)
     adjusted_flows: AdjustedFlowsParams = field(default_factory=AdjustedFlowsParams)

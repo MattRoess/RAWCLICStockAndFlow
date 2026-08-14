@@ -1,4 +1,4 @@
-# Handover — 2026-08-13
+# Handover — updated 2026-08-14
 
 Where the work stands, what is safe, what is not, and what to do next.
 
@@ -6,15 +6,15 @@ Where the work stands, what is safe, what is not, and what to do next.
 
 ## 1. State of the repositories
 
-### RAWCLICStockAndFlow — 5 files changed, all uncommitted
+### RAWCLICStockAndFlow
 
 | file | change | tested |
 |---|---|---|
 | `src/params_schema.py` | reorganised into stage order; visualization section removed; every parameter rewritten for a non-specialist reader; 9 new BEV-electronics settings | yes — 511 parameters before and after, **zero changed** |
-| `src/stockflow_model.py` | `run_stage02_cohort_monte_carlo` (shared orchestration); `sample_stock_target_draws`; `build_inflow_volume_multipliers` **(unused — see §4)** | yes — stage 02 byte-identical, 45,121 values |
+| `src/stockflow_model.py` | `run_stage02_cohort_monte_carlo` (shared orchestration); `sample_stock_target_draws`; `build_inflow_draws_by_drivetrain` | yes — stage 02 byte-identical, 45,121 values |
 | `code/02_stockdriven.py` | calls the shared orchestrator; figure renamed and retitled | yes — byte-identical |
 | `code/03_01_flowdriven.py` | calls the shared orchestrator (this is the 20.8% bug fix); axis labels | yes — 15/15 arrays exact |
-| `code/03_02_adjustedflows.py` | restored the removed by-drivetrain MC and its figures; exports BEV per-draw arrays for 04_02 | yes — at 300 draws |
+| `code/03_02_adjustedflows.py` | restored the removed by-drivetrain MC and its figures; exports BEV per-draw arrays for 04_02; **now receives stage 02's inflow uncertainty** | yes — 300 draws, plus the four acceptance tests at 2,000 |
 | `code/04_02_BEVelectronics.py` | **new** — BEV electronics material flows | yes — at 300 draws |
 | `code/04_01_carcomposition.py` | all mass figures switched to Mt; new standard-vs-segments boxplot | yes — rendered |
 | `src/artifacts.py` | registers `bev_electronics_summary` | yes |
@@ -29,7 +29,7 @@ Where the work stands, what is safe, what is not, and what to do next.
 modified. **Those are not from this work** — they were already modified at 13:38
 and 11:58, before this session, and `mc_composition.py` writes neither.
 
-**Nothing is committed.** A backup of the two electronics CSVs is at
+Committed on branch `mc-correctness-and-bev-electronics`. A backup of the two electronics CSVs is at
 `/private/tmp/elec_backup/` (temporary — copy it somewhere permanent if wanted).
 
 ---
@@ -75,31 +75,39 @@ run has not been done.
 
 ## 4. Open items
 
-### 4.1 The defect — stage 02's inflow uncertainty does not reach 03_02
+### 4.1 CLOSED — stage 02's inflow uncertainty now reaches 03_02
 
-Documented in full in `UNCERTAINTY_MAP.md`. Summary: total BEV inflow arrives in
-03_02 with a coefficient of variation of 0.000001% against stage 02's 9.6%. Inflow
-bands downstream are too narrow. Outflow and collected are unaffected.
+Fixed 14 August 2026. Stage 02's **absolute** per-draw inflow is transferred, split
+to the fine drivetrains by 03_01's own shares and composed with 03_02's segment mix.
+Governed by `propagate_stage02_inflow_uncertainty`, default on.
 
-**Not yet designed.** A ratio-based fix was proposed, tested, found unsound
-(inflow is a residual; its relative spread reaches 1775% for a drivetrain being
-phased out), and **not implemented**.
+Verified by four acceptance tests: total BEV inflow CV rose from 0.000001% to
+3.97 / 6.21 / 14.13% at 2030 / 2040 / 2050, against stage 02's own 4.0 / 6.2 / 14.2%;
+segment-mix spread preserved (9.5–12.8% → 11.5–14.0%); historic years clean; and
+with the switch off, means and CVs return exactly to the previous values.
 
-**Required before designing anything:** measure whether 03_02's inflow levels still
-match stage 02's after 03_01 splits and rescales the coarse drivetrains.
+Design, rejected alternatives and measurements:
+`DESIGN_inflow_uncertainty_propagation.md`.
 
-**`build_inflow_volume_multipliers` in `src/stockflow_model.py` is dead code.**
-Nothing calls it. Delete it or rewrite it once the design is settled.
+**Consequence: any result produced before 14 August 2026 understates inflow
+uncertainty downstream and should be regenerated.**
 
 ### 4.2 Smaller open items
 
-- `04_02` currently reports **total electronics mass**. Requested but not built:
-  per-element results for the critical elements, and the domain breakdown
-  (wiring / auxiliary motors / PCB / sensors) for the **collected** flow as well as
-  inflow. The element data exists at `Composition/csv/detail_2025_2070.csv`
-  (Year, Segment, Domain, Component_Type, Element) but only as mean and P2.5/P97.5,
-  **not as draws** — so how element-split uncertainty should be treated is an open
-  question, not a coding task.
+- **`04_02` element and component resolution — the next piece of work.** It
+  currently reports total electronics mass per domain. Wanted: per-element results,
+  copper above all, and the domain breakdown (wiring / auxiliary motors / PCB /
+  sensors) for the **collected** flow as well as inflow.
+
+  What exists: `Composition/csv/detail_2025_2070.csv` gives Year, Segment, Domain,
+  Component_Type, Element. Copper appears in all four domains — one AB vehicle in
+  2070 carries 21.6 kg of it, 86% in wiring. Element coverage differs by domain:
+  Motors 34 elements, Sensors 31, PCB 10, Wiring 1 (copper only).
+
+  Two constraints block correct Monte Carlo at element level: the file covers **two
+  years only** (2025 and 2070), and it holds mean plus P2.5/P97.5, **not draws**.
+  Either the electronics models emit per-draw, year-resolved element arrays, or the
+  element split is treated as deterministic and said so plainly. Not yet decided.
 - `KG_PER_TONNE` in `04_01_carcomposition.py` is now unused.
 - Two functions vanished from `04_01` on 2026-07-09 (`plot_material_mass_by_year`,
   `quantify_and_aggregate`). Successors appear to exist; not confirmed.
@@ -151,3 +159,29 @@ Written down because it was learned the hard way in this session.
 - **Render figures and look at them.** An audit that greps for `set_ylabel` passes a
   chart whose unit label is rotated 90° and clipped off the page. That happened.
 - **Keep answers short.** State the finding, the evidence, the recommendation.
+
+---
+
+## 7. Documentation (added 14 August 2026)
+
+The two Word documents were a month out of date and nothing had flagged it. They are
+now Markdown, one of them generated, and moved to `superseded/`.
+
+| document | state |
+|---|---|
+| `README.md` | index — start here |
+| `RUNNING.md` | how to run everything, what it costs, what catches people out |
+| `PARAMETER_REFERENCE.md` | all 137 parameters, **generated** from `src/params_schema.py` |
+| `MODEL_DESCRIPTION.md` | converted from the `.docx`, plus section 7 for everything since 13 July |
+| `UNCERTAINTY_MAP.md` | where uncertainty enters, travels and stops |
+| `DESIGN_inflow_uncertainty_propagation.md` | the propagation design and two rejected alternatives |
+
+Regenerate the parameter reference after any parameter change:
+
+```bash
+.venv/bin/python code/generate_parameter_reference.py
+```
+
+It reports how many parameters have no explanation in the code. That count is **0**
+and should stay there — it is the check that stops the reference silently rotting the
+way its predecessor did.
