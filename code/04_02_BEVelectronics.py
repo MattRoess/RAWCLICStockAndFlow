@@ -566,6 +566,41 @@ def fig_vehicles(fleet, keep, years, segments, n_draws, path: Path) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
+
+def fig_domain_recovery(by_series_by_flow, years, series, path: Path) -> None:
+    """
+    FIGURE 10 -- how much of each kind of electronics is actually recovered.
+
+    One panel per domain, showing what enters the fleet, what leaves it, and what is
+    collected for recycling. The gap between the last two is the material that leaves
+    the fleet and is not recovered -- exported or untraceable.
+
+    Reading it: outflow lags inflow by roughly a vehicle lifetime, so the two are not
+    meant to meet until the fleet stops growing. What matters is the distance between
+    outflow and collected, which is set by the collection rate rather than by
+    anything about the electronics.
+    """
+    doms = [s for s in series if s != "Total"]
+    fig, axes = plt.subplots(1, len(doms), figsize=(4.6 * len(doms), 4.4))
+    axes = np.atleast_1d(axes)
+    for ax, dom in zip(axes, doms):
+        for flow, color in zip(FLOWS, ("#2E86AB", "#E67E22", "#2b8a3e")):
+            df = by_series_by_flow[flow][dom]
+            ax.plot(years, df["median"], color=color, linewidth=1.6, label=flow)
+            ax.fill_between(years, df["p2_5"], df["p97_5"], color=color,
+                            alpha=0.18, linewidth=0)
+        ax.set_title(dom, fontsize=11)
+        ax.set_xlabel("Year")
+        ax.grid(True, linestyle="--", alpha=0.3)
+        ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    axes[0].set_ylabel("Electronics material [kt/year]")
+    axes[-1].legend(frameon=False, fontsize=8)
+    fig.suptitle("Each kind of electronics: what enters, what leaves, what is "
+                 "collected (median and 95% band)", fontsize=12)
+    plt.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 def main() -> dict[str, Any]:
     params = load_many("params", root=PROJECT_ROOT)["params"]
@@ -647,13 +682,22 @@ def main() -> dict[str, Any]:
         for _, row in by_flow_df[flow].iterrows():
             summary_rows.append({"flow": flow, "series": "Total", **row.to_dict()})
 
-    by_series_df = {}
-    for ser in series:
-        a = multiply(fleet, per_segment_by_series[ser], keep, "inflow", segments, n_draws)
-        by_series_df[ser] = summarize_by_year(a, years)
-        if ser != "Total":
-            for _, row in by_series_df[ser].iterrows():
-                summary_rows.append({"flow": "inflow", "series": ser, **row.to_dict()})
+    # The domain split -- wiring, sensors, circuit boards, motors -- for EVERY flow,
+    # not only what enters the fleet. "How much wiring is actually collected for
+    # recycling" is a different question from "how much wiring is sold", and the
+    # answer matters more: it is the material that can be recovered. Reporting only
+    # the inflow split left that question unanswered.
+    by_series_by_flow: dict[str, dict[str, pd.DataFrame]] = {}
+    for flow in FLOWS:
+        per_flow: dict[str, pd.DataFrame] = {}
+        for ser in series:
+            a = multiply(fleet, per_segment_by_series[ser], keep, flow, segments, n_draws)
+            per_flow[ser] = summarize_by_year(a, years)
+            if ser != "Total":
+                for _, row in per_flow[ser].iterrows():
+                    summary_rows.append({"flow": flow, "series": ser, **row.to_dict()})
+        by_series_by_flow[flow] = per_flow
+    by_series_df = by_series_by_flow["inflow"]
 
     by_seg_df = {}
     for seg in segments:
@@ -675,8 +719,14 @@ def main() -> dict[str, Any]:
          lambda p: fig_vehicles(fleet, keep, years, segments, n_draws, p)),
         ("04_02_04_material_flows.png",
          lambda p: fig_flows(by_flow_df, years, p, n_draws)),
-        ("04_02_05_by_domain.png",
-         lambda p: fig_domains(by_series_df, years, "inflow", p)),
+        ("04_02_05_by_domain_inflow.png",
+         lambda p: fig_domains(by_series_by_flow["inflow"], years, "inflow", p)),
+        ("04_02_05b_by_domain_outflow.png",
+         lambda p: fig_domains(by_series_by_flow["outflow"], years, "outflow", p)),
+        ("04_02_05c_by_domain_collected.png",
+         lambda p: fig_domains(by_series_by_flow["collected"], years, "collected", p)),
+        ("04_02_10_domain_recovery.png",
+         lambda p: fig_domain_recovery(by_series_by_flow, years, series, p)),
         ("04_02_06_by_segment.png",
          lambda p: fig_by_segment(by_seg_df, years, "inflow", p)),
         ("04_02_07_distribution_snapshots.png",
@@ -695,6 +745,17 @@ def main() -> dict[str, Any]:
     results["summary"] = pd.DataFrame(summary_rows)
     saved = save_many(bev_electronics_summary=results, root=PROJECT_ROOT)
     print(f"\n  saved: {saved}")
+
+    print()
+    print("  collected for recycling, by domain, 2050 [kt/year]:")
+    for ser in series:
+        if ser == "Total":
+            continue
+        d = by_series_by_flow["collected"][ser]
+        i = list(years).index(2050) if 2050 in years else -1
+        print(f"    {ser:<9} median {d['median'].iloc[i]:>8,.1f}   "
+              f"95% {d['p2_5'].iloc[i]:>8,.1f} - {d['p97_5'].iloc[i]:>8,.1f}")
+    print()
 
     for flow in FLOWS:
         d = by_flow_df[flow]
