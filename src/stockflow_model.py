@@ -1133,55 +1133,59 @@ def run_cohort_survival_monte_carlo(
     )
 
 
-def build_inflow_volume_multipliers(
+def build_inflow_draws_by_drivetrain(
     *,
     stock_dict: dict,
     params,
-    drivetrain_map: dict[str, str],
+    parent_by_drv: "tuple[tuple[str, str], ...]",
     years: "np.ndarray",
-) -> dict[str, "np.ndarray"]:
+) -> "dict[str, np.ndarray]":
     """
-    Stage 02's per-draw INFLOW VOLUME uncertainty, expressed as a multiplier that a
-    later stage can apply to its own deterministic inflow.
+    Stage 02's per-draw INFLOW, in absolute vehicles, ready for a later stage to use.
 
-    WHY THIS EXISTS
-    ---------------
-    Stage 02 samples how big the fleet is (`stock_target_relative_spread`, the
-    correlated drivetrain mix, the shared total-fleet axis) and therefore how many
-    vehicles are bought each year. That uncertainty was real but went no further:
-    stage 03_02 reads `flows_03`, a plain table with ONE number per row and no draw
-    dimension at all, so there was nowhere for it to go. Segment shares varied inside
-    03_02, which made individual segments move, but they only ever REDISTRIBUTED a
-    fixed total -- measured at a coefficient of variation of 0.000001% on total BEV
-    inflow, against 9.6% in stage 02's own draws.
+    WHY THIS EXISTS. Stage 02 samples how large the fleet is, and therefore how many
+    vehicles are bought each year. Stage 03_02 never saw any of it: the artifact
+    between them holds one number per row and has no draw dimension, so total BEV
+    inflow arrived with a coefficient of variation of 0.000001% against stage 02's
+    9.6%. Every downstream inflow band was too narrow as a result. See
+    `documentation/DESIGN_inflow_uncertainty_propagation.md` for the full record.
 
-    The result was a pipeline that computed inflow uncertainty and then quietly threw
-    it away at one hand-off. Everything downstream -- material flows, electronics --
-    reported bands that were too narrow on the inflow side.
+    WHY ABSOLUTE VALUES AND NOT A RATIO. Inflow is not sampled; it is a residual,
+    `stock target - survivors`, and while a drivetrain is phased out that residual
+    approaches and crosses zero. Its RELATIVE spread then diverges -- Liquids reaches
+    a CV of 1775% in 2040 on an absolute spread of 0.005 million vehicles, and the
+    downstream table carries genuinely negative values (Liquids is -4.655 in 2040).
+    A multiplier is meaningless there. Absolute values stay finite and correct
+    through zero and below it. An earlier ratio-based design was measured, rejected
+    for exactly this, and deleted; do not reintroduce it.
 
-    WHAT IT RETURNS
-    ---------------
-    `{fine_drivetrain: (n_years, n_draws) float32}`, each entry the ratio of that
-    draw's inflow to the mean inflow for that year. Multiply a deterministic inflow
-    by it and you get stage 02's spread back, draw for draw. A multiplier of exactly
-    1.0 everywhere means no uncertainty -- which is what the historic years before
-    `stock_target_uncertainty_start_year` correctly produce.
+    WHY NO CORRECTION FACTOR. Stage 03_01 passes stage 02's inflow through untouched
+    -- measured ratio 1.000 to three decimals for every drivetrain and year tested.
+    The two stages hold the same quantity in the same units, so a draw transplants
+    as-is.
 
-    A RATIO, NOT THE VOLUME ITSELF, and that matters. Stage 03_01 splits stage 02's
-    coarse drivetrains into finer ones and adjusts levels on the way; stage 03_02's
-    scenarios adjust them again. Handing over absolute vehicle counts would overwrite
-    all of that. Handing over a relative multiplier leaves each stage's own numbers
-    intact and adds only the SHAPE of the uncertainty.
+    COARSE TO FINE. Stage 02 models Liquids and Hybrid; later stages split them into
+    Petrol/Diesel and HEV/PHEV. `parent_by_drv` maps each fine drivetrain to its
+    parent, and both children receive the parent's per-draw values. The caller then
+    applies its own share to divide them. This keeps the three effects separate and
+    composable:
+        volume  from stage 02, where it is sampled
+        split   from stage 03_01, untouched, with its own uncertainty
+        segment from stage 03_02, untouched, renormalised to sum to one
 
-    COARSE TO FINE. Stage 02 models Liquids and Hybrid; later stages split those into
-    Petrol/Diesel and HEV/PHEV. Both halves inherit their parent's multiplier, because
-    the uncertainty is about how many liquid-fuel cars are sold at all, not about how
-    those divide between petrol and diesel -- that split is stage 03_01's own concern
-    and carries its own uncertainty there.
+    RAW, NOT FLOORED. The RAW residual is returned, negatives included, because
+    flooring must happen per draw at the point of use and not here. Flooring is
+    nonlinear -- `mean(max(x,0)) >= max(mean(x),0)` -- so flooring each draw gives a
+    slightly higher mean than today's single floored trajectory: +0.228 million
+    vehicles for Liquids in 2035, +0.066 for Hybrid in 2040, zero elsewhere and zero
+    for BEV throughout. That difference is the correct Monte Carlo answer, not an
+    artefact: in a draw where the fleet target lands higher, liquid-fuel inflow
+    really is still positive that year, and the single-trajectory pipeline had no way
+    to represent it.
 
-    ZERO YEARS. Where the mean inflow is zero (a drivetrain before it existed, or
-    after a phase-out) the ratio is undefined; the multiplier is set to 1.0, leaving a
-    zero inflow as zero rather than producing a NaN that would poison the run.
+    Returns `{fine_drivetrain: (n_years, n_draws) float32}` in millions of vehicles,
+    aligned to `years`. Years stage 02 does not cover are filled with NaN so a caller
+    cannot silently treat them as zero.
     """
     p02 = params.stock_flow
     drivetrains = sorted({drv for (_, drv) in stock_dict.keys()})
@@ -1210,23 +1214,40 @@ def build_inflow_volume_multipliers(
         total_fleet_relative_spread=p02.total_fleet_relative_spread,
     )
 
-    out: dict[str, np.ndarray] = {}
-    for coarse, result in mc.results.items():
+    # MEMORY. The stage-02 run above holds five per-year arrays for every drivetrain
+    # and is the peak of this whole function -- at 200,000 draws roughly 6.6 GB, and
+    # it grows in proportion to the draw count. Everything except the one array we
+    # need is dropped immediately below, so what this function RETAINS is only
+    # `n_parents x n_years x n_draws` in float32: 254 MB at 200,000 draws, 1.3 GB at
+    # a million. If a run ever exceeds available memory it will be the stage-02 pass
+    # that does it, not this.
+    by_parent: dict[str, np.ndarray] = {}
+    for coarse in list(mc.results):
+        result = mc.results[coarse]
         t = np.asarray(result["t"], dtype=int)
-        applied = result["inflow_applied_by_year"]          # (n_years_02, n_draws)
-        mean = applied.mean(axis=1, keepdims=True)
-        ratio = np.divide(applied, mean, out=np.ones_like(applied), where=mean > 0)
-
-        # Line the stage-02 year axis up with the caller's, filling any year stage 02
-        # does not cover with 1.0 (no uncertainty) rather than extrapolating.
+        # The RAW residual. `inflow_applied_by_year` is already floored and would
+        # hide the negatives the caller has to floor per draw.
+        raw = np.asarray(result["inflow_by_year"], dtype=np.float32)
         idx = {int(y): i for i, y in enumerate(t)}
-        aligned = np.ones((len(years), ratio.shape[1]), dtype=np.float32)
+        aligned = np.full((len(years), raw.shape[1]), np.nan, dtype=np.float32)
         for j, y in enumerate(years):
             i = idx.get(int(y))
             if i is not None:
-                aligned[j] = ratio[i]
+                aligned[j] = raw[i]
+        by_parent[coarse] = aligned
+        mc.results[coarse] = None       # release this drivetrain's other arrays now
+        del result, raw
+    del mc
 
-        for fine, parent in drivetrain_map.items():
-            if parent == coarse:
-                out[fine] = aligned
+    # Fine drivetrains sharing a parent get the SAME array object, not a copy --
+    # Petrol and Diesel are one 154 MB array between them, not two. Callers must
+    # treat these as read-only.
+    out: dict[str, np.ndarray] = {}
+    for fine, parent in parent_by_drv:
+        if parent not in by_parent:
+            raise KeyError(
+                f"inflow_uncertainty_parent_by_drv maps {fine!r} to {parent!r}, but "
+                f"stage 02 does not model {parent!r}. It models {sorted(by_parent)}."
+            )
+        out[fine] = by_parent[parent]
     return out

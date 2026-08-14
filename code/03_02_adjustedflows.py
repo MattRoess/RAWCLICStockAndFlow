@@ -167,6 +167,7 @@ from src.disaggregation import (  # type: ignore
     build_tracker_from_disaggregated, add_keys_to_tracker_dict,
 )
 from src.monte_carlo import summarize_distribution, sensitivity_correlations, plot_tornado  # type: ignore
+from src.stockflow_model import build_inflow_draws_by_drivetrain  # type: ignore
 
 load_many = artifacts.load_many
 save_many = artifacts.save_many
@@ -1107,6 +1108,34 @@ def main() -> dict[str, Any]:
     # electronics). Set to None to skip the export entirely -- it adds roughly
     # 12 extra engine calls (one per BEV segment) to a Monte Carlo run, so it is
     # real time, not free. 04_02 cannot run without it.
+    # -----------------------------------------------------------------------
+    # [NEW] Stage 02's per-draw INFLOW, carried across the boundary that used to
+    # lose it. Built once and reused by every scenario, because it describes how
+    # many vehicles Europe buys, which no scenario in this stage changes.
+    #
+    # THE DEFECT THIS CLOSES. Stage 02 samples fleet size and therefore purchase
+    # volume. None of it reached here: `flows_03` holds one number per row with no
+    # draw dimension, so total BEV inflow arrived with a coefficient of variation
+    # of 0.000001% against stage 02's 9.6%, and every inflow band produced
+    # downstream was too narrow. See documentation/DESIGN_inflow_uncertainty_
+    # propagation.md for the measurements and the rejected alternatives.
+    # -----------------------------------------------------------------------
+    stage02_inflow_draws = None
+    _s02_year_index: dict[int, int] = {}
+    if params.monte_carlo.enabled and p02.propagate_stage02_inflow_uncertainty:
+        _s02_years = np.arange(
+            int(flows_03["year"].min()), int(flows_03["year"].max()) + 1, dtype=int
+        )
+        print(f"[03_02] carrying stage 02's per-draw inflow across the boundary "
+              f"({params.monte_carlo.n_draws:,} draws)...")
+        stage02_inflow_draws = build_inflow_draws_by_drivetrain(
+            stock_dict=load_many("stock_dict", root=PROJECT_ROOT)["stock_dict"],
+            params=params,
+            parent_by_drv=p02.inflow_uncertainty_parent_by_drv,
+            years=_s02_years,
+        )
+        _s02_year_index = {int(y): i for i, y in enumerate(_s02_years)}
+
     bev_draw_export_dir_resolved = (
         PROJECT_ROOT / "data" / "processed" / "bev_draws"
         if params.monte_carlo.enabled and p04.bev_electronics_export_draws
@@ -1235,6 +1264,65 @@ def main() -> dict[str, Any]:
                 inflow_segment_share_spread=spec.inflow_segment_share_spread,
                 n_draws=n_draws_mc, rng=segment_share_rng, years=scenario_inflow_years,
             )
+
+        # -------------------------------------------------------------------
+        # Compose the three independent effects into the per-draw inflow the
+        # engine consumes. None of them replaces another:
+        #
+        #   volume   stage 02's per-draw purchase volume, per coarse drivetrain
+        #   split    stage 03_01's Petrol/Diesel and HEV/PHEV split, untouched
+        #   segment  this stage's own segment mix, renormalised to sum to one
+        #
+        # A group with no segment-share draws still receives the volume, applied
+        # through its deterministic share. Groups whose share draws already exist
+        # keep them and are scaled, so both effects vary together.
+        #
+        # FLOORING HAPPENS HERE, PER DRAW, and not in the shared builder, which
+        # deliberately hands back the raw residual including negatives. Flooring
+        # is nonlinear, so flooring each draw is not the same as flooring one
+        # average trajectory -- it lifts the Liquids mean by about 0.228 million
+        # vehicles around 2035. That is the correct Monte Carlo answer: in a draw
+        # where the fleet target lands higher, liquid-fuel inflow really is still
+        # positive that year.
+        # -------------------------------------------------------------------
+        if stage02_inflow_draws is not None:
+            det = inflow_by_scenario[name]
+            det = det[det["Region"] == "EUR"].groupby(
+                ["Region", "Drive Train", "Segment", "year"], as_index=False
+            )["value"].sum()
+            parent = (det.groupby(["Drive Train", "year"], as_index=False)["value"]
+                        .sum().rename(columns={"value": "parent_total"}))
+            det = det.merge(parent, on=["Drive Train", "year"], how="left")
+
+            prior = inflow_draws_for_scenario or {}
+            composed: dict = {}
+            for region, drv, seg, yr, val, parent_total in det.itertuples(
+                index=False, name=None
+            ):
+                vol = stage02_inflow_draws.get(drv)
+                yi = _s02_year_index.get(int(yr))
+                if vol is None or yi is None:
+                    continue
+                # Stage 02 begins in 2005; this stage begins in 1975. The builder
+                # marks years it does not model with NaN rather than zero, so they
+                # cannot be mistaken for "no vehicles". Those years get NO per-draw
+                # override at all and keep their deterministic value, which is
+                # correct: there is no stage-02 uncertainty for them to carry.
+                # Passing the NaN through instead poisons every summary downstream.
+                if not np.isfinite(vol[yi]).all():
+                    continue
+                share = (float(val) / float(parent_total)) if parent_total else 0.0
+                key = (region, drv, seg)
+                existing = prior.get(key, {}).get(int(yr))
+                if existing is not None and float(val) != 0.0:
+                    # Segment shares already vary for this group: scale them by how
+                    # far this draw's volume sits from the deterministic volume.
+                    scale = np.asarray(vol[yi], dtype=np.float64) / float(val) * share
+                    vals = np.asarray(existing, dtype=np.float64) * scale
+                else:
+                    vals = np.asarray(vol[yi], dtype=np.float64) * share
+                composed.setdefault(key, {})[int(yr)] = np.maximum(vals, 0.0)
+            inflow_draws_for_scenario = composed
 
         scenario_results_all[name] = run_adjusted_scenario(
             scenario_name=name, inflow_df=inflow_by_scenario[name],

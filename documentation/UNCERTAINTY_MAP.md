@@ -1,6 +1,6 @@
 # Uncertainty map of the RAWCLIC stock-and-flow pipeline
 
-**Status: 2026-08-13.** Every number in this document was measured on the real
+**Status: 2026-08-14.** Every number in this document was measured on the real
 data, not asserted. Where something is broken it says so plainly.
 
 This document exists because a defect went unnoticed for a long time: stage 02
@@ -14,11 +14,11 @@ visible immediately. That is what this is.
 ## 1. The one-paragraph summary
 
 Uncertainty is **sampled on the stock target** in stage 02, and on **lifetimes and
-outflow shares** in stages 02 and 03_02. It reaches stage 03_01 correctly. It does
-**not** reach stage 03_02, because the artifact between them (`flows_03`) is a
-plain table with one number per row and no draw dimension. Everything downstream
-of that boundary — 03_02, 04_01, 04_02 — therefore reports inflow-side bands that
-are too narrow.
+outflow shares** in stages 02 and 03_02. It now reaches every stage. Until
+2026-08-14 it stopped at the 03_01 → 03_02 boundary, because the artifact between
+them (`flows_03`) is a plain table with one number per row and no draw dimension;
+stage 02's per-draw inflow is now transferred alongside it. Results produced before
+that date understate inflow uncertainty downstream and should be regenerated.
 
 ---
 
@@ -51,8 +51,9 @@ directly** — see section 4.
     was up to 20.8% wrong on per-year inflow)
 
    stage 03_01  ─────────────────────────►  stage 03_02
-   flows_03: a DataFrame, one number per      NOTHING CROSSES
-   row, no draw dimension at all              *** THIS IS THE DEFECT ***
+   flows_03 (deterministic levels) PLUS        CARRIED, since 2026-08-14
+   stage 02's per-draw inflow, transferred     (was: NOTHING CROSSED)
+   directly as absolute values
 
    stage 03_02  ─────────────────────────►  04_01, 04_02
    per-draw arrays, correct                   CARRIED CORRECTLY
@@ -66,7 +67,21 @@ Total BEV inflow, summed over all twelve segments, in 2040:
 | | coefficient of variation |
 |---|---|
 | stage 02's own draws | **9.6%** |
-| what arrives in 03_02 | **0.000001%** |
+| what arrived in 03_02, before the fix | **0.000001%** |
+| what arrives now | **matches stage 02** — see below |
+
+Measured after the fix, total BEV inflow in 03_02 against stage 02's own draws:
+
+| year | 03_02 now | stage 02 |
+|---|---|---|
+| 2030 | 3.97% | 4.0% |
+| 2040 | 6.21% | 6.2% |
+| 2050 | 14.13% | 14.2% |
+
+The agreement to within 0.1 percentage point is the evidence that real draws were
+transferred rather than an approximation fitted. Segment-mix spread was preserved
+and in fact rises slightly (9.5–12.8% → 11.5–14.0%), because volume uncertainty now
+compounds with mix uncertainty instead of being absent.
 
 The segment shares inside 03_02 do vary — individual segments move by 9.5–12.8% —
 but they are renormalised to sum to 1, so they only ever **redistribute** a fixed
@@ -119,25 +134,49 @@ not applied.
 
 ---
 
-## 5. Open defect, and what is still unknown
+## 5. Closed — 2026-08-14
 
-**Defect.** Stage 02's inflow-volume uncertainty does not reach stage 03_02.
-Downstream inflow bands are too narrow. Outflow and collected bands are unaffected,
-because 03_02 samples lifetime itself.
+**The boundary now carries the uncertainty.** Stage 02's per-draw inflow is
+transferred to stage 03_02 as absolute values, split to the fine drivetrains by
+stage 03_01's own shares, and composed with 03_02's segment mix. Governed by
+`propagate_stage02_inflow_uncertainty`, default on.
 
-**Not yet measured, and required before any fix is designed:** whether 03_02's
-inflow *levels* still match stage 02's after stage 03_01 has split the coarse
-drivetrains and rescaled them. If the levels differ, neither absolute deltas nor a
-total-based multiplier can be transplanted without a correction, and the size of
-that correction is unknown.
+The design, the two rejected alternatives and the measurements behind the choice
+are in `DESIGN_inflow_uncertainty_propagation.md`. In short: a relative multiplier
+was rejected because inflow is a residual whose relative spread reaches 1775%
+during a phase-out and whose value goes genuinely negative; a shared total-fleet
+multiplier was rejected because it would have moved every drivetrain the same way
+and silently undone the correlated mix.
 
-**Nothing has been implemented.** `build_inflow_volume_multipliers` exists in
-`src/stockflow_model.py` but is called by nothing, and 03_02's behaviour is
-unchanged. It should be deleted or rewritten once the design is settled.
+One consequence is deliberate and visible in the numbers: each draw is floored at
+zero individually, which lifts the Liquids mean by about 0.228 million vehicles
+around 2035 relative to flooring a single average trajectory. That is the correct
+Monte Carlo answer, not an artefact.
+
+### What this changed downstream
+
+Inflow bands widen in 03_02, 04_01 and 04_02. Any result produced before
+2026-08-14 understates inflow uncertainty and should be regenerated.
 
 ---
 
-## 6. Fixed earlier today, for the record
+## 6. What is still unknown
+
+**Element-level results.** Stage 04_02 currently reports total electronics mass
+per domain. Per-element results — copper above all — are wanted but not yet
+possible as correct Monte Carlo: the electronics study publishes element data for
+two years only (2025 and 2070) and as mean plus P2.5/P97.5, not as draws. Either
+those models emit per-draw, year-resolved element arrays, or the element split has
+to be treated as deterministic and said so. Not yet decided.
+
+**Stage 02 remains the memory ceiling.** The propagation itself retains only
+`n_parents x n_years x n_draws` in float32 — 254 MB at 200,000 draws, 1.3 GB at a
+million. The stage-02 pass behind it peaks near 6.6 GB at 200,000 and scales
+linearly, so that is what limits a larger run, not the transfer.
+
+---
+
+## 7. Fixed 2026-08-13, for the record
 
 **Stage 03_01 was reproducing stage 02's Monte Carlo without passing
 `stock_target_draws`.** Its per-year bands therefore carried none of the

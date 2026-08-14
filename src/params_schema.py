@@ -758,6 +758,33 @@ class StockFlowParams:
         "BEV": 2011,
     })
 
+    # DOES STAGE 02'S INFLOW UNCERTAINTY REACH STAGE 03_02?
+    #
+    # Stage 02 samples how large the vehicle fleet is, and therefore how many cars
+    # are bought each year. For a long time none of that reached stage 03_02: the
+    # table between them holds one number per row with no room for draws, so total
+    # BEV inflow arrived varying by 0.000001% where stage 02 had it varying by 9.6%.
+    # Every downstream inflow band -- 03_02, 04_01, 04_02 -- was too narrow.
+    #
+    # True  -- stage 02's actual per-draw inflow is carried across and used. This is
+    #          the correct behaviour and the default.
+    # False -- the old behaviour: 03_02 starts from a single fixed inflow trajectory.
+    #          Kept only so a run can be checked against results produced before this
+    #          was fixed; it reproduces them exactly.
+    #
+    # WHAT CHANGES WHEN IT IS ON. Inflow bands widen everywhere downstream. Means
+    # also shift slightly, by up to +0.228 million vehicles per year for Liquids
+    # around 2035, because each draw is floored at zero individually rather than the
+    # single average trajectory being floored once. That is the correct Monte Carlo
+    # answer, not a side effect -- see documentation/DESIGN_inflow_uncertainty_
+    # propagation.md, section 6.
+    #
+    # WHAT IT COSTS. One extra stage-02 Monte Carlo pass per 03_02 run.
+    #
+    # SAFE TO CHANGE: yes. Leave it True unless you are deliberately reproducing old
+    # numbers.
+    propagate_stage02_inflow_uncertainty: bool = True
+
     # WHICH COARSE DRIVETRAIN EACH FINE ONE INHERITS ITS INFLOW UNCERTAINTY FROM.
     #
     # THE PROBLEM THIS SOLVES. Stage 02 works with five coarse drivetrains -- BEV,
