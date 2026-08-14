@@ -402,16 +402,32 @@ def fig_domains(by_series: dict[str, pd.DataFrame], years, flow: str, path: Path
     doms = [s for s in by_series if s != "Total"]
     fig, ax = plt.subplots(figsize=(11, 6))
     ax.stackplot(years, *[by_series[d]["median"] for d in doms], labels=doms, alpha=0.85)
-    ax.plot(years, by_series["Total"]["median"], color="black", linewidth=1.2,
-            linestyle="--", label="Total (median)")
-    ax.set_title(f"BEV electronics {FLOW_LABEL[flow]}, by domain (medians)", fontsize=12)
+    tot = by_series["Total"]
+    # The band belongs on the total, and its absence was misleading. A stacked area
+    # cannot carry a band per layer -- four overlapping bands would be unreadable --
+    # but drawing the total as a bare line implied a precision the number does not
+    # have. The layers are still medians; the total now shows its real spread.
+    # The fill goes BEHIND the stack, so only the part rising above it is visible.
+    # Drawn on top it greyed out the layers underneath and made the composition
+    # unreadable, which defeats the point of a stacked chart. The lower bound would
+    # then be hidden by the stack, so both bounds are also drawn as thin lines above
+    # everything -- the lower one is legible against the coloured layers.
+    ax.fill_between(years, tot["p2_5"], tot["p97_5"], color="0.45", alpha=0.28,
+                    linewidth=0, label="Total, 95% band", zorder=0)
+    for bound in ("p2_5", "p97_5"):
+        ax.plot(years, tot[bound], color="0.25", linewidth=0.9, linestyle=":", zorder=6)
+    ax.plot(years, tot["median"], color="black", linewidth=1.4,
+            linestyle="--", label="Total (median)", zorder=7)
+    ax.set_title(f"BEV electronics {FLOW_LABEL[flow]}, by domain "
+                 f"(layers are medians; band is on the total)", fontsize=12)
     ax.set_xlabel("Year")
     ax.set_ylabel("Electronics material [kt/year]")
     ax.grid(True, linestyle="--", alpha=0.3)
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
-    fig.text(0.01, 0.01, "Medians stack only approximately -- the median of a sum is not "
-                         "the sum of medians. The dashed line is the true total.",
+    fig.text(0.01, 0.01, "Layers are medians and stack only approximately -- the median "
+                         "of a sum is not the sum of medians. The dashed line and its band "
+                         "are the true total and its 95% range.",
              fontsize=7, color="#666666")
     plt.tight_layout(rect=[0, 0, 0.84, 1])
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
@@ -486,12 +502,29 @@ def fig_variance_split(
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
-def fig_by_segment(by_seg: dict[str, pd.DataFrame], years, flow: str, path: Path) -> None:
-    """FIGURE 6 -- which car sizes carry the material."""
+def fig_by_segment(by_seg: dict[str, pd.DataFrame], years, flow: str, path: Path,
+                   total: pd.DataFrame | None = None) -> None:
+    """
+    FIGURE 6 -- which car sizes carry the material.
+
+    Twelve stacked layers, each a median. As in `fig_domains`, a band per layer is
+    not drawable, but the TOTAL carries one when `total` is supplied -- without it
+    the figure reads as though the overall quantity were known exactly.
+    """
     fig, ax = plt.subplots(figsize=(11, 6))
     segs = sorted(by_seg, key=lambda s: (s.startswith("J"), s))
     ax.stackplot(years, *[by_seg[s]["median"] for s in segs], labels=segs, alpha=0.85)
-    ax.set_title(f"BEV electronics {FLOW_LABEL[flow]}, by segment (medians)", fontsize=12)
+    if total is not None:
+        # Behind the stack, with both bounds also drawn as thin lines -- see
+        # fig_domains for why a fill drawn on top makes the composition unreadable.
+        ax.fill_between(years, total["p2_5"], total["p97_5"], color="0.45", alpha=0.28,
+                        linewidth=0, label="Total, 95% band", zorder=0)
+        for bound in ("p2_5", "p97_5"):
+            ax.plot(years, total[bound], color="0.25", linewidth=0.9, linestyle=":", zorder=6)
+        ax.plot(years, total["median"], color="black", linewidth=1.4, linestyle="--",
+                label="Total (median)", zorder=7)
+    ax.set_title(f"BEV electronics {FLOW_LABEL[flow]}, by segment "
+                 f"(layers are medians; band is on the total)", fontsize=12)
     ax.set_xlabel("Year")
     ax.set_ylabel("Electronics material [kt/year]")
     ax.grid(True, linestyle="--", alpha=0.3)
@@ -728,7 +761,8 @@ def main() -> dict[str, Any]:
         ("04_02_10_domain_recovery.png",
          lambda p: fig_domain_recovery(by_series_by_flow, years, series, p)),
         ("04_02_06_by_segment.png",
-         lambda p: fig_by_segment(by_seg_df, years, "inflow", p)),
+         lambda p: fig_by_segment(by_seg_df, years, "inflow", p,
+                                  total=by_flow_df["inflow"])),
         ("04_02_07_distribution_snapshots.png",
          lambda p: fig_snapshots(by_flow_arr["inflow"], years, (2030, 2050, 2070), "inflow", p)),
         ("04_02_08_cumulative.png",
