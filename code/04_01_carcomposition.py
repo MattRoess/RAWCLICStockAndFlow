@@ -3009,10 +3009,27 @@ def main() -> dict[str, Any]:
             # the other flow's draws). The 3 small, scenario-level tables
             # (scalar_tables, mass_by_year_tables, scalar_tables_standard) are still
             # saved ONCE per scenario, after the flow loop, unchanged in name.
-            saved_paths.update(save_unregistered_scenario_outputs(artifacts_dir, {
-                f"04_01_mc_mass_draws_{scenario_name}_{flow}.pkl": mc_draws_tables_flow,
-                f"04_01_mc_mass_draws_standard_{scenario_name}_{flow}.pkl": mc_draws_tables_standard_flow,
-            }))
+            # [CHANGED] Only written when `materials.persist_mc_mass_draws` is on,
+            # and it is off by default.
+            #
+            # These are the full per-draw arrays -- 8 to 17 GB per scenario-flow.
+            # NOTHING IN THE PIPELINE READS THEM BACK: no stage loads them, and they
+            # are deliberately unregistered so `load_many` cannot reach them either.
+            # They were persisted for a consumer that was never built, and the next
+            # few lines free them from memory anyway, so even this stage is done with
+            # them. Everything downstream uses the summaries computed just above,
+            # which are small and always saved.
+            #
+            # Turn the parameter on if you want them for analysis outside this
+            # pipeline; be aware it is tens of GB per run at 200,000 draws.
+            if p04.persist_mc_mass_draws:
+                saved_paths.update(save_unregistered_scenario_outputs(artifacts_dir, {
+                    f"04_01_mc_mass_draws_{scenario_name}_{flow}.pkl": mc_draws_tables_flow,
+                    f"04_01_mc_mass_draws_standard_{scenario_name}_{flow}.pkl": mc_draws_tables_standard_flow,
+                }))
+            else:
+                print(f"    (per-draw mass arrays for {scenario_name}/{flow} not "
+                      f"written -- materials.persist_mc_mass_draws is False)")
 
             # [NEW] Free this flow's full-resolution draws before the next flow
             # starts -- this is the step that bounds peak memory to one flow at a

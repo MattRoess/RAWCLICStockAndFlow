@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **137** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **138** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 8 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 27 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 28 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1032,7 +1032,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**27 parameters.**
+**28 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1055,6 +1055,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `material_mc_time_resolution` | `"period"` |
 | `materials_mc_n_draws` | `200_000` |
 | `materials_mc_seed` | `42` |
+| `persist_mc_mass_draws` | `False` |
 | `bev_electronics_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/draws"` |
 | `bev_electronics_series` | `("Total", "Wiring", "Sensors", "PCB", "Motors")` |
 | `bev_electronics_segment_pairs` | `( ("AB", "A", "B"), ("CD", "C", "D"), ("EF", "E", "F"), )` |
@@ -1241,6 +1242,33 @@ Default: `42`
 
 Fixes this stage's random numbers so a re-run reproduces identical results.
 SAFE TO CHANGE: yes, any whole number.
+
+
+### `persist_mc_mass_draws`
+
+Default: `False`
+
+KEEP THE FULL PER-DRAW MASS ARRAYS ON DISK?
+
+This stage builds, for every scenario and flow, the mass of every material in
+every (drivetrain, segment, component) combination for all 200,000 draws. Those
+arrays are enormous -- 8 to 17 GB per scenario-flow, and roughly 50 GB in total
+for a two-scenario run.
+
+NOTHING IN THE PIPELINE READS THEM BACK. They were written for a consumer that
+was never built: no stage loads them, and they are deliberately not in the
+artifact registry, so `load_many` cannot reach them either. The code frees them
+from memory the moment they are written, so even this stage is finished with
+them. Everything downstream uses the summaries, which are small and are always
+saved.
+
+False -- do not write them. Nothing in the pipeline notices, and about 50 GB of
+disk is not consumed. This is the default.
+True  -- write them, for analysis outside this pipeline. Check you have the
+disk: at 200,000 draws it is tens of GB per run.
+
+SAFE TO CHANGE: yes. Turning it on costs only disk; turning it off costs
+nothing, because the results the pipeline uses do not come from these files.
 
 
 ### `bev_electronics_draws_dir`

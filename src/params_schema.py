@@ -1573,6 +1573,29 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes, any whole number.
     materials_mc_seed: int | None = 42
 
+    # KEEP THE FULL PER-DRAW MASS ARRAYS ON DISK?
+    #
+    # This stage builds, for every scenario and flow, the mass of every material in
+    # every (drivetrain, segment, component) combination for all 200,000 draws. Those
+    # arrays are enormous -- 8 to 17 GB per scenario-flow, and roughly 50 GB in total
+    # for a two-scenario run.
+    #
+    # NOTHING IN THE PIPELINE READS THEM BACK. They were written for a consumer that
+    # was never built: no stage loads them, and they are deliberately not in the
+    # artifact registry, so `load_many` cannot reach them either. The code frees them
+    # from memory the moment they are written, so even this stage is finished with
+    # them. Everything downstream uses the summaries, which are small and are always
+    # saved.
+    #
+    # False -- do not write them. Nothing in the pipeline notices, and about 50 GB of
+    #          disk is not consumed. This is the default.
+    # True  -- write them, for analysis outside this pipeline. Check you have the
+    #          disk: at 200,000 draws it is tens of GB per run.
+    #
+    # SAFE TO CHANGE: yes. Turning it on costs only disk; turning it off costs
+    # nothing, because the results the pipeline uses do not come from these files.
+    persist_mc_mass_draws: bool = False
+
     # =======================================================================
     # BEV ELECTRONICS  (code/04_02_BEVelectronics.py)
     # -----------------------------------------------------------------------
