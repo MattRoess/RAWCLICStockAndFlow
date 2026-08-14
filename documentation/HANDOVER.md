@@ -19,11 +19,28 @@ Where the work stands, what is safe, what is not, and what to do next.
 | `code/04_01_carcomposition.py` | all mass figures switched to Mt; new standard-vs-segments boxplot | yes — rendered |
 | `src/artifacts.py` | registers `bev_electronics_summary` | yes |
 
-### RAWCLICVehicleElectronics — 1 file changed by this work
+### RAWCLICVehicleElectronics — 7 files changed by this work
 
 | file | change | tested |
 |---|---|---|
-| `tools/mc_composition.py` | persists raw per-draw arrays to `Composition/draws/*.npy` | yes — full 200,000-draw run, **both CSVs regenerate byte-identical** |
+| `tools/mc_composition.py` | persists raw per-draw arrays to `Composition/draws/*.npy`; reads the PCB interface as `.pkl` | yes — full 200,000-draw run, **both CSVs regenerate byte-identical** |
+| `ElectricMotorElementMC/…py` | combined per-segment element fractions, **on whole-motor mass** — the denominator fix | yes — re-run, Cu within 0.15% of the material table, Σfrac = 1.00000000 per draw |
+| `SensorElementsMC/…py` | emits per-draw element **masses** (not just fractions); writes one binary draw file instead of two identical CSVs | yes — re-run clean, totals identical to the previous values |
+| `PCBElementMC/…py` | bulk results and grand totals → `.pkl`; `element_mass_by_year` → `.pkl` | see §4.2 |
+| `SensorNumbersMC/…py` | one binary draw file instead of two identical CSVs | not re-run |
+| `tools/build_composition.py` | reads the PCB interface as `.pkl` | not re-run |
+
+**Binary outputs.** Bulk per-draw tables are now pandas pickles rather than CSV.
+Two models were writing the *same* frame twice as byte-identical CSVs
+(`SensorElementsMC`, `SensorNumbersMC`); each now writes once. Summary CSVs,
+`Composition/csv` and the histogram CSVs are deliberately unchanged — the summaries
+are meant to be read by a person, and `Composition/csv` is the byte-identical
+validation anchor.
+
+5.18 GB of regenerable CSV was deleted after checking that nothing reads it; the
+repository went from 6.7 GB to 1.7 GB. The four files that ARE read
+(`element_mass_by_year`, `pcb_year_resolved_*`, `elemental_summary`,
+`materials_mc_summary`) were verified present afterwards.
 
 `Data/30_BEV_electronics_composition.csv` and `docs/01_USER_GUIDE.md` also show as
 modified. **Those are not from this work** — they were already modified at 13:38
@@ -94,20 +111,28 @@ uncertainty downstream and should be regenerated.**
 
 ### 4.2 Smaller open items
 
-- **`04_02` element and component resolution — the next piece of work.** It
-  currently reports total electronics mass per domain. Wanted: per-element results,
-  copper above all, and the domain breakdown (wiring / auxiliary motors / PCB /
-  sensors) for the **collected** flow as well as inflow.
+- **`04_02` element resolution — DONE, 14 August 2026.** All four domains now carry
+  per-draw elements at 200,000 draws. Both blocking constraints were removed by
+  having the element models emit per-draw arrays (`Composition/element_draws/`)
+  rather than reading the two-year summary CSV.
 
-  What exists: `Composition/csv/detail_2025_2070.csv` gives Year, Segment, Domain,
-  Component_Type, Element. Copper appears in all four domains — one AB vehicle in
-  2070 carries 21.6 kg of it, 86% in wiring. Element coverage differs by domain:
-  Motors 34 elements, Sensors 31, PCB 10, Wiring 1 (copper only).
+  Two real defects were found and fixed on the way, both of which would have
+  produced plausible-looking wrong numbers with nothing in the output to show for it:
+  the **motor fractions used the wrong denominator** (aluminium and plastic are 10–22%
+  of a motor and are not elementally resolved, so every motor element was high by
+  11–28%), and **sensor mass is estimated from modes** rather than means, which
+  understates it by 1.73x. Full account, with measurements:
+  `DESIGN_element_resolution.md`.
 
-  Two constraints block correct Monte Carlo at element level: the file covers **two
-  years only** (2025 and 2070), and it holds mean plus P2.5/P97.5, **not draws**.
-  Either the electronics models emit per-draw, year-resolved element arrays, or the
-  element split is treated as deterministic and said so plainly. Not yet decided.
+  **Total copper is now ~16% higher than this stage used to report**, because it
+  previously showed wiring only. 2050: inflow 552.6, outflow 422.7, collected 371.1
+  kt (medians).
+
+  Still open: `mc_composition`'s Sensors series is itself mode-based and understates
+  sensors by ~1.73x. 04_02 works around it by taking sensor element masses at the
+  sensor study's own level, but the **domain-mass** figures still carry the
+  understatement. Fixing it at source regenerates `Composition/csv`, which has been
+  validated byte-identically, so it was deliberately deferred.
 - `KG_PER_TONNE` in `04_01_carcomposition.py` is now unused.
 - Two functions vanished from `04_01` on 2026-07-09 (`plot_material_mass_by_year`,
   `quantify_and_aggregate`). Successors appear to exist; not confirmed.
@@ -171,7 +196,7 @@ now Markdown, one of them generated, and moved to `superseded/`.
 |---|---|
 | `README.md` | index — start here |
 | `RUNNING.md` | how to run everything, what it costs, what catches people out |
-| `PARAMETER_REFERENCE.md` | all 137 parameters, **generated** from `src/params_schema.py` |
+| `PARAMETER_REFERENCE.md` | all 140 parameters, **generated** from `src/params_schema.py` |
 | `MODEL_DESCRIPTION.md` | converted from the `.docx`, plus section 7 for everything since 13 July |
 | `UNCERTAINTY_MAP.md` | where uncertainty enters, travels and stops |
 | `DESIGN_inflow_uncertainty_propagation.md` | the propagation design and two rejected alternatives |

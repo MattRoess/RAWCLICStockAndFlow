@@ -1701,6 +1701,49 @@ class MaterialsParams:
     bev_electronics_year_min: int = 2020
     bev_electronics_year_max: int = 2070
 
+    # Where the electronics study keeps its per-draw ELEMENT arrays, written by
+    # the three element models (ElectricMotorElementMC, PCBElementMC,
+    # SensorElementsMC). One file per domain and segment.
+    # SAFE TO CHANGE: only if you move that repository.
+    bev_electronics_element_draws_dir: str = (
+        "../../RAWCLICVehicleElectronics/Composition/element_draws"
+    )
+
+    # WHICH ELEMENTS TO REPORT.
+    #
+    # The default is the critical and strategic ones -- the raw materials whose
+    # supply is the reason for tracking this at all -- rather than everything the
+    # element models happen to resolve. Iron and silicon are the bulk of a motor by
+    # mass and are of no interest for criticality, so they are left out by default.
+    #
+    # Any element the models resolve can be added. The full available set is:
+    #
+    #   motors  (34) Cu Fe Si C Mn Al P S Nd B Dy Tb Pr Co Nb Ga Plastic
+    #                Unspecified, plus 16 trace impurities named *_ppm
+    #   PCB     (10) Cu Ag Au Sn Pb Ni Pd Al Zn Fe
+    #   sensors (27) Si Cu Ni Fe Mn Co Au Ag Pt Al Ga As In Pb Zr Ti Nd B Dy Ba
+    #                Sn Ge Li W Ta Cr Zn
+    #   wiring   (1) Cu -- the wiring model reports copper and nothing else
+    #
+    # An element absent from a domain simply contributes nothing there; it is not an
+    # error. Asking for a name no domain resolves IS an error, and the message lists
+    # what is available.
+    #
+    # NOTE Pd and Pt come from one domain each (PCB and sensors respectively), so
+    # their bands are narrower than a multi-domain element's -- they carry only that
+    # one model's uncertainty.
+    #
+    # SAFE TO CHANGE: yes. This only selects what is reported; it does not change
+    # any calculation.
+    bev_electronics_elements: tuple[str, ...] = (
+        "Cu",                                      # the priority element
+        "Nd", "Dy", "Pr", "Tb",                    # magnet rare earths
+        "Co", "Li",                                # battery-adjacent, in sensors
+        "Pt", "Pd", "Au", "Ag",                    # precious, PCB and sensors
+        "Ga", "Ge", "In", "Ta", "W", "Nb",         # semiconductor and hard metals
+        "Al",                                      # bulk, but an EU critical material
+    )
+
     # Whether stage 03_02 exports the BEV per-year, per-draw vehicle counts that
     # stage 04_02 needs.
     #
@@ -1734,6 +1777,18 @@ class MaterialsParams:
             issues.append(
                 "materials.bev_electronics_series must include 'Total' -- the "
                 "headline results are built from it."
+            )
+        if not self.bev_electronics_elements:
+            issues.append(
+                "materials.bev_electronics_elements is empty -- stage 04_02 would "
+                "produce no element results. Name at least one element."
+            )
+        if len(set(self.bev_electronics_elements)) != len(self.bev_electronics_elements):
+            dupes = sorted({e for e in self.bev_electronics_elements
+                            if list(self.bev_electronics_elements).count(e) > 1})
+            issues.append(
+                f"materials.bev_electronics_elements repeats {dupes}. A repeated "
+                f"element would be counted once but plotted twice."
             )
         if self.materials_mc_n_draws <= 0:
             issues.append(f"materials.materials_mc_n_draws={self.materials_mc_n_draws} must be positive.")

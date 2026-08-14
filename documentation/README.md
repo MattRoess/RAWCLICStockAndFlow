@@ -5,13 +5,16 @@ Start here.
 | I want to… | read |
 |---|---|
 | run the model | **[RUNNING.md](RUNNING.md)** |
-| change a parameter | **[PARAMETER_REFERENCE.md](PARAMETER_REFERENCE.md)** — all 137, generated from the code |
+| change a parameter | **[PARAMETER_REFERENCE.md](PARAMETER_REFERENCE.md)** — all 140, generated from the code |
 | understand how the model works | **[MODEL_DESCRIPTION.md](MODEL_DESCRIPTION.md)** |
 | know whether a band can be trusted | **[UNCERTAINTY_MAP.md](UNCERTAINTY_MAP.md)** |
 | pick up where the last session stopped | **[HANDOVER.md](HANDOVER.md)** |
 
 Design records, for decisions that need their reasoning kept:
 
+- [DESIGN_element_resolution.md](DESIGN_element_resolution.md)
+  — how 04_02 resolves elements across the four domains, and the two defects that
+  had to be fixed to make it correct (motor denominator, sensor mode-vs-mean).
 - [DESIGN_inflow_uncertainty_propagation.md](DESIGN_inflow_uncertainty_propagation.md)
   — why stage 02's inflow uncertainty is carried the way it is, including two
   rejected designs and the measurements that ruled them out.

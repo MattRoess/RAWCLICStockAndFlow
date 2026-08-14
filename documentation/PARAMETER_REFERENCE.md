@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **138** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **140** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 8 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 28 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 30 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1032,7 +1032,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**28 parameters.**
+**30 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1063,6 +1063,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `bev_electronics_standard_fleet_weighted` | `True` |
 | `bev_electronics_year_min` | `2020` |
 | `bev_electronics_year_max` | `2070` |
+| `bev_electronics_element_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/element_draws"` |
+| `bev_electronics_elements` | `( "Cu", # the priority element "Nd", "Dy", "Pr", "Tb", # magnet rare earths "Co", "Li",...` |
 | `bev_electronics_export_draws` | `True` |
 
 
@@ -1391,6 +1393,48 @@ Default: `2070`
 First and last year to report. The electronics study itself only covers
 2020-2070, so asking for earlier years would have nothing to multiply.
 SAFE TO CHANGE: yes, within the electronics study's own range.
+
+
+### `bev_electronics_element_draws_dir`
+
+Default: `"../../RAWCLICVehicleElectronics/Composition/element_draws"`
+
+Where the electronics study keeps its per-draw ELEMENT arrays, written by
+the three element models (ElectricMotorElementMC, PCBElementMC,
+SensorElementsMC). One file per domain and segment.
+SAFE TO CHANGE: only if you move that repository.
+
+
+### `bev_electronics_elements`
+
+Default: `( "Cu", # the priority element "Nd", "Dy", "Pr", "Tb", # magnet rare earths "Co", "Li",...`
+
+WHICH ELEMENTS TO REPORT.
+
+The default is the critical and strategic ones -- the raw materials whose
+supply is the reason for tracking this at all -- rather than everything the
+element models happen to resolve. Iron and silicon are the bulk of a motor by
+mass and are of no interest for criticality, so they are left out by default.
+
+Any element the models resolve can be added. The full available set is:
+
+motors  (34) Cu Fe Si C Mn Al P S Nd B Dy Tb Pr Co Nb Ga Plastic
+Unspecified, plus 16 trace impurities named *_ppm
+PCB     (10) Cu Ag Au Sn Pb Ni Pd Al Zn Fe
+sensors (27) Si Cu Ni Fe Mn Co Au Ag Pt Al Ga As In Pb Zr Ti Nd B Dy Ba
+Sn Ge Li W Ta Cr Zn
+wiring   (1) Cu -- the wiring model reports copper and nothing else
+
+An element absent from a domain simply contributes nothing there; it is not an
+error. Asking for a name no domain resolves IS an error, and the message lists
+what is available.
+
+NOTE Pd and Pt come from one domain each (PCB and sensors respectively), so
+their bands are narrower than a multi-domain element's -- they carry only that
+one model's uncertainty.
+
+SAFE TO CHANGE: yes. This only selects what is reported; it does not change
+any calculation.
 
 
 ### `bev_electronics_export_draws`
