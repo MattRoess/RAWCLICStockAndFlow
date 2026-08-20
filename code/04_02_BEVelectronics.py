@@ -469,7 +469,7 @@ def resolve_elements(wanted: tuple[str, ...], elem: dict) -> dict[str, list[str]
 
 def element_flows(
     fleet, per_segment_by_series, elem, keep, flow, segments, seg_group,
-    elements, where, years, n_draws,
+    elements, where, years, n_draws, export=None,
 ):
     """
     Element mass by year, per element and per domain, in kilotonnes.
@@ -477,6 +477,14 @@ def element_flows(
     Returns {element: {"total": (draws, years), domain: (draws, years), ...}} with
     every array already summarised -- only DataFrames come back, never the raw
     arrays, because holding 18 elements x 4 domains x 200,000 draws would be 60 GB.
+
+    `export`, when given, is (out_dir, year_indices). The raw draws for just
+    those years are written to disk on the way past, before the array is
+    summarised and dropped. That is the whole point: the recovery model
+    multiplies these by transfer coefficients that are themselves drawn, and a
+    mean times a mean is not the mean of a product -- so it needs the draws,
+    not the percentiles. One year is about 170 MB where the full span is 60 GB,
+    which is why the slice is taken here rather than the arrays kept.
 
     THE ORDER OF OPERATIONS MATTERS. Segments are summed on RAW draws before any
     percentile is taken, exactly as `multiply` does for total mass: percentile-of-sum
@@ -517,6 +525,45 @@ def element_flows(
             pooled[k] = contrib.astype(np.float32) if k not in pooled else \
                 pooled[k] + contrib.astype(np.float32)
 
+    # The mass of each domain itself, before any element split. The recovery
+    # model needs it: its composition is a share of a parent, and the parent
+    # there is the domain. Without it the only masses available would be the
+    # tracked elements, which are a minority of a motor or a board.
+    #
+    # THE THREE DOMAINS DO NOT CARRY THEIR MASS THE SAME WAY, and taking the
+    # pooled array as the mass is right for two of them and badly wrong for the
+    # third:
+    #
+    #   Wiring   pooled IS the copper mass; the domain is copper by definition.
+    #   Motors   pooled is vehicles x grams, so a mass. Elements are fractions
+    #   PCB      of it.
+    #   Sensors  pooled is vehicles x a NORMALISED TRAJECTORY -- shape only, no
+    #            level, because the sensor study's own per-element masses supply
+    #            the level further down. Summing it gives a number that is not a
+    #            mass at all. The domain's mass is the sum over ALL its elements.
+    #
+    # Read as a mass, the sensor pooled array made the tracked elements come to
+    # 11,861% of their own domain.
+    if export is not None:
+        for dom in ELEMENT_DOMAINS:
+            groups = [(g, v) for (d, g), v in pooled.items() if d == dom]
+            if not groups:
+                continue
+
+            if dom == "Sensors":
+                domain_mass = np.zeros((n_draws, n_years), dtype=np.float64)
+                for g, v in groups:
+                    els, arr = elem[dom][g]
+                    per_vehicle_mg = np.asarray(
+                        arr[:n_draws, :], dtype=np.float64).sum(axis=1)[:, None]
+                    domain_mass += v * (per_vehicle_mg / MG_PER_GRAM)
+            else:
+                domain_mass = np.sum([v for _, v in groups], axis=0, dtype=np.float64)
+
+            domain_mass /= TONNES_PER_KILOTONNE
+            _write_element_draws(export, flow, "__domain__", dom, domain_mass)
+            del domain_mass
+
     # ---- one element at a time -------------------------------------------
     out: dict[str, dict[str, pd.DataFrame]] = {}
     for e in elements:
@@ -541,13 +588,32 @@ def element_flows(
                     part += pooled[k] * col                  # fraction of domain mass
             part /= TONNES_PER_KILOTONNE
             total += part
+            if export is not None:
+                _write_element_draws(export, flow, e, dom, part)
             per_dom[dom] = summarize_by_year(part, years)
             del part
         per_dom["total"] = summarize_by_year(total, years)
+        if export is not None:
+            _write_element_draws(export, flow, e, "total", total)
         out[e] = per_dom
         del total
     del pooled
     return out
+
+
+def _write_element_draws(export, flow: str, element: str, domain: str,
+                         arr: np.ndarray) -> None:
+    """
+    Persist one element's draws for the wanted years, in kilotonnes.
+
+    Written float32 to match the fleet draws this stage reads, which halves the
+    file for a precision that is far finer than anything the inputs justify.
+    """
+    out_dir, year_index = export
+    folder = out_dir / flow
+    folder.mkdir(parents=True, exist_ok=True)
+    np.save(folder / f"{element}__{domain}.npy",
+            np.asarray(arr[:, year_index], dtype=np.float32))
 
 
 def summarize_by_year(arr: np.ndarray, years: np.ndarray) -> pd.DataFrame:
@@ -1205,11 +1271,37 @@ def main() -> dict[str, Any]:
     for e in elements:
         print(f"    {e:<4} {' + '.join(where[e])}")
 
+    # ---- the slice of draws the recovery model reads --------------------
+    # This stage keeps percentiles and drops the draws, which is right for a
+    # stage that plots bands. The recovery model cannot use percentiles: it
+    # multiplies these by transfer coefficients that are also drawn, and a mean
+    # times a mean is not the mean of a product. So the draws for a few named
+    # years are written on the way past.
+    export = None
+    wanted_years = tuple(int(y) for y in (p04.bev_electronics_element_draws_years or ()))
+    if wanted_years:
+        present = [y for y in wanted_years if y in set(years.tolist())]
+        missing = sorted(set(wanted_years) - set(present))
+        if missing:
+            print(f"\n  NOTE: element draw export skips {missing}, outside "
+                  f"{y_lo}-{y_hi}.")
+        if present:
+            out_dir = (PROJECT_ROOT / "data" / "processed"
+                       / p04.bev_electronics_element_draws_out_dir / scenario)
+            year_index = np.searchsorted(years, np.array(present))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            np.save(out_dir / "years.npy", np.array(present))
+            export = (out_dir, year_index)
+            size = (len(elements) * (len(ELEMENT_DOMAINS) + 1) * len(FLOWS)
+                    * n_draws * len(present) * 4 / 1e9)
+            print(f"\n  element draws -> {out_dir.relative_to(PROJECT_ROOT)}  "
+                  f"years {present}  (about {size:.2f} GB)")
+
     el_by_flow: dict[str, dict] = {}
     for flow in FLOWS:
         el_by_flow[flow] = element_flows(
             fleet, per_segment_by_series, elem, keep, flow, segments, seg_group,
-            elements, where, years, n_draws)
+            elements, where, years, n_draws, export=export)
         for e in elements:
             for dom, df in el_by_flow[flow][e].items():
                 for _, row in df.iterrows():

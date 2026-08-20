@@ -1779,6 +1779,37 @@ class MaterialsParams:
     # files are missing.
     bev_electronics_export_draws: bool = True
 
+    # WHICH YEARS' PER-ELEMENT DRAWS TO WRITE OUT, for the recovery model.
+    #
+    # This stage already computes element mass as (draws, years) arrays and then
+    # throws them away, keeping only percentiles -- holding 18 elements x 4
+    # domains x 200,000 draws for every year would be about 60 GB. That is the
+    # right default for a stage that only needs to plot bands.
+    #
+    # The recovery model needs the draws themselves, because it multiplies them
+    # by transfer coefficients that are also drawn, and a mean times a mean is
+    # not the mean of the product. It does not need every year: one year, or a
+    # short span, is what a recovery result is reported for.
+    #
+    # So a narrow slice is written instead of nothing. One year of all 18
+    # elements across 4 domains and 3 flows is about 170 MB at 200,000 draws --
+    # affordable, where the full span is not.
+    #
+    #     ()            write nothing (the old behaviour)
+    #     (2040,)       that one year
+    #     (2030, 2040)  those two years
+    #     tuple(range(2030, 2051))  a span
+    #
+    # SAFE TO CHANGE: yes. Years outside the run's own range are ignored with a
+    # note rather than silently dropped.
+    bev_electronics_element_draws_years: tuple[int, ...] = (2040,)
+
+    # WHERE THOSE PER-ELEMENT DRAWS ARE WRITTEN, under data/processed/.
+    # One folder per scenario, then per flow, then one .npy per element and per
+    # element-and-domain. The recovery model reads this folder.
+    # SAFE TO CHANGE: yes.
+    bev_electronics_element_draws_out_dir: str = "element_draws"
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         if not (0.0 <= self.bev_electronics_segment_tilt <= 1.0):
