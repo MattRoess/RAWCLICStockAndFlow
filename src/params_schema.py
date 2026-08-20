@@ -1802,7 +1802,7 @@ class MaterialsParams:
     #
     # SAFE TO CHANGE: yes. Years outside the run's own range are ignored with a
     # note rather than silently dropped.
-    bev_electronics_element_draws_years: tuple[int, ...] = (2040,)
+    bev_electronics_element_draws_years: tuple[int, ...] = (2030, 2035, 2040, 2045, 2050)
 
     # WHERE THOSE PER-ELEMENT DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then per flow, then one .npy per element and per

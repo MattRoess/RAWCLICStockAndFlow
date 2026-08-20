@@ -1355,18 +1355,98 @@ def main() -> dict[str, Any]:
         # where the fleet target lands higher, liquid-fuel inflow really is still
         # positive that year.
         # -------------------------------------------------------------------
+        # ===================================================================
+        # DO NOT MODIFY THIS BLOCK WITHOUT RUNNING code/test_stage03_inflow.py
+        # ===================================================================
+        # Settled 2026-08-20 after this block produced inflow figures that were
+        # wrong by a factor of two for four years without anything detecting it.
+        # It is validated against real registration statistics, and the test file
+        # named above re-checks every claim below. Change the rule and the tests
+        # fail; that is deliberate.
+        #
+        # WHAT WENT WRONG, so nobody reintroduces it:
+        #
+        # 1. THE PARENT VOLUME WAS NEVER SPLIT BETWEEN ITS CHILDREN.
+        #    `build_inflow_draws_by_drivetrain` hands BOTH children of a coarse
+        #    group the parent's array -- its docstring says so, and says "the
+        #    caller then applies its own share to divide them". This caller did
+        #    not. `parent_total` was grouped by ["Drive Train", "year"], which is
+        #    a drivetrain's own total across SEGMENTS. So Diesel's segments summed
+        #    to the entire Liquids volume, and so did Petrol's. Measured against
+        #    real EEA registrations, both came out at 2.2x reality for every year
+        #    from 2010 to 2019, and 15.2 million diesel cars in 2018 against an
+        #    actual EU diesel market of ~5.6 million. The variable being named
+        #    `parent_total` while holding the drivetrain total is what hid it.
+        #
+        # 2. THE BASE YEAR IS IDENTICALLY ZERO. Stage 02's first modelled year is
+        #    2005, where inflow = stock_target - survivors and the target IS the
+        #    initial stock, so the residual is exactly 0.00e+00 for every
+        #    drivetrain and every draw. Structural, not sampling noise. Writing
+        #    that over the deterministic value produced a spike to zero at 2005.
+        #
+        # 3. THE TWO STAGES DO NOT SHARE A LEVEL. Stage 02's MC mean sits below
+        #    stage 03's deterministic value -- ratio 0.954 / 0.939 / 0.967 /
+        #    0.982 / 0.868 at 2006 / 2010 / 2015 / 2020 / 2030 -- because inflow
+        #    is a nonlinear function of the sampled lifetime, so
+        #    E[inflow] != inflow(E[lambda]). That is not a defect, but it means
+        #    SUBSTITUTING stage 02's level for stage 03's can never line up at the
+        #    boundary, however the shares are computed.
+        #
+        # THE RULE. Stage 03 owns the volume; stage 02 contributes only its
+        # deviation from its own mean:
+        #
+        #     share = det_value / parent_group_total     (share of the PARENT)
+        #     dev   = draws_parent(y) - mean(draws_parent(y))
+        #     value = max(det_value + share * dev, 0)
+        #
+        # BEFORE FLOORING the mean over draws is exactly the deterministic value
+        # (measured worst deviation 3.3e-16), so there is no step at the boundary by
+        # construction rather than by tuning. At 2005 every draw is zero, so dev is
+        # zero and the deterministic value survives with a zero-width band -- the
+        # honest answer, since stage 02 carries no information about that year.
+        #
+        # AFTER FLOORING the mean can only be LIFTED, never lowered, and in a
+        # near-zero year the lift is large. Measured: exactly 1.00x wherever there is
+        # real volume, but 10.35x at HEV 2040, where the deterministic value is
+        # 0.0128 million (12,800 cars, the tail of the phase-out) and 36.6% of draws
+        # fall below zero. That is the correct Monte Carlo answer -- in a draw where
+        # the fleet target lands higher, hybrid inflow really is still positive that
+        # year -- but a result read out of a phase-out tail carries it and should be
+        # quoted with that in mind. `test_stage03_inflow.py` asserts both halves:
+        # exact equality before flooring, and never below afterwards.
+        #
+        # ADDITIVE, NOT THE RATIO FORM `draw / mean`. That was rejected earlier in
+        # this project because the residual passes through zero as Liquids phases
+        # out and the relative spread diverges (CV reached 1775%).
+        #
+        # VALIDATED against real data, all 14 years available:
+        #     Diesel 2010-2019   2.21x -> 1.11x of EEA registrations
+        #     Petrol 2010-2019   2.20x -> 1.13x
+        #     BEV                1.04x -> 1.05x (parent is itself; never affected)
+        #     pre-2005 level     13.12 M/yr vs 13.08 M/yr EU long-run average
+        #
+        # KNOWN AND NOT FIXED HERE: the model's own hybrid volume is 0.66x (2019)
+        # to 0.36x (2023) of real HEV+PHEV registrations, and 2020-2023 runs high
+        # because a stock-driven scenario model does not reproduce the COVID and
+        # chip-shortage collapse. Neither is caused by this block.
+        #
+        # FLOORING STILL HAPPENS HERE, PER DRAW, for the reason given above.
         if stage02_inflow_draws is not None:
+            _parent_of = dict(p02.inflow_uncertainty_parent_by_drv)
             det = inflow_by_scenario[name]
             det = det[det["Region"] == "EUR"].groupby(
                 ["Region", "Drive Train", "Segment", "year"], as_index=False
             )["value"].sum()
-            parent = (det.groupby(["Drive Train", "year"], as_index=False)["value"]
+            det["_parent"] = det["Drive Train"].map(_parent_of).fillna(det["Drive Train"])
+            parent = (det.groupby(["_parent", "year"], as_index=False)["value"]
                         .sum().rename(columns={"value": "parent_total"}))
-            det = det.merge(parent, on=["Drive Train", "year"], how="left")
+            det = det.merge(parent, on=["_parent", "year"], how="left")
 
             prior = inflow_draws_for_scenario or {}
             composed: dict = {}
-            for region, drv, seg, yr, val, parent_total in det.itertuples(
+            _share_sum: dict[tuple, float] = {}
+            _dev_cache: dict[tuple, np.ndarray] = {}
+            for region, drv, seg, yr, val, par, parent_total in det.itertuples(
                 index=False, name=None
             ):
                 vol = stage02_inflow_draws.get(drv)
@@ -1381,17 +1461,38 @@ def main() -> dict[str, Any]:
                 # Passing the NaN through instead poisons every summary downstream.
                 if not np.isfinite(vol[yi]).all():
                     continue
+
+                ck = (str(par), int(yr))
+                dev = _dev_cache.get(ck)
+                if dev is None:
+                    col = np.asarray(vol[yi], dtype=np.float64)
+                    dev = col - col.mean()
+                    _dev_cache[ck] = dev
+
                 share = (float(val) / float(parent_total)) if parent_total else 0.0
+                _share_sum[ck] = _share_sum.get(ck, 0.0) + share
+
                 key = (region, drv, seg)
                 existing = prior.get(key, {}).get(int(yr))
-                if existing is not None and float(val) != 0.0:
-                    # Segment shares already vary for this group: scale them by how
-                    # far this draw's volume sits from the deterministic volume.
-                    scale = np.asarray(vol[yi], dtype=np.float64) / float(val) * share
-                    vals = np.asarray(existing, dtype=np.float64) * scale
-                else:
-                    vals = np.asarray(vol[yi], dtype=np.float64) * share
-                composed.setdefault(key, {})[int(yr)] = np.maximum(vals, 0.0)
+                base = (np.asarray(existing, dtype=np.float64)
+                        if existing is not None else float(val))
+                composed.setdefault(key, {})[int(yr)] = np.maximum(base + share * dev, 0.0)
+
+            # THE CHILDREN MUST CONSUME EXACTLY ONE PARENT VOLUME. Every segment of
+            # every drivetrain under a parent holds a share of that parent, and
+            # those shares must sum to 1 for the year. This is the check that would
+            # have caught defect 1: with the old grouping it summed to 1 per
+            # DRIVETRAIN, so a parent with two children summed to 2.
+            _bad = {k: s for k, s in _share_sum.items() if abs(s - 1.0) > 1e-6}
+            if _bad:
+                k, s = sorted(_bad.items())[0]
+                raise ValueError(
+                    f"[{name}] stage-02 inflow shares do not sum to 1 for "
+                    f"parent={k[0]!r} year={k[1]}: got {s:.6f}, across {len(_bad)} "
+                    f"(parent, year) pairs. Each parent's volume must be DIVIDED "
+                    f"among its children, not handed to each of them. See the note "
+                    f"above this block and code/test_stage03_inflow.py."
+                )
             inflow_draws_for_scenario = composed
 
         scenario_results_all[name] = run_adjusted_scenario(

@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# pre-commit -- run the stage-03 inflow regression tests before allowing a commit
+# that touches the files they protect.
+#
+# WHY. The inflow composition block was wrong by a factor of two for four days and
+# nothing detected it: every stage ran, every artifact was written, every figure
+# rendered. It was found by a reader comparing two charts by hand. These tests are
+# the automatic version of that reader.
+#
+# SCOPE. Deliberately conditional. The suite takes about a minute, so running it on
+# every commit would make people bypass it, and a hook people bypass protects
+# nothing. It fires only when one of the files that can break the rule is staged.
+#
+# INSTALL (this file is versioned; .git/hooks is not):
+#     cp code/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# BYPASS, when you genuinely need to commit work in progress:
+#     git commit --no-verify
+# Doing that on the composition block is how the original defect would have shipped.
+
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+PY="$ROOT/.venv/bin/python"
+
+WATCHED='^(code/03_02_adjustedflows\.py|src/stockflow_model\.py|src/params_schema\.py|code/test_stage03_inflow\.py)$'
+STAGED="$(git diff --cached --name-only --diff-filter=ACM | grep -E "$WATCHED" || true)"
+
+if [ -z "$STAGED" ]; then
+    exit 0
+fi
+
+if [ ! -x "$PY" ]; then
+    echo "pre-commit: no interpreter at $PY -- skipping the stage-03 inflow tests."
+    echo "            Run them by hand: .venv/bin/python code/test_stage03_inflow.py"
+    exit 0
+fi
+
+echo "pre-commit: staged changes touch the stage-03 inflow rule:"
+echo "$STAGED" | sed 's/^/            /'
+echo "pre-commit: running code/test_stage03_inflow.py (about a minute)..."
+
+if "$PY" "$ROOT/code/test_stage03_inflow.py"; then
+    echo "pre-commit: tests passed."
+    exit 0
+fi
+
+cat <<'MSG'
+
+pre-commit: TESTS FAILED -- commit refused.
+
+  The stage-03 inflow rule is validated against real EU registration statistics.
+  A failure here means the composed inflow no longer matches the model's own
+  deterministic values, or a parent's volume is no longer being divided among its
+  children -- the exact defect that put 15.2 million diesel cars in 2018 against a
+  real market of 5.6 million.
+
+  Read the protected note above the composition block in
+  code/03_02_adjustedflows.py, and documentation/DESIGN_inflow_parent_split.md.
+
+  To commit anyway (work in progress only): git commit --no-verify
+
+MSG
+exit 1

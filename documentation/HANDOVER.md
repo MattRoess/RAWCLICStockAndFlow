@@ -131,6 +131,19 @@ the same area — investigate before changing anything else.
 Stage 04_02 is unaffected either way: it reads `per_year_collected` from the Monte
 Carlo engine, which always used the correct three-way split.
 
+### 4.1c OPEN — hybrid volume disagrees with the real record
+
+Found 2026-08-20 while fixing the inflow parent split. The model's own deterministic
+HEV + PHEV inflow is **0.66x** real EU registrations in 2019 and **0.36x** in 2023.
+That is a genuine modelling error against observed data, in stage 02's Hybrid volume
+or stage 03_01's Hybrid to HEV/PHEV split. Not caused by, and not repaired by, the
+parent-split fix. Full numbers: `DESIGN_inflow_parent_split.md` section 4.
+
+Also open there: 2020-2023 runs 1.9-2.2x high because the model does not reproduce
+the COVID and chip-shortage collapse, and 1975-2004 is flat because **no pre-2005
+data exists in this project** — supplying a historical registrations series would fix
+that one.
+
 ### 4.2 Smaller open items
 
 - **`04_02` element resolution — DONE, 14 August 2026.** All four domains now carry

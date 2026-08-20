@@ -12,6 +12,10 @@ Start here.
 
 Design records, for decisions that need their reasoning kept:
 
+- [DESIGN_inflow_parent_split.md](DESIGN_inflow_parent_split.md)
+  — how stage 02's inflow uncertainty is carried into 03_02, the factor-of-two
+  defect it replaced, and the validation against ACEA/EEA registrations.
+  **Protected: run `code/test_stage03_inflow.py` after any change.**
 - [DESIGN_collected_flow_definition.md](DESIGN_collected_flow_definition.md)
   — what "collected" means, the four implementations that disagreed, and the
   invariant now asserted so the same class of defect fails loudly.
