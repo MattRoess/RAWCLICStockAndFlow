@@ -139,6 +139,7 @@ artifact_status = artifacts.artifact_status
 build_hev_phev_split = disagg.build_hev_phev_split
 mask_inflow_before_introduction_year = disagg.mask_inflow_before_introduction_year
 build_liquids_split_wide = disagg.build_liquids_split_wide
+build_liquids_three_way_split = disagg.build_liquids_three_way_split
 build_segment_share_wide = disagg.build_segment_share_wide
 disaggregate_model_to_segments = disagg.disaggregate_model_to_segments
 prepare_eea_share_tables = disagg.prepare_eea_share_tables
@@ -406,17 +407,59 @@ def main() -> dict[str, Any]:
     # years before it existed (e.g. PHEV, first sold 2012, no longer shows a nonzero
     # share in 2005). See disaggregation.py's _fill_share_with_introduction_year for
     # the exact logic, including the HEV/PHEV-same-EEA-start-year case.
-    split_hp = build_hev_phev_split(
-        eea_data=eea_data, years_full=years_full,
-        introduction_year_by_drv=p03.introduction_year_by_drv,
-    )
-    split_hybrid_inflow_afterwards(matrices_by_key=matrices_by_key, split_hp=split_hp, region="EUR", base_drv="Hybrid")
-    split_hybrid_outflows_afterwards(matrices_by_key=matrices_by_key, split_hp=split_hp, region="EUR", base_drv="Hybrid")
+    # =====================================================================
+    # WHERE HYBRIDS COME FROM. Governed by disaggregation.hev_carved_from_liquids.
+    # =====================================================================
+    # REMIND holds five technologies -- Liquids, Hybrid electric, Gases, FCEV, BEV --
+    # and NONE of them is a non-plug-in hybrid. "Hybrid electric" is the PLUG-IN
+    # hybrid; ordinary full and mild hybrids sit inside Liquids. The old branch below
+    # split that plug-in class into HEV and PHEV, which invented an HEV series out of
+    # plug-in volume while the real hybrids stayed inside Liquids. ACEA puts hybrids
+    # at 25.8% of the 2023 EU market, 2.71 million cars.
+    #
+    # The current branch carves HEV out of Liquids using real registration shares and
+    # lets the whole of REMIND's Hybrid be PHEV. Validated against EEA and ACEA:
+    # HEV 1.03x reality in 2019, PHEV 1.02x in 2021, against 0.33x before.
+    # Full account: documentation/DESIGN_hev_carve_from_liquids.md.
+    if p03.hev_carved_from_liquids:
+        # Hybrid IS PHEV -- one to one, no split. Passing a single child hands the
+        # whole parent across unchanged.
+        phev_only = pd.DataFrame({"PHEV": 1.0}, index=pd.Index(
+            [int(y) for y in years_full], name="Year"))
+        split_hybrid_inflow_afterwards(
+            matrices_by_key=matrices_by_key, split_hp=phev_only, region="EUR",
+            base_drv="Hybrid", children=["PHEV"])
+        split_hybrid_outflows_afterwards(
+            matrices_by_key=matrices_by_key, split_hp=phev_only, region="EUR",
+            base_drv="Hybrid", children=["PHEV"])
 
-    # Liquids -> Diesel/Petrol split, same idea.
-    liquids_split = build_liquids_split_wide(liquids_shares_ext)
-    split_liquids_inflow_afterwards(matrices_by_key=matrices_by_key, liquids_split=liquids_split, region="EUR", base_drv="Liquids")
-    split_liquids_outflows_afterwards(matrices_by_key=matrices_by_key, liquids_split=liquids_split, region="EUR", base_drv="Liquids")
+        # Liquids -> Diesel/Petrol/HEV. Diesel and Petrol keep their existing
+        # relative split, applied to whatever HEV leaves behind.
+        liquids_split = build_liquids_three_way_split(
+            eea_data=eea_data, liquids_shares_ext=liquids_shares_ext,
+            years_full=years_full,
+            hev_introduction_year=int(p03.introduction_year_by_drv.get("HEV", 2000)),
+            phaseout_end_year=int(p03.hev_share_phaseout_end_year),
+        )
+        liquids_children = ["Diesel", "Petrol", "HEV"]
+    else:
+        # PRE-2026-08-20 BEHAVIOUR, kept only to reproduce old results. It is wrong;
+        # see the note above.
+        split_hp = build_hev_phev_split(
+            eea_data=eea_data, years_full=years_full,
+            introduction_year_by_drv=p03.introduction_year_by_drv,
+        )
+        split_hybrid_inflow_afterwards(matrices_by_key=matrices_by_key, split_hp=split_hp, region="EUR", base_drv="Hybrid")
+        split_hybrid_outflows_afterwards(matrices_by_key=matrices_by_key, split_hp=split_hp, region="EUR", base_drv="Hybrid")
+        liquids_split = build_liquids_split_wide(liquids_shares_ext)
+        liquids_children = ["Diesel", "Petrol"]
+
+    split_liquids_inflow_afterwards(
+        matrices_by_key=matrices_by_key, liquids_split=liquids_split, region="EUR",
+        base_drv="Liquids", children=liquids_children)
+    split_liquids_outflows_afterwards(
+        matrices_by_key=matrices_by_key, liquids_split=liquids_split, region="EUR",
+        base_drv="Liquids", children=liquids_children)
 
     # Segment disaggregation. NOTE: `allowed_drivetrains` here is exactly the 5-drivetrain
     # set (BEV, HEV, PHEV, Diesel, Petrol) -- FCEV and Gases are silently excluded from
@@ -498,21 +541,39 @@ def main() -> dict[str, Any]:
     base_shares_2005 = pd.Series({"BEV": bev_share / base_share_sum, "Hybrid": hybrid_share / base_share_sum, "Liquids": liquids_share / base_share_sum})
     base_stock_2005 = base_shares_2005 * starting_total_2005
 
-    if BASE_YEAR not in split_hp.index or BASE_YEAR not in liquids_split.index:
-        raise ValueError(f"Missing {BASE_YEAR} in split_hp or liquids_split.")
+    # THE 2005 STARTING STOCK IS SPLIT THE SAME WAY THE FLOWS ARE. Built from the
+    # same tables as the inflow/outflow splits above, so the base year cannot drift
+    # from the years that follow it. Under the carve, HEV comes out of Liquids and
+    # Hybrid is entirely PHEV; under the old branch, HEV comes out of Hybrid.
+    if BASE_YEAR not in liquids_split.index:
+        raise ValueError(f"Missing {BASE_YEAR} in liquids_split.")
 
-    hybrid_internal_2005 = split_hp.loc[BASE_YEAR, ["HEV", "PHEV"]].astype(float)
-    hybrid_internal_2005 = hybrid_internal_2005 / hybrid_internal_2005.sum()
-    liquids_internal_2005 = liquids_split.loc[BASE_YEAR, ["Diesel", "Petrol"]].astype(float)
+    liquids_internal_2005 = liquids_split.loc[BASE_YEAR, liquids_children].astype(float)
     liquids_internal_2005 = liquids_internal_2005 / liquids_internal_2005.sum()
 
-    starting_stock_2005 = pd.Series({
-        "BEV": base_stock_2005["BEV"],
-        "HEV": base_stock_2005["Hybrid"] * hybrid_internal_2005["HEV"],
-        "PHEV": base_stock_2005["Hybrid"] * hybrid_internal_2005["PHEV"],
-        "Diesel": base_stock_2005["Liquids"] * liquids_internal_2005["Diesel"],
-        "Petrol": base_stock_2005["Liquids"] * liquids_internal_2005["Petrol"],
-    }, name="value")
+    if p03.hev_carved_from_liquids:
+        hybrid_internal_2005 = pd.Series({"PHEV": 1.0})
+    else:
+        if BASE_YEAR not in split_hp.index:
+            raise ValueError(f"Missing {BASE_YEAR} in split_hp.")
+        hybrid_internal_2005 = split_hp.loc[BASE_YEAR, ["HEV", "PHEV"]].astype(float)
+        hybrid_internal_2005 = hybrid_internal_2005 / hybrid_internal_2005.sum()
+
+    _start = {"BEV": float(base_stock_2005["BEV"])}
+    for _drv in liquids_children:
+        _start[_drv] = _start.get(_drv, 0.0) + float(
+            base_stock_2005["Liquids"] * liquids_internal_2005[_drv])
+    for _drv, _sh in hybrid_internal_2005.items():
+        _start[_drv] = _start.get(_drv, 0.0) + float(base_stock_2005["Hybrid"] * _sh)
+    starting_stock_2005 = pd.Series(_start, name="value")
+
+    # The base-year split must conserve the parents it came from.
+    _want = float(base_stock_2005[["BEV", "Hybrid", "Liquids"]].sum())
+    if abs(float(starting_stock_2005.sum()) - _want) > 1e-9 * max(_want, 1.0):
+        raise ValueError(
+            f"2005 starting stock does not conserve: split total "
+            f"{float(starting_stock_2005.sum()):.6f} against BEV+Hybrid+Liquids "
+            f"{_want:.6f}.")
 
     segment_shares_2005 = (
         segment_shares_ext[segment_shares_ext["Year"] == BASE_YEAR]

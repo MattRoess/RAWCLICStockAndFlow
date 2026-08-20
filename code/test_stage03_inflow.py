@@ -232,6 +232,62 @@ def main() -> int:
           f"Diesel 95% width: 2005 {w05:.4f} (stage 02 has no information there), "
           f"2006 {w06:.4f}")
 
+    # ---- the HEV carve (option B) ------------------------------------------
+    # HEV is carved out of Liquids, not split off Hybrid. REMIND has no non-plug-in
+    # hybrid category at all -- "Hybrid electric" is the plug-in -- so splitting it
+    # into HEV and PHEV invented an HEV series while the real hybrids stayed inside
+    # Liquids. See documentation/DESIGN_hev_carve_from_liquids.md.
+    import src.disaggregation as dg                                    # noqa: E402
+    from src.disaggregation import prepare_eea_share_tables            # noqa: E402
+
+    params = load_many("params", root=ROOT)["params"]
+    p03 = params.disaggregation
+    if getattr(p03, "hev_carved_from_liquids", False):
+        out_dir = str((ROOT / "code" / p03.output_dir).resolve()) + "/"
+        eea_in = str((ROOT / "code" / p03.eea_input_dir).resolve()) + "/"
+        eea_data, _seg, liq_ext = prepare_eea_share_tables(
+            output_dir=out_dir, eea_input_dir=eea_in,
+            start_year_model=int(p03.start_year_model),
+            end_year_model=int(p03.end_year_model),
+            introduction_year_by_drv=p03.introduction_year_by_drv)
+        yrs = np.arange(int(p03.start_year_model), int(p03.end_year_model) + 1)
+        intro = int(p03.introduction_year_by_drv["HEV"])
+        endy = int(p03.hev_share_phaseout_end_year)
+        tbl = dg.build_liquids_three_way_split(
+            eea_data=eea_data, liquids_shares_ext=liq_ext, years_full=yrs,
+            hev_introduction_year=intro, phaseout_end_year=endy)
+
+        worst_c = float((tbl.sum(axis=1) - 1.0).abs().max())
+        check("Diesel + Petrol + HEV == 1 for every year",
+              worst_c <= 1e-12,
+              f"worst deviation {worst_c:.2e} over {len(tbl)} years")
+
+        s_intro = float(tbl.loc[intro, "HEV"])
+        s_end = float(tbl.loc[endy, "HEV"]) if endy in tbl.index else 0.0
+        s_pre = float(tbl.loc[intro - 1, "HEV"]) if (intro - 1) in tbl.index else 0.0
+        check("HEV share is zero before introduction and after phase-out",
+              abs(s_intro) < 1e-12 and abs(s_end) < 1e-12 and abs(s_pre) < 1e-12,
+              f"s({intro-1})={s_pre:.2e}  s({intro})={s_intro:.2e}  s({endy})={s_end:.2e}")
+
+        mono = tbl.loc[intro:2019, "HEV"]
+        check("HEV share increases from introduction to the first observation",
+              bool((mono.diff().dropna() >= -1e-12).all()) and float(mono.iloc[-1]) > 0,
+              f"s rises {100*float(mono.iloc[0]):.2f}% -> {100*float(mono.iloc[-1]):.2f}% "
+              f"across {intro}-2019, never decreasing")
+
+        # Measured from the SAME country-scoped frame the builder uses (EU27 plus
+        # Norway and Iceland), not the raw 30-country file -- an earlier version of
+        # this check compared against the raw file and failed at 4.569 vs 4.385%,
+        # which was the scoping working correctly, not a defect.
+        scoped = (eea_data[eea_data["Drive Train"].isin(["HEV", "Petrol", "Diesel"])]
+                  .groupby(["Year", "Drive Train"])["Registrations"].sum()
+                  .unstack(fill_value=0.0))
+        obs19 = float(scoped.loc[2019, "HEV"] / scoped.loc[2019].sum())
+        check("HEV share at 2019 matches the observed registration share",
+              abs(float(tbl.loc[2019, "HEV"]) - obs19) < 1e-9,
+              f"table {100*float(tbl.loc[2019,'HEV']):.3f}%  vs observed (scoped) "
+              f"{100*obs19:.3f}%")
+
     n_fail = sum(1 for s, _, _ in _results if s == FAIL)
     print(f"\n  {len(_results) - n_fail}/{len(_results)} passed")
     if n_fail:

@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **140** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **145** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -32,9 +32,9 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 
 - [Stage 01 — Data preparation](#stage-01-data-preparation) — `DataPrepParams`, 34 parameters
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
-- [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 8 parameters
+- [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 30 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 32 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -796,11 +796,12 @@ SAFE TO CHANGE: yes. 0 reproduces the older, uncoupled behaviour.
 
 `DisaggregationParams` in `src/params_schema.py` — read by code/03_01_flowdriven.py.
 
-**8 parameters.**
+**11 parameters.**
 
 | parameter | default |
 |---|---|
 | `output_dir` | `"../data/processed/"` |
+| `eea_input_dir` | `"../data/raw/"` |
 | `start_year_model` | `1950` |
 | `end_year_model` | `2070` |
 | `year_plot_start` | `2015` |
@@ -808,6 +809,8 @@ SAFE TO CHANGE: yes. 0 reproduces the older, uncoupled behaviour.
 | `use_synthetic_eea_fallback` | `False` |
 | `synthetic_eea_seed` | `42` |
 | `introduction_year_by_drv` | `{ "BEV": 2011, "HEV": 2000, "PHEV": 2012, }` |
+| `hev_carved_from_liquids` | `True` |
+| `hev_share_phaseout_end_year` | `2035` |
 
 
 ### `output_dir`
@@ -817,6 +820,28 @@ Default: `"../data/processed/"`
 Where this stage reads its input data and writes its results.
 SAFE TO CHANGE: only if you actually move the data folder. The path is relative
 to the `code/` directory.
+
+
+### `eea_input_dir`
+
+Default: `"../data/raw/"`
+
+WHERE THE EEA REGISTRATIONS FILE LIVES.
+
+`EEA_final_data.csv` is an INPUT -- real registration statistics that no stage
+of this pipeline can regenerate. It used to be looked up under `output_dir`,
+i.e. in `data/processed/`, alongside artifacts that ARE regenerable and that
+get cleared out periodically. On 2026-08-20 it was deleted along with the
+generated files, and there was no way to recreate it: the fallback only writes
+a clearly-labelled synthetic placeholder.
+
+An input that lives in the output folder will eventually be deleted with the
+outputs. It now lives in `data/raw/` with the other inputs, which is the only
+place clearing generated results cannot reach.
+
+SAFE TO CHANGE: only if you actually move the folder. If the file is not found
+here, the stage also looks in `output_dir` and says so, so an older working
+copy keeps running until the file is moved across.
 
 
 ### `start_year_model`
@@ -901,6 +926,52 @@ first year the model puts an exact zero -- the vehicle genuinely did not exist y
 SAFE TO CHANGE: only to correct a factual error. Getting it wrong invents vehicles
 in years they could not have existed, or erases real early ones. Each value must
 be a whole year, 1950 or later.
+
+
+### `hev_carved_from_liquids`
+
+Default: `True`
+
+WHERE HYBRIDS COME FROM. This decides whether HEV is carved out of Liquids or
+split off Hybrid, and it is a correctness switch, not a preference.
+
+The REMIND files hold five vehicle technologies -- Liquids, Hybrid electric,
+Gases, FCEV, BEV -- and NONE of them is a non-plug-in hybrid. In REMIND's
+taxonomy "Hybrid electric" is the PLUG-IN hybrid; ordinary full and mild hybrids
+are counted inside Liquids. The model used to split that plug-in class into HEV
+and PHEV, which invented an HEV series out of plug-in volume while the real
+hybrids stayed inside Liquids -- counting them twice and neither correctly.
+ACEA puts hybrids at 25.8% of the 2023 EU market, 2.71 million cars, so this is
+not a rounding matter.
+
+True   HEV is carved out of Liquids using real registration shares, and the
+whole of REMIND's Hybrid becomes PHEV. Validated against the EEA file
+and ACEA: HEV 1.03x reality in 2019, PHEV 1.02x in 2021.
+False  the old behaviour, kept only so results published before 20 August 2026
+can be reproduced. It is wrong; do not use it for new work.
+
+SAFE TO CHANGE: only to reproduce an old result.
+
+
+### `hev_share_phaseout_end_year`
+
+Default: `2035`
+
+WHEN HYBRIDS STOP BEING SOLD, as a share of the liquid-fuel market.
+
+Real registration data ends in 2023, where hybrids are 36.1% of all petrol,
+diesel and hybrid sales. Beyond that the share has to be assumed, because REMIND
+has no hybrid-versus-plain-liquids opinion at all -- that absence is the whole
+reason this setting exists. The share is ramped straight down from its last
+observed value to zero in this year.
+
+2035 is not arbitrary: the model's own liquid-fuel sales are last positive in
+2034 (0.24 million) and negative after, so hybrids reach zero exactly as the
+fuel they depend on does. A hybrid cannot outlive petrol.
+
+SAFE TO CHANGE: yes, and it is a genuine scenario choice. Later means hybrids
+linger as a larger slice of a shrinking market; earlier means they give way to
+battery-electric sooner. It does not change total sales, only their split.
 
 
 ---
@@ -1032,7 +1103,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**30 parameters.**
+**32 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1066,6 +1137,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `bev_electronics_element_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/element_draws"` |
 | `bev_electronics_elements` | `( "Cu", # the priority element "Nd", "Dy", "Pr", "Tb", # magnet rare earths "Co", "Li",...` |
 | `bev_electronics_export_draws` | `True` |
+| `bev_electronics_element_draws_years` | `(2030, 2035, 2040, 2045, 2050)` |
+| `bev_electronics_element_draws_out_dir` | `"element_draws"` |
 
 
 ### `segment_map`
@@ -1456,6 +1529,45 @@ instead of trying to reconstruct them.
 SAFE TO CHANGE: yes. Set False if you are not going to run 04_02 and want
 03_02 back at its normal speed. 04_02 stops with a clear message if the
 files are missing.
+
+
+### `bev_electronics_element_draws_years`
+
+Default: `(2030, 2035, 2040, 2045, 2050)`
+
+WHICH YEARS' PER-ELEMENT DRAWS TO WRITE OUT, for the recovery model.
+
+This stage already computes element mass as (draws, years) arrays and then
+throws them away, keeping only percentiles -- holding 18 elements x 4
+domains x 200,000 draws for every year would be about 60 GB. That is the
+right default for a stage that only needs to plot bands.
+
+The recovery model needs the draws themselves, because it multiplies them
+by transfer coefficients that are also drawn, and a mean times a mean is
+not the mean of the product. It does not need every year: one year, or a
+short span, is what a recovery result is reported for.
+
+So a narrow slice is written instead of nothing. One year of all 18
+elements across 4 domains and 3 flows is about 170 MB at 200,000 draws --
+affordable, where the full span is not.
+
+()            write nothing (the old behaviour)
+(2040,)       that one year
+(2030, 2040)  those two years
+tuple(range(2030, 2051))  a span
+
+SAFE TO CHANGE: yes. Years outside the run's own range are ignored with a
+note rather than silently dropped.
+
+
+### `bev_electronics_element_draws_out_dir`
+
+Default: `"element_draws"`
+
+WHERE THOSE PER-ELEMENT DRAWS ARE WRITTEN, under data/processed/.
+One folder per scenario, then per flow, then one .npy per element and per
+element-and-domain. The recovery model reads this folder.
+SAFE TO CHANGE: yes.
 
 
 ---

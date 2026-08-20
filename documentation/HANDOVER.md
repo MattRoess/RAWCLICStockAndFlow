@@ -131,13 +131,59 @@ the same area — investigate before changing anything else.
 Stage 04_02 is unaffected either way: it reads `per_year_collected` from the Monte
 Carlo engine, which always used the correct three-way split.
 
-### 4.1c OPEN — hybrid volume disagrees with the real record
+### 4.1c OPEN — the HEV/PHEV split is a category error, NOT a missing volume
 
-Found 2026-08-20 while fixing the inflow parent split. The model's own deterministic
-HEV + PHEV inflow is **0.66x** real EU registrations in 2019 and **0.36x** in 2023.
-That is a genuine modelling error against observed data, in stage 02's Hybrid volume
-or stage 03_01's Hybrid to HEV/PHEV split. Not caused by, and not repaired by, the
-parent-split fix. Full numbers: `DESIGN_inflow_parent_split.md` section 4.
+**CORRECTED 2026-08-20, same day.** This entry first said "the model's HEV + PHEV
+inflow is 0.66x real EU registrations in 2019 and 0.36x in 2023 — a genuine
+modelling error in stage 02's Hybrid volume". **That comparison was invalid** and the
+conclusion drawn from it was wrong. There is no missing hybrid volume. The original
+text is kept here because the mistake is instructive: two series were compared on the
+strength of sharing a label.
+
+WHAT IS ACTUALLY WRONG. The REMIND files contain five LDV technologies —
+`Liquids`, `Hybrid electric`, `Gases`, `FCEV`, `BEV`. There is **no non-plug-in
+hybrid category**. In REMIND's taxonomy `Hybrid electric` is the PLUG-IN hybrid;
+full and mild hybrids sit inside `Liquids`. `data_prep.py:241` renames
+`Hybrid electric` to `Hybrid`, and stage 03_01 then splits that into HEV and PHEV --
+**manufacturing an HEV series out of plug-in-hybrid volume, while the real HEVs are
+still being counted inside Liquids.**
+
+WHY THE ORIGINAL COMPARISON WAS INVALID. In `EEA_final_data.csv`, `HEV` is assigned
+from fuel types PETROL / DIESEL / E85 — it is dominated by 48V mild hybrids, which
+are petrol and diesel cars. Comparing REMIND's plug-in class against that label
+compares different populations. Reclassify the mild hybrids back to Liquids and the
+apparent defect inverts:
+
+| | model / real |
+|---|---|
+| EEA `HEV` at face value | 0.66x (2019), 0.36x (2023) |
+| mild hybrids returned to Liquids | 1.14x (2020), 1.02x (2021), 1.57x (2023) |
+
+The model is not short of hybrids. With mild hybrids counted as Liquids, the model's
+Liquids matches reality at **1.03–1.09x for 2015–2019**.
+
+VALIDATED AGAINST ACEA. Every category in the EEA file agrees with ACEA's published
+2023 shares (10.5 M market): Petrol 3.71 vs 3.693, HEV 2.71 vs 2.855, BEV 1.53 vs
+1.669, Diesel 1.43 vs 1.370, PHEV 0.81 vs 0.840 M. The real data is sound; only the
+mapping onto REMIND's categories was wrong.
+
+REMIND's single hybrid class (7.278 M stock, 1.319 M inflow in 2023) matches neither
+real category — 1.6x real PHEV inflow, 0.37x real HEV+PHEV inflow — and ACEA's HEV,
+25.8% of the market at 2.71 M cars a year, has nowhere to live in the model except
+inside Liquids.
+
+**IMPLEMENTED 2026-08-20 (option B).** HEV is carved out of Liquids using the real
+registration shares; the whole of REMIND's `Hybrid` is PHEV. Governed by
+`disaggregation.hev_carved_from_liquids` (default True) and
+`hev_share_phaseout_end_year` (default 2035). Measured after the change: HEV 1.06x
+real at 2019, PHEV 1.02x at 2021 (0.33x before), conservation 1.11e-16.
+`code/test_stage03_inflow.py` is now 13 tests and covers it.
+Full account: `DESIGN_hev_carve_from_liquids.md`.
+
+**THE DRIVETRAIN TAXONOMY HAS CHANGED.** `HEV` is now a slice of Liquids, not of
+Hybrid; `PHEV` is all of Hybrid. 03_01 has been re-run; **03_02 and 04_01 have NOT**,
+so anything downstream still holds the old split. Anything published with the old
+HEV/PHEV series should be regenerated.
 
 Also open there: 2020-2023 runs 1.9-2.2x high because the model does not reproduce
 the COVID and chip-shortage collapse, and 1975-2004 is flat because **no pre-2005

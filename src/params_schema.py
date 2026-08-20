@@ -1233,6 +1233,44 @@ class DisaggregationParams:
         "BEV": 2011, "HEV": 2000, "PHEV": 2012,
     })
 
+    # WHERE HYBRIDS COME FROM. This decides whether HEV is carved out of Liquids or
+    # split off Hybrid, and it is a correctness switch, not a preference.
+    #
+    # The REMIND files hold five vehicle technologies -- Liquids, Hybrid electric,
+    # Gases, FCEV, BEV -- and NONE of them is a non-plug-in hybrid. In REMIND's
+    # taxonomy "Hybrid electric" is the PLUG-IN hybrid; ordinary full and mild hybrids
+    # are counted inside Liquids. The model used to split that plug-in class into HEV
+    # and PHEV, which invented an HEV series out of plug-in volume while the real
+    # hybrids stayed inside Liquids -- counting them twice and neither correctly.
+    # ACEA puts hybrids at 25.8% of the 2023 EU market, 2.71 million cars, so this is
+    # not a rounding matter.
+    #
+    # True   HEV is carved out of Liquids using real registration shares, and the
+    #        whole of REMIND's Hybrid becomes PHEV. Validated against the EEA file
+    #        and ACEA: HEV 1.03x reality in 2019, PHEV 1.02x in 2021.
+    # False  the old behaviour, kept only so results published before 20 August 2026
+    #        can be reproduced. It is wrong; do not use it for new work.
+    #
+    # SAFE TO CHANGE: only to reproduce an old result.
+    hev_carved_from_liquids: bool = True
+
+    # WHEN HYBRIDS STOP BEING SOLD, as a share of the liquid-fuel market.
+    #
+    # Real registration data ends in 2023, where hybrids are 36.1% of all petrol,
+    # diesel and hybrid sales. Beyond that the share has to be assumed, because REMIND
+    # has no hybrid-versus-plain-liquids opinion at all -- that absence is the whole
+    # reason this setting exists. The share is ramped straight down from its last
+    # observed value to zero in this year.
+    #
+    # 2035 is not arbitrary: the model's own liquid-fuel sales are last positive in
+    # 2034 (0.24 million) and negative after, so hybrids reach zero exactly as the
+    # fuel they depend on does. A hybrid cannot outlive petrol.
+    #
+    # SAFE TO CHANGE: yes, and it is a genuine scenario choice. Later means hybrids
+    # linger as a larger slice of a shrinking market; earlier means they give way to
+    # battery-electric sooner. It does not change total sales, only their split.
+    hev_share_phaseout_end_year: int = 2035
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         if self.start_year_model >= self.end_year_model:

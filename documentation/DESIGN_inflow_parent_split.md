@@ -127,15 +127,29 @@ because it was being compared against a post-2005 band that the defect had doubl
 **These are real disagreements with the observed record. They are not caused by the
 rule in this document and are not repaired by it.**
 
-- **Hybrid volume is far too low.** The model's own deterministic HEV + PHEV inflow
-  is **0.66×** real registrations in 2019 (0.553 M vs 0.840 M) and **0.36×** in 2023
-  (1.319 M vs 3.695 M). This sits in stage 02's Hybrid volume or in stage 03_01's
-  Hybrid → HEV/PHEV split.
+- **The HEV/PHEV split is a category error.** ~~Hybrid volume is far too low —
+  0.66× real registrations in 2019 and 0.36× in 2023.~~ **That claim was withdrawn
+  the same day: the comparison was invalid.** See `HANDOVER.md` §4.1c for the full
+  correction.
 
-  Note that fixing the parent split makes PHEV move from 1.56× to 0.41× of real —
-  *further* from reality. That is not the fix failing. PHEV previously received the
-  whole Hybrid volume, several times its own share, which partly cancelled the fact
-  that the Hybrid total is too small. Two errors compensating is not agreement.
+  In short: the REMIND files hold five LDV technologies and **none of them is a
+  non-plug-in hybrid**. `Hybrid electric` is the plug-in; full and mild hybrids are
+  inside `Liquids`. Meanwhile `EEA_final_data.csv` assigns `HEV` from fuel types
+  PETROL / DIESEL / E85, so its HEV is dominated by 48V mild hybrids. Comparing the
+  two compared different populations.
+
+  Reclassify mild hybrids back to Liquids and the model is **not** short of hybrids
+  (1.02–1.57× 2020–2023), and its Liquids matches reality at **1.03–1.09×** for
+  2015–2019. The real defect is that stage 03_01 splits REMIND's plug-in class into
+  HEV + PHEV, inventing an HEV series while the real HEVs stay inside Liquids.
+
+  Note that fixing the parent split makes PHEV move from 1.56× to 0.41× of the EEA
+  `HEV`+`PHEV` label — *further* from it. That is an artefact of the same invalid
+  comparison, not the fix failing.
+
+  **Decided: option B** — carve HEV out of Liquids using EEA/ACEA shares, treat
+  REMIND's `Hybrid` as PHEV. Changes the drivetrain taxonomy from stage 02 onward.
+  Not yet implemented.
 
 - **2020–2023 runs high.** Real diesel registrations collapsed from 4.87 M (2019) to
   1.37 M (2023) with COVID and the chip shortage. A stock-driven scenario model does

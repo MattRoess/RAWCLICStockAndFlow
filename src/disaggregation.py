@@ -639,6 +639,7 @@ def split_hybrid_inflow_afterwards(
     split_hp: pd.DataFrame,
     region: str = "EUR",
     base_drv: str = "Hybrid",
+    children: list[str] | None = None,
 ) -> None:
     base_key = (region, base_drv)
     if base_key not in matrices_by_key:
@@ -649,7 +650,7 @@ def split_hybrid_inflow_afterwards(
     split_hp = split_hp.reindex(years).ffill().bfill().fillna(0.0)
 
     out = {}
-    for sub in ["HEV", "PHEV"]:
+    for sub in (children if children is not None else ["HEV", "PHEV"]):
         if sub not in split_hp.columns:
             continue
         s = split_hp[sub]
@@ -668,6 +669,7 @@ def split_hybrid_outflows_afterwards(
     split_hp: pd.DataFrame,
     region: str = "EUR",
     base_drv: str = "Hybrid",
+    children: list[str] | None = None,
 ) -> None:
     base_key = (region, base_drv)
     if base_key not in matrices_by_key:
@@ -690,7 +692,7 @@ def split_hybrid_outflows_afterwards(
         return matrix_df.mul(col_shares, axis=1)
 
     out = {}
-    for sub in ["HEV", "PHEV"]:
+    for sub in (children if children is not None else ["HEV", "PHEV"]):
         if sub not in split_hp.columns:
             continue
         s = split_hp[sub]
@@ -752,7 +754,7 @@ def split_hybrid_flows_afterwards(
         return matrix_df.mul(col_shares, axis=1)
 
     out = {}
-    for sub in ["HEV", "PHEV"]:
+    for sub in (children if children is not None else ["HEV", "PHEV"]):
         s = split_hp[sub]
         mats_sub = {}
         for name in ["outflow_coll_df", "outflow_exp_df", "outflow_unk_df", "outflow_surv_df"]:
@@ -813,11 +815,120 @@ def build_liquids_split_wide(liquids_shares_ext: pd.DataFrame) -> pd.DataFrame:
     return wide.div(wide.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
 
 
+def build_liquids_three_way_split(
+    eea_data: pd.DataFrame,
+    liquids_shares_ext: pd.DataFrame,
+    years_full,
+    hev_introduction_year: int = 2000,
+    phaseout_end_year: int = 2035,
+) -> pd.DataFrame:
+    """
+    Split the Liquids family three ways -- Diesel, Petrol, HEV -- one row per year.
+
+    WHY HEV COMES OUT OF LIQUIDS. The REMIND files hold five technologies and none of
+    them is a non-plug-in hybrid: "Hybrid electric" is the PLUG-IN hybrid, and
+    ordinary full and mild hybrids are inside Liquids. Splitting the plug-in class
+    into HEV and PHEV, as this model used to, invented an HEV series out of plug-in
+    volume while the real hybrids stayed inside Liquids. A hybrid burns petrol; it
+    belongs to the liquid-fuel family, and that is where it is taken from here.
+
+    THE SHARE CURVE. `s(t)` is HEV's share of Diesel + Petrol + HEV:
+
+        t <  intro          0
+        intro <= t < 2019   straight line from 0 to the first observed share
+        2019 <= t <= 2023   the OBSERVED share, from the EEA registrations file
+        2023 <  t < end     straight line from the last observed share down to 0
+        t >= end            0
+
+    The observed section is read from the data rather than written down here, so it
+    follows the file if the file is updated.
+
+    BEFORE 2019 IS AN ASSUMPTION, AND A NECESSARY ONE. The EEA file records HEV as
+    exactly zero before 2019 -- an artefact of when its electrification flag started
+    being filled in, not history. Hybrids were sold in Europe from the late 1990s.
+    Taking the file literally would delete them, so the share is carried back to the
+    introduction year on a straight line instead.
+
+    AFTER 2023 IS ALSO AN ASSUMPTION. Registration data stops there and REMIND has no
+    view. See `params_schema.py`'s `hev_share_phaseout_end_year`.
+
+    Returns a frame indexed by year with columns Diesel, Petrol, HEV summing to
+    exactly 1. Diesel and Petrol keep their existing relative split
+    (`liquids_shares_ext`), applied to whatever HEV leaves behind, so this changes
+    where hybrids are counted without disturbing the diesel-versus-petrol logic.
+    """
+    fam = ["Petrol", "Diesel", "HEV"]
+    obs = eea_data[eea_data["Drive Train"].isin(fam)]
+    if obs.empty:
+        raise ValueError(
+            "no Petrol/Diesel/HEV rows in eea_data -- cannot measure the HEV share "
+            "of the liquid-fuel family."
+        )
+    by_year = obs.groupby(["Year", "Drive Train"])["Registrations"].sum().unstack(fill_value=0.0)
+    for c in fam:
+        if c not in by_year.columns:
+            by_year[c] = 0.0
+    total = by_year[fam].sum(axis=1)
+    observed = (by_year["HEV"] / total.replace(0, np.nan)).dropna()
+    observed = observed[observed > 0]
+    if observed.empty:
+        raise ValueError(
+            "the EEA file records no nonzero HEV registrations in any year, so the "
+            "HEV share of Liquids cannot be measured. Check the Drive Train column."
+        )
+    first_obs, last_obs = int(observed.index.min()), int(observed.index.max())
+    s_first, s_last = float(observed.loc[first_obs]), float(observed.loc[last_obs])
+
+    if phaseout_end_year <= last_obs:
+        raise ValueError(
+            f"hev_share_phaseout_end_year={phaseout_end_year} must be after the last "
+            f"observed year ({last_obs}); hybrids cannot stop being sold before the "
+            f"data stops describing them."
+        )
+
+    def s_of(t: int) -> float:
+        if t < hev_introduction_year:
+            return 0.0
+        if t < first_obs:
+            span = first_obs - hev_introduction_year
+            return s_first * (t - hev_introduction_year) / span if span > 0 else 0.0
+        if t <= last_obs:
+            return float(observed.loc[t]) if t in observed.index else float(
+                observed.reindex(range(first_obs, t + 1)).ffill().iloc[-1])
+        if t >= phaseout_end_year:
+            return 0.0
+        return s_last * (phaseout_end_year - t) / (phaseout_end_year - last_obs)
+
+    years = pd.Index([int(y) for y in years_full], name="Year")
+    pd_split = build_liquids_split_wide(liquids_shares_ext).reindex(years).ffill().bfill().fillna(0.0)
+
+    hev = pd.Series([s_of(int(y)) for y in years], index=years, dtype=float)
+    rest = 1.0 - hev
+    out = pd.DataFrame({
+        "Diesel": rest * pd_split.get("Diesel", 0.0),
+        "Petrol": rest * pd_split.get("Petrol", 0.0),
+        "HEV": hev,
+    }, index=years)
+
+    # THE THREE MUST PARTITION THE LIQUID-FUEL FAMILY. Same reasoning as the
+    # collected/export/unknown guard above: a share silently going missing is exactly
+    # the class of defect this codebase has already shipped twice.
+    bad = (out.sum(axis=1) - 1.0).abs() > 1e-9
+    if bad.any():
+        y = int(out.index[bad][0])
+        raise ValueError(
+            f"Diesel + Petrol + HEV must be 1 for every year, but {int(bad.sum())} "
+            f"years are off; first is {y} at {float(out.loc[y].sum()):.9f}."
+        )
+    return out
+
+
 def split_liquids_inflow_afterwards(
     matrices_by_key: dict,
     liquids_split: pd.DataFrame,
     region: str = "EUR",
     base_drv: str = "Liquids",
+    children: list[str] | None = None,
 ) -> None:
     base_key = (region, base_drv)
     if base_key not in matrices_by_key:
@@ -828,7 +939,7 @@ def split_liquids_inflow_afterwards(
     split = liquids_split.reindex(years).ffill().bfill().fillna(0.0)
 
     out = {}
-    for fuel in ["Diesel", "Petrol"]:
+    for fuel in (children if children is not None else ["Diesel", "Petrol"]):
         if fuel not in split.columns:
             continue
         s = split[fuel]
@@ -847,6 +958,7 @@ def split_liquids_outflows_afterwards(
     liquids_split: pd.DataFrame,
     region: str = "EUR",
     base_drv: str = "Liquids",
+    children: list[str] | None = None,
 ) -> None:
     base_key = (region, base_drv)
     if base_key not in matrices_by_key:
@@ -869,7 +981,7 @@ def split_liquids_outflows_afterwards(
         return matrix_df.mul(col_shares, axis=1)
 
     out = {}
-    for fuel in ["Diesel", "Petrol"]:
+    for fuel in (children if children is not None else ["Diesel", "Petrol"]):
         if fuel not in split.columns:
             continue
         s = split[fuel]
@@ -928,7 +1040,7 @@ def split_liquids_flows_afterwards(
         return matrix_df.mul(col_shares, axis=1)
 
     out = {}
-    for fuel in ["Diesel", "Petrol"]:
+    for fuel in (children if children is not None else ["Diesel", "Petrol"]):
         if fuel not in split.columns:
             continue
 

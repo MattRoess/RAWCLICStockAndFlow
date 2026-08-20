@@ -12,6 +12,9 @@ Start here.
 
 Design records, for decisions that need their reasoning kept:
 
+- [DESIGN_hev_carve_from_liquids.md](DESIGN_hev_carve_from_liquids.md)
+  — why HEV is carved out of Liquids rather than split off Hybrid (REMIND has no
+  non-plug-in hybrid category), with the ACEA/EEA validation.
 - [DESIGN_inflow_parent_split.md](DESIGN_inflow_parent_split.md)
   — how stage 02's inflow uncertainty is carried into 03_02, the factor-of-two
   defect it replaced, and the validation against ACEA/EEA registrations.
