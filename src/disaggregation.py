@@ -32,7 +32,12 @@ here before the fix).
 `00->01->02->03_01->03_02` pipeline run against synthetic data -- every function in
 this file that's actually called by the two stage-03 scripts executed successfully and
 produced structurally sensible output (confirmed via `.equals()` comparisons and direct
-number checks, not just "didn't crash"). Not yet run against real data.
+number checks, not just "didn't crash").
+
+[UPDATED 2026-08-20] This used to end "Not yet run against real data." That is no
+longer true and had been stale for some time: the stage-03 scripts run against the real
+EEA registrations, REMIND scenarios and used-vehicle export data (see the input note at
+the top of `03_02_adjustedflows.py`).
 """
 
 from __future__ import annotations
@@ -207,6 +212,7 @@ def prepare_eea_share_tables(
     end_year_model: int,
     country_scope: tuple[str, ...] | None = None,
     introduction_year_by_drv: dict[str, int] | None = None,
+    eea_input_dir: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     [NEW param, step 2 of the agreed plan] `introduction_year_by_drv`: e.g.
@@ -258,7 +264,23 @@ def prepare_eea_share_tables(
     registration volume) -- flag this explicitly wherever drivetrain-level shares
     derived from this function are reported or interpreted.
     """
-    eea_path = Path(output_dir) / "EEA_final_data.csv"
+    # THE EEA FILE IS AN INPUT AND LIVES WITH THE INPUTS. It used to be looked up
+    # under `output_dir` (`data/processed/`), among artifacts that ARE regenerable.
+    # On 2026-08-20 it was deleted along with them and could not be recreated -- the
+    # fallback only writes a labelled synthetic placeholder, not real registrations.
+    # It now lives in `data/raw/`; `output_dir` is still checked as a fallback so an
+    # older working copy keeps running, with a note saying where to move it.
+    eea_dir = eea_input_dir if eea_input_dir is not None else output_dir
+    eea_path = Path(eea_dir) / "EEA_final_data.csv"
+    if not eea_path.exists():
+        legacy = Path(output_dir) / "EEA_final_data.csv"
+        if legacy.exists():
+            print(
+                f"NOTE: reading EEA registrations from {legacy}, the old location.\n"
+                f"      Move it to {eea_path} -- it is an INPUT, and data/processed/ "
+                f"holds regenerable output that gets cleared."
+            )
+            eea_path = legacy
     if not eea_path.exists():
         raise FileNotFoundError(
             f"prepare_eea_share_tables: expected an EEA registrations CSV at "
@@ -405,6 +427,9 @@ def generate_synthetic_eea_data(
                     "Registrations": float(rng.uniform(50, 500)),
                 })
 
+    # Written to the INPUT folder, the same place prepare_eea_share_tables now looks
+    # first -- a placeholder that lands somewhere the real file would never live is
+    # worse than no placeholder at all.
     out_path = Path(output_dir) / "EEA_final_data.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(out_path, index=False)

@@ -240,6 +240,10 @@ def main() -> dict[str, Any]:
     # `prepare_eea_share_tables`'s `output_dir + "EEA_final_data.csv"` lookup works
     # regardless of where this script is invoked from.
     output_dir = str((SCRIPT_DIR / p03.output_dir).resolve()) + "/"
+    # The EEA registrations file is an INPUT and lives with the inputs, not in
+    # data/processed/ where regenerable artifacts get cleared. See
+    # params.disaggregation.eea_input_dir.
+    eea_input_dir = str((SCRIPT_DIR / p03.eea_input_dir).resolve()) + "/"
     start_year_model = int(p03.start_year_model)
     end_year_model = int(p03.end_year_model)
     # Plot window now lives with this stage's own settings (`params.disaggregation`),
@@ -284,11 +288,13 @@ def main() -> dict[str, Any]:
     # placeholder so the rest of the pipeline can still be exercised. See
     # `disaggregation.py`'s `generate_synthetic_eea_data` docstring for exactly what
     # this does and doesn't mean for the resulting numbers.
-    eea_path = Path(output_dir) / "EEA_final_data.csv"
+    eea_path = Path(eea_input_dir) / "EEA_final_data.csv"
+    if not eea_path.exists() and (Path(output_dir) / "EEA_final_data.csv").exists():
+        eea_path = Path(output_dir) / "EEA_final_data.csv"   # old location, still honoured
     if not eea_path.exists() and p03.use_synthetic_eea_fallback:
         print(
             "=" * 70 + "\n"
-            "WARNING: data/processed/EEA_final_data.csv not found. "
+            "WARNING: EEA_final_data.csv not found in data/raw/. "
             "params.disaggregation.use_synthetic_eea_fallback is True, so a "
             "SYNTHETIC placeholder is being generated instead.\n"
             "EVERY number derived from this file (segment shares, HEV/PHEV split, "
@@ -297,7 +303,7 @@ def main() -> dict[str, Any]:
             "PLUMBING only, not for any real analysis.\n" + "=" * 70
         )
         disagg.generate_synthetic_eea_data(
-            output_dir=output_dir,
+            output_dir=eea_input_dir,
             start_year=2005,  # EEA registration data realistically wouldn't predate this
             end_year=end_year_model,
             seed=42,
@@ -328,7 +334,8 @@ def main() -> dict[str, Any]:
     # hard 0 for years before a drivetrain's real introduction year, instead of the
     # old .bfill() backfilling a later real EEA share into years before it existed.
     eea_data, segment_shares_ext, liquids_shares_ext = prepare_eea_share_tables(
-        output_dir=output_dir, start_year_model=start_year_model, end_year_model=end_year_model,
+        output_dir=output_dir, eea_input_dir=eea_input_dir,
+        start_year_model=start_year_model, end_year_model=end_year_model,
         country_scope=eea_country_scope,
         introduction_year_by_drv=p03.introduction_year_by_drv,
     )

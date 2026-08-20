@@ -87,8 +87,10 @@ BUILD PROGRESS (step by step, per user's request to test alongside):
       `select_first_year_composition` now explicitly excludes "standard" (own,
       independent first-year selection, since "standard" isn't guaranteed to share
       the 12 segments' year coverage). DONE, syntax-checked and every new call site
-      cross-checked against its definition -- NOT yet run against real data (no
-      access to the actual composition/histogram/mc_stage03_02_summary files).
+      cross-checked against its definition.
+      [UPDATED 2026-08-20] This used to add "NOT yet run against real data (no
+      access to the actual composition/histogram/mc_stage03_02_summary files)".
+      Stale: those files exist and this stage runs against them end-to-end.
       [FIXED, LATER ROUND -- CORRECTION TO THE ABOVE] "independent by-drivetrain
       re-simulation" and its "__direct__" entries, referenced throughout this Step 7
       entry, DO NOT EXIST -- confirmed directly against `03_02_adjustedflows.py`,
@@ -135,8 +137,10 @@ BUILD PROGRESS (step by step, per user's request to test alongside):
       DONE (this step's own design was superseded by Step 9's fix below -- see that
       entry for what actually shipped), syntax-checked; the cohort-year matching + mass aggregation logic was
       ALSO verified numerically in isolation (synthetic data, confirms correct
-      fan-out to every component/material and correct clamping) -- NOT yet run
-      against real data (no access to the actual composition/histogram files).
+      fan-out to every component/material and correct clamping).
+      [UPDATED 2026-08-20] This used to add "NOT yet run against real data (no
+      access to the actual composition/histogram files)". Stale: this stage now
+      runs on the real composition data end-to-end.
   [x] Step 9 [NEW, this round -- fixes a REAL crash found by the user running Step 8
       against real data]: the process was killed by the OS (`zsh: killed`, an OOM
       kill, not a Python exception) partway through composition bootstrapping.

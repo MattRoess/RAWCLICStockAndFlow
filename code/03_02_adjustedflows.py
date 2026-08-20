@@ -82,8 +82,9 @@ module-level global) so the five scenarios don't step on each other via shared m
 state.
 
 **VERIFIED, with real numbers, now that `flowdriven_model.py`/`disaggregation.py` are
-available** -- this was run end-to-end against synthetic data, not just implemented and
-hoped-correct:
+available** -- run end-to-end, not just implemented and hoped-correct. (The checks below
+were first made against synthetic inputs; the pipeline has since run on the real data --
+see the input note above.):
   1. All five scenario trackers are confirmed structurally different from
      `tracker_keyed_BAU` (`.equals()` returns `False` for every one).
   2. `losses_zero` specifically checked at the number level: BEV export outflow went
@@ -101,13 +102,32 @@ hoped-correct:
 See `HOW_TO_RUN_AND_VERIFY.md` for the exact verification commands.
 
 ======================================================================
-THE BIG CAVEAT, still partially relevant: everything is now tested with SYNTHETIC data
+INPUT DATA: REAL, as of 2026-08-20. This note previously said otherwise.
 ======================================================================
-Stage 03 has now been run end-to-end (00->01->02->03_01->03_02) and produces correct,
-sensible-looking output -- but against synthetic REMIND/export/EEA data, not your real
-data. Structural correctness (does the code run, do the scenarios diverge as intended)
-is verified; real-world numerical plausibility (do the actual magnitudes make sense for
-the EU vehicle fleet) still needs a run against your real data files.
+It used to read "everything is now tested with SYNTHETIC data ... against synthetic
+REMIND/export/EEA data, not your real data". That was true when written and had gone
+stale, which mattered: it cast doubt on every number the pipeline produced, and it was
+still there long after the real files were in place.
+
+Checked on 2026-08-20, all three sources are real:
+
+  EEA registrations  data/raw/EEA_final_data.csv -- 24,610 rows, 30 country codes,
+                     2010-2023, 177 M registrations, no synthetic marker.
+  REMIND             data/raw/REMIND/*.mif -- five scenario files, 33-47 MB each.
+  Used-vehicle       data/raw/usedvehicles_v1.2.xlsx.
+  export
+
+The only synthetic-input path in the codebase is
+`params.disaggregation.use_synthetic_eea_fallback`, which is False and writes a
+loudly-labelled placeholder when it is True. It is not in use.
+
+STILL NOT A SUBSTITUTE FOR REVIEW. That the inputs are real says nothing about whether
+the OUTPUT magnitudes are sensible for the EU fleet. That is a judgement about the
+world, not a property of the code, and it needs a domain expert reading the numbers.
+
+Not to be confused with `build_synthetic_pre_baseyear_inflows`: the pre-2005 inflows
+are reconstructed from the 2005 stock through the survival curves. That is ordinary
+cohort back-casting, not stand-in data.
 
 FIXES APPLIED THIS ROUND
 --------------------------

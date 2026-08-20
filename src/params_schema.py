@@ -1172,6 +1172,24 @@ class DisaggregationParams:
     # to the `code/` directory.
     output_dir: str = "../data/processed/"
 
+    # WHERE THE EEA REGISTRATIONS FILE LIVES.
+    #
+    # `EEA_final_data.csv` is an INPUT -- real registration statistics that no stage
+    # of this pipeline can regenerate. It used to be looked up under `output_dir`,
+    # i.e. in `data/processed/`, alongside artifacts that ARE regenerable and that
+    # get cleared out periodically. On 2026-08-20 it was deleted along with the
+    # generated files, and there was no way to recreate it: the fallback only writes
+    # a clearly-labelled synthetic placeholder.
+    #
+    # An input that lives in the output folder will eventually be deleted with the
+    # outputs. It now lives in `data/raw/` with the other inputs, which is the only
+    # place clearing generated results cannot reach.
+    #
+    # SAFE TO CHANGE: only if you actually move the folder. If the file is not found
+    # here, the stage also looks in `output_dir` and says so, so an older working
+    # copy keeps running until the file is moved across.
+    eea_input_dir: str = "../data/raw/"
+
     # The first and last year the model simulates.
     # SAFE TO CHANGE: with care. Widening the window makes the model reconstruct more
     # history by backcasting -- estimating years it has no data for -- so the earliest
