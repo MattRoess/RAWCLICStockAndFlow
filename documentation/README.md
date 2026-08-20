@@ -12,6 +12,9 @@ Start here.
 
 Design records, for decisions that need their reasoning kept:
 
+- [DESIGN_collected_flow_definition.md](DESIGN_collected_flow_definition.md)
+  — what "collected" means, the four implementations that disagreed, and the
+  invariant now asserted so the same class of defect fails loudly.
 - [DESIGN_element_resolution.md](DESIGN_element_resolution.md)
   — how 04_02 resolves elements across the four domains, and the two defects that
   had to be fixed to make it correct (motor denominator, sensor mode-vs-mean).

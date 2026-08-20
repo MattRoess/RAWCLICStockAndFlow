@@ -165,6 +165,7 @@ import src.artifacts as artifacts  # type: ignore
 import src.plotting as plotting  # type: ignore
 from src.disaggregation import (  # type: ignore
     build_tracker_from_disaggregated, add_keys_to_tracker_dict,
+    compute_collected_export_unknown_shares,
 )
 from src.monte_carlo import summarize_distribution, sensitivity_correlations, plot_tornado  # type: ignore
 from src.stockflow_model import build_inflow_draws_by_drivetrain  # type: ignore
@@ -896,16 +897,65 @@ def run_adjusted_scenario(
         ["Region", "Drive Train", "Segment", "year", "value"]
     ].copy()
 
+    # [FIXED] COLLECTED IS THE THREE-WAY SHARE, NOT "EVERYTHING THAT IS NOT UNKNOWN".
+    #
+    # This line used to read `out_survival * (1 - unknown_share)`, which drops export
+    # entirely. Every other implementation in the codebase -- 03_01's tracker split
+    # (`disaggregation.compute_collected_export_unknown_shares`), the Monte Carlo
+    # engine (`cohort_flow_mc.normalize_three_shares`) and
+    # `flowdriven_model.py:1149` -- treats collected/export/unknown as one partition
+    # of the survival outflow. This path was the only one that did not, and it was
+    # the path feeding `tracker_keyed`, hence 04_01 and the material stages.
+    #
+    # Two things were wrong with it. It OVERSTATED collected by the export share:
+    # with the base parameters, 0.900 instead of 0.880 for BEV (+2.3%) and 0.570
+    # instead of 0.490 for every other drivetrain (+16.3%). And it broke the
+    # partition -- `outflow_exp_segments` below still reports export separately, so
+    # collected + export + unknown came to 1.02 for BEV and 1.08 for the others, with
+    # exported vehicles counted twice.
+    #
+    # Reported by Yousef and colleagues, 2026-08-19.
+    #
+    # Uses the shared function so there is one implementation rather than four. It
+    # normalises the three shares to sum to 1, which is identical to subtracting when
+    # the inputs already sum to 1 (they do, for every drivetrain in the base
+    # parameters) and stays correct when a scenario override makes them not.
+    _coll_share_by_drv: dict[str, float] = {}
+    for _drv in set(outflow_surv_new["Drive Train"].unique()):
+        _c, _e, _u = compute_collected_export_unknown_shares(
+            (collected_share_by_drivetrain or {}).get(_drv, 0.0),
+            (export_share_by_drivetrain or {}).get(_drv, 0.0),
+            unknown_whereabouts_share.get(_drv, 0.0),
+        )
+        _coll_share_by_drv[_drv] = float(_c)
+
     disaggregated_new = {
         "inflow_segments": inflow_segments_new,
         "outflow_coll_segments": (
             outflow_surv_new.copy().assign(
-                value=lambda d: d["out_survival"] * (1.0 - d["Drive Train"].map(unknown_whereabouts_share).fillna(0.0).clip(0.0, 1.0))
+                value=lambda d: d["out_survival"] * d["Drive Train"].map(_coll_share_by_drv).fillna(0.0)
             )[["Region", "Drive Train", "Segment", "year", "cohort_year", "value"]]
         ),
         "outflow_exp_segments": outflow_exp_new.copy().rename(columns={"out_export": "value"})[["Region", "Drive Train", "Segment", "year", "cohort_year", "value"]],
         "outflow_unk_segments": outflow_unknown_new.copy().rename(columns={"out_unknown": "value"})[["Region", "Drive Train", "Segment", "year", "cohort_year", "value"]],
     }
+    # THE PARTITION MUST CLOSE. collected + export + unknown has to equal the
+    # survival outflow it was split from -- checked here, on the actual frames that
+    # go into the tracker, rather than trusting the three share dicts that produced
+    # them. This is the check that would have caught the dropped export share above
+    # at the point where it mattered, in the numbers 04_01 consumes.
+    _parts = sum(float(disaggregated_new[k]["value"].sum())
+                 for k in ("outflow_coll_segments", "outflow_exp_segments",
+                           "outflow_unk_segments"))
+    _surv = float(outflow_surv_new["out_survival"].sum())
+    if _surv > 0 and abs(_parts / _surv - 1.0) > 1e-6:
+        raise ValueError(
+            f"[{scenario_name}] outflow partition does not close: collected + export "
+            f"+ unknown = {_parts:,.6f} against a survival outflow of {_surv:,.6f} "
+            f"({100 * (_parts / _surv - 1):+.3f}%). The three sub-flows must sum to "
+            f"out_survival exactly -- a share is being dropped or double-counted."
+        )
+
     tracker_new = build_tracker_from_disaggregated(disaggregated_new, region=materials_region, drivetrains=materials_drivetrains, include_zero=False)
     tracker_keyed_new, missing_new = add_keys_to_tracker_dict(tracker_new, segment_map=segment_map, drv_prefix_map=drv_prefix_map)
 

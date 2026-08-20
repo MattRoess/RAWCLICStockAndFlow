@@ -113,6 +113,30 @@ def compute_collected_export_unknown_shares(collected_share, export_share, unkno
         export_out = export_s / total
         unknown_out = unknown / total
 
+    # THE THREE SHARES ARE A PARTITION. They must sum to 1, because every vehicle
+    # leaving the fleet is collected, exported, or unaccounted for -- there is no
+    # fourth destination. This is asserted rather than assumed because the codebase
+    # has already had one implementation that quietly dropped export
+    # (03_02's tracker path, `out_survival * (1 - unknown)`, overstating collected by
+    # 2.3% for BEV and 16.3% for every other drivetrain and double-counting exported
+    # vehicles). Nothing in the output revealed it; it took a reader comparing two
+    # stages by hand. This check is cheap -- it runs once per drivetrain, not per
+    # draw -- and it is the thing that would have caught it.
+    # Entries whose three inputs were all <= 0 are deliberately forced to (0, 0, 0)
+    # above -- "no outflow to split" -- and are excluded here rather than failing the
+    # sum-to-1 test they cannot pass.
+    _sum = np.asarray(collected_out + export_out + unknown_out, dtype=float)
+    _live = ~np.asarray(zero_total) if is_array else np.asarray(True)
+    _off = np.abs(_sum - 1.0) > 1e-9
+    if np.any(_off & _live):
+        _worst = float(np.max(np.abs(_sum - 1.0)[_live]))
+        raise ValueError(
+            f"collected + export + unknown must be 1 after normalisation, but the "
+            f"worst entry is off by {_worst:.3e}. Inputs were collected="
+            f"{collected_share}, export={export_share}, unknown="
+            f"{unknown_whereabouts_share}."
+        )
+
     return collected_out, export_out, unknown_out
 
 

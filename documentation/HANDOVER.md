@@ -109,6 +109,28 @@ Design, rejected alternatives and measurements:
 **Consequence: any result produced before 14 August 2026 understates inflow
 uncertainty downstream and should be regenerated.**
 
+### 4.1b OPEN — collected-flow fix is in, the re-run is not
+
+Fixed 19 August 2026, reported by Yousef and colleagues. `03_02`'s deterministic
+tracker computed `collected = out_survival x (1 - unknown)`, dropping the export
+share — the only one of four implementations that did. It overstated collected by
+2.3% for BEV and **16.3% for every other drivetrain**, and double-counted exported
+vehicles. Full account: `DESIGN_collected_flow_definition.md`.
+
+Done: the shared function is now used everywhere, and the partition invariant is
+asserted at three choke points. 03_01 re-run clean at 200,000 draws with the guards
+active, numbers unchanged.
+
+**NOT DONE — this is the next thing to run.** 03_02 and then 04_01 must be re-run.
+Until then the fix is verified in code but not on the tracker path, and **04_01's
+collected material masses are still the old, overstated ones**. 03_02 is the ~56 min
+run. Expect collected to fall ~2.3% for BEV and ~16.3% elsewhere, and the new
+partition check to close. If that check FIRES instead, there is a second defect in
+the same area — investigate before changing anything else.
+
+Stage 04_02 is unaffected either way: it reads `per_year_collected` from the Monte
+Carlo engine, which always used the correct three-way split.
+
 ### 4.2 Smaller open items
 
 - **`04_02` element resolution — DONE, 14 August 2026.** All four domains now carry

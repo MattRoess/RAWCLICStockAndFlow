@@ -351,14 +351,36 @@ def main() -> dict[str, Any]:
     # -----------------------------------------------------------------------
     # Split stage-02's aggregate outflow into collected / unknown-fate / export
     # -----------------------------------------------------------------------
-    # THE MATH MODEL: this is presumably a straightforward multiplicative split --
-    #   out_export(t)   = out_survival(t) * export_share[drv]
-    #   out_unknown(t)  = out_survival(t) * unknown_whereabouts_share[drv]
-    #   out_collected(t)= out_survival(t) * (1 - export_share[drv] - unknown_whereabouts_share[drv])
-    # (inferred from how the equivalent computation is done explicitly, in the open, in
-    # 03_02's `disaggregated_new` construction: `out_survival * (1 - unknown_whereabouts_share)`
-    # for the collected share -- I could not confirm the exact formula used inside
-    # `split_outflows_collected_unknown_export` itself without `disaggregation.py`.)
+    # THE MATH MODEL, read from `disaggregation.compute_collected_export_unknown_shares`
+    # rather than inferred. The three shares are clipped to [0, 1] and NORMALISED to
+    # sum to exactly 1, then each multiplies the survival outflow:
+    #
+    #   s_c, s_e, s_u  = (collected, export, unknown) / (collected + export + unknown)
+    #   out_collected(t) = out_survival(t) * s_c
+    #   out_export(t)    = out_survival(t) * s_e
+    #   out_unknown(t)   = out_survival(t) * s_u
+    #
+    # The three are a PARTITION of out_survival -- every vehicle leaving the fleet is
+    # collected, exported or unaccounted for, and there is no fourth destination. That
+    # is now asserted inside the shared function, not just described here.
+    #
+    # With the base parameters the three already sum to 1 for every drivetrain, so
+    # normalising and subtracting agree; normalising is what keeps it correct when a
+    # scenario override changes one share without restating the others.
+    #
+    # WHAT THIS COMMENT USED TO SAY, and why it is worth recording. It gave the formula
+    # as `out_survival * (1 - export_share - unknown_whereabouts_share)` and stated
+    # openly that it was "inferred from how the equivalent computation is done ... in
+    # 03_02's `disaggregated_new` construction: `out_survival * (1 - unknown_
+    # whereabouts_share)`" and that the author "could not confirm the exact formula
+    # used inside `split_outflows_collected_unknown_export` itself".
+    #
+    # That 03_02 line was the defect -- it dropped the export share, overstating
+    # collected by 2.3% for BEV and 16.3% for every other drivetrain. So the broken
+    # implementation had become the documentation for the correct one, and the comment
+    # announced it was unverified while `disaggregation.py` sat in the same repository.
+    # Reported by Yousef and colleagues on 2026-08-19; see
+    # documentation/DESIGN_collected_flow_definition.md.
     # This ALSO mutates `matrices_by_key` -- every (region, drivetrain) entry gains new
     # sub-matrices (e.g. `outflow_exp_df`), confirmed by later cells (03_02) reading
     # `mats["outflow_exp_df"]` directly from `matrices_by_key`, a key that did NOT exist

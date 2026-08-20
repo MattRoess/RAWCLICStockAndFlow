@@ -318,6 +318,21 @@ def normalize_three_shares(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> tuple
     a_out = np.where(zero_total, 0.0, a / safe_total)
     b_out = np.where(zero_total, 0.0, b / safe_total)
     c_out = np.where(zero_total, 0.0, c / safe_total)
+
+    # THE THREE SHARES ARE A PARTITION -- see the identical guard in
+    # `disaggregation.compute_collected_export_unknown_shares`. Asserted because a
+    # fourth implementation of this split (03_02's tracker path) silently dropped one
+    # of the three buckets and nothing in any output showed it. Runs once per entity,
+    # not per draw, so it costs nothing. Entries forced to (0, 0, 0) above are
+    # excluded; they have no outflow to split.
+    _sum = a_out + b_out + c_out
+    _off = (np.abs(_sum - 1.0) > 1e-9) & ~zero_total
+    if np.any(_off):
+        raise ValueError(
+            f"{int(np.sum(_off))} of {np.size(_sum)} normalised share triples do not "
+            f"sum to 1 -- worst off by {float(np.max(np.abs(_sum - 1.0)[~zero_total])):.3e}. "
+            f"The three outcomes must partition the outflow."
+        )
     return a_out, b_out, c_out
 
 
