@@ -9,3 +9,16 @@ __pycache__/
 
 # Generated Excel outputs (e.g. code/params.xlsx) and any raw Excel inputs
 *.xlsx
+# /data/ above is ignored wholesale -- it holds gigabytes of regenerable artifacts.
+# ONE EXCEPTION, force-added and therefore tracked despite that rule:
+#
+#   data/raw/EEA_final_data.csv
+#
+# It is real EEA registration data, 0.67 MB, and NOTHING in this pipeline can
+# regenerate it -- the synthetic fallback writes a labelled placeholder, not data.
+# On 2026-08-20 it was deleted along with the generated artifacts it was wrongly
+# stored beside, and only Time Machine got it back. Tracking it means a clone has it
+# and an accidental delete is a `git checkout` away.
+#
+# Being tracked, it is no longer affected by this file's rules. To add another input
+# the same way: `git add -f <path>`.
