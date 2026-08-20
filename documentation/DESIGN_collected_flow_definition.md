@@ -7,6 +7,58 @@ Reported by Yousef and colleagues, 19 August 2026.
 
 ---
 
+## 0. The two questions, answered directly
+
+Written so this section can be forwarded on its own.
+
+> **Warum ist der „collected flow" auf zwei verschiedene Arten definiert?**
+> In 3.1: `collected = (1 − share of exports − share of unknown whereabouts) × outflow`
+> In 3.2: `collected = (1 − unknown whereabouts) × outflow`
+
+**You are right, and it was a defect — not a modelling choice.** There is one correct
+definition and 03_02 was not using it.
+
+The correct one is 03_01's: collected, export and unknown **partition** the outflow.
+A vehicle leaving the fleet is collected, exported, or unaccounted for; there is no
+fourth destination, so the three must sum to the outflow exactly.
+
+03_02's tracker path dropped the export share. It therefore **overstated collected by
+2.3% for BEV and 16.3% for every other drivetrain**, and because export was still
+reported separately alongside it, exported vehicles were counted twice — the three
+sub-flows summed to 1.02 of the outflow for BEV and 1.08 for the others.
+
+One correction to the question itself: 03_01 does not subtract, it **normalises** —
+`collected / (collected + export + unknown)`. With the current parameters the three
+already sum to 1 for every drivetrain, so normalising and subtracting give the same
+number. Normalising is what keeps it right when a scenario changes one share without
+restating the others.
+
+Fixed 19 August 2026: 03_02 now calls the same shared function as 03_01, and the
+sum-to-one invariant is asserted in three places so this cannot recur silently.
+**The affected results — 04_01 and the material stages — still need re-running.**
+Stage 04_02 (BEV electronics) was never affected; it reads the Monte Carlo path,
+which always used the correct split.
+
+> **Warum heisst es „override"? Warum nicht nur „export_share"?**
+
+Because they are not the share — they are per-scenario **modifications** of it.
+
+The shares themselves live in `StockFlowParams`:
+`export_share_by_drv`, `unknown_whereabouts_share`, `collected_share_by_drv`.
+
+`export_share_overrides` and `unknown_whereabouts_share_overrides` live on
+`ScenarioSpec`, and are **sparse and additive**: an entry replaces the base value for
+that one drivetrain, and a missing drivetrain means "keep the base value", not "zero".
+That is what lets `losses_high` say only `{"BEV": 0.43}` instead of restating all nine
+drivetrains.
+
+So naming them `export_share` would be actively misleading — it would suggest a second
+complete copy of the shares, when a scenario normally sets one or two entries. The
+`_overrides` suffix is the accurate name and matches every other override field on
+that class (`lifetime_change_by_drv`, and so on).
+
+---
+
 ## 1. The definition
 
 Every vehicle leaving the fleet goes to exactly one of three places. There is no
@@ -92,6 +144,23 @@ internal split of the outflow was never in the comparison set.
 collected copper, neodymium and platinum "for recycling", with the composition side
 verified to 1e-14 — while the definition of the flow it multiplied was never examined.
 Precision on one side of a product does not transfer to the other.
+
+**Searches were scoped to the current subtask, not to the concept.** `collected` was
+searched twice during the element work. Both searches were shaped by the question in
+hand — where do the BEV draws come from, what does 04_02 read — and both returned a
+satisfying answer, so both stopped. Four implementations of the same split existed in
+files that were open at the time. Searching for the *quantity* rather than for the
+*current task* would have listed them side by side, which is all it took.
+
+**The common thread is scope, not care.** Each piece of work verified deeply inside
+what it was asked to change and treated everything upstream as given. "Correct" was
+applied to the patch, not to the pipeline the patch fed. The reviewers found this in
+a morning because they asked a different question — *what does this quantity mean in
+each stage* — rather than *does this change work*.
+
+The durable answer is not more diligence. It is that a stated invariant must be
+executable: `disaggregation.py` claimed the parts sum to `out_survival` exactly, and
+the moment that claim became an assertion, the defect had nowhere to hide.
 
 ---
 
