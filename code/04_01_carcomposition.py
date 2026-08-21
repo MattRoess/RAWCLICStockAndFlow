@@ -1327,38 +1327,122 @@ def compute_cohort_year_weights(
 PER_YEAR_DRAW_DIR = "bev_draws"
 
 
-def per_year_count_draws(scenario_name: str, drivetrain: str, segment: str,
-                         year: int, flow_metric: str, n_draws: int) -> np.ndarray | None:
+def _tracker_year_total(tracker: dict | None, drivetrain: str, segment: str,
+                        year: int, metric: str, region: str = "EUR") -> float | None:
     """
-    One (drivetrain, segment)'s vehicle-count draws for a single year, in millions,
-    or None when 03_02 exported no per-year draws for it.
+    That (drivetrain, segment)'s vehicle count for ONE year, from `tracker_keyed`.
 
-    Draws are taken from the FRONT of the array, never sampled, so a run at 50,000
-    is a strict prefix of the same run at 200,000.
+    A point estimate with no uncertainty, but exact, per year, and present for
+    every drivetrain -- which is what makes it the right thing to carry the
+    LEVEL while the summary histogram carries the SHAPE.
+    """
+    if not tracker:
+        return None
+    frame = tracker.get((region, drivetrain))
+    if frame is None:
+        return None
+    rows = frame[(frame["flow"] == metric)
+                 & (frame["scrap_year"] == year)
+                 & (frame["Segment"] == segment)]
+    return float(rows["amount"].sum()) if len(rows) else None
+
+
+def _widest_summary_period(mc_summary: dict, scenario_name: str) -> tuple[int, int] | None:
+    """The longest period this saved summary actually holds, for the shape."""
+    spans = set()
+    for key in mc_summary:
+        parts = str(key).split("__")
+        if len(parts) > 2 and parts[0] == scenario_name and "-" in parts[1]:
+            lo, _, hi = parts[1].partition("-")
+            if lo.isdigit() and hi.isdigit():
+                spans.add((int(lo), int(hi)))
+    return max(spans, key=lambda s: s[1] - s[0]) if spans else None
+
+
+def per_year_count_draws(scenario_name: str, drivetrain: str, segment: str,
+                         year: int, flow_metric: str, n_draws: int,
+                         mc_summary: dict | None = None,
+                         tracker: dict | None = None,
+                         rng: np.random.Generator | None = None,
+                         ) -> tuple[np.ndarray, str] | None:
+    """
+    One (drivetrain, segment)'s vehicle-count draws for a single year, in millions.
+
+    WHY THIS EXISTS
+    ---------------
+    `mc_stage03_02_summary` holds one CUMULATIVE distribution per period, so a
+    single-year period has nothing to look up unless 03_02 was run with that
+    period in `monte_carlo.output_periods`. It was not. Re-running 03_02 to add
+    one is hours of simulation and rewrites the draws stage 04_02 depends on --
+    and it is not necessary, because between them the artifacts already on disk
+    hold both halves of the answer.
+
+    TWO SOURCES, IN ORDER OF HONESTY
+    --------------------------------
+    'exact'   data/processed/bev_draws/<scenario>/<drv>_<seg>_collected.npy is
+              (n_draws, n_years) per-year counts. These ARE the draws. 03_02
+              writes them for stage 04_02, and only for BEV.
+
+    'scaled'  For every other drivetrain: the LEVEL comes from `tracker_keyed`,
+              which holds exact per-year counts for all five, and the SHAPE from
+              that (drivetrain, segment)'s widest cumulative summary, rescaled to
+              the year's level.
+
+              THIS UNDERSTATES THE SPREAD, and knowingly. A cumulative total
+              averages year-to-year variation out, so its relative spread is
+              narrower than any single year's. Treat a 'scaled' interval as a
+              floor on the uncertainty, not an estimate of it. The mean is not
+              affected -- it is the tracker's own exact number.
+
+              Removing the approximation means 03_02 exporting per-year draws
+              for every drivetrain, not just BEV: a widening of its existing
+              export loop, to be done the next time it runs anyway.
+
+    Draws are taken from the FRONT of the array, never sampled, so a run at
+    50,000 is a strict prefix of the same run at 200,000.
+
+    Returns (draws, source) or None when neither source can answer.
     """
     metric = {"cumulative_collected": "collected", "cumulative_inflow": "inflow"}.get(flow_metric)
     if metric is None:
         return None
 
+    # ---- 1. the real per-year draws, when they exist ----------------------
     folder = PROJECT_ROOT / "data" / "processed" / PER_YEAR_DRAW_DIR / scenario_name
     path = folder / f"{drivetrain}_{segment}_{metric}.npy"
     years_path = folder / "years.npy"
-    if not (path.exists() and years_path.exists()):
+    if path.exists() and years_path.exists():
+        years = np.load(years_path)
+        where = np.flatnonzero(years == year)
+        if where.size:
+            array = np.load(path, mmap_mode="r")
+            if array.shape[0] < n_draws:
+                raise ValueError(
+                    f"per_year_count_draws: {path.name} holds {array.shape[0]:,} "
+                    f"draws, fewer than the {n_draws:,} asked for. Lower "
+                    f"materials_mc_n_draws, or re-run 03_02 with more."
+                )
+            return np.asarray(array[:n_draws, int(where[0])], dtype=np.float64), "exact"
+
+    # ---- 2. exact level from the tracker, shape from the summary ----------
+    level = _tracker_year_total(tracker, drivetrain, segment, year, metric)
+    if level is None or mc_summary is None or rng is None:
+        return None
+    if level <= 0:
+        return np.zeros(n_draws), "scaled"
+
+    span = _widest_summary_period(mc_summary, scenario_name)
+    if span is None:
+        return None
+    key = mc_summary_key(scenario_name, span, drivetrain, flow_metric, segment=segment)
+    if key not in mc_summary:
         return None
 
-    years = np.load(years_path)
-    where = np.flatnonzero(years == year)
-    if where.size == 0:
-        return None
-
-    array = np.load(path, mmap_mode="r")
-    if array.shape[0] < n_draws:
-        raise ValueError(
-            f"per_year_count_draws: {path.name} holds {array.shape[0]:,} draws, "
-            f"fewer than the {n_draws:,} asked for. Lower materials_mc_n_draws, or "
-            f"re-run 03_02 with more."
-        )
-    return np.asarray(array[:n_draws, int(where[0])], dtype=np.float64)
+    shape = bootstrap_vehicle_count_draws_from_summary(mc_summary, key, n_draws, rng)
+    cumulative_mean = float(np.mean(shape))
+    if cumulative_mean <= 0:
+        return np.full(n_draws, level), "scaled"
+    return shape * (level / cumulative_mean), "scaled"
 
 
 def combine_flow_and_composition_draws(
@@ -1370,6 +1454,7 @@ def combine_flow_and_composition_draws(
     n_draws: int,
     rng: np.random.Generator,
     direct: bool = False,
+    tracker: dict | None = None,
 ) -> dict[tuple, np.ndarray]:
     """
     Combine ONE scenario's vehicle-count MC uncertainty with per-vehicle composition MC
@@ -1457,7 +1542,7 @@ def combine_flow_and_composition_draws(
     count_draws_cache: dict[tuple[str, str], np.ndarray | None] = {}
     mass_draws_by_group: dict[tuple, np.ndarray] = {}
     skipped_groups: set[tuple[str, str]] = set()
-    exact_groups: set[tuple[str, str]] = set()
+    per_year_source: dict[str, set[tuple[str, str]]] = {}
 
     for comp_key, comp_draws in composition_draws_by_group.items():
         drivetrain, segment, components, material = comp_key
@@ -1468,13 +1553,15 @@ def combine_flow_and_composition_draws(
             # quantity the histogram below approximates, so preferring them is
             # not a fallback -- it is the better source, and it is what makes a
             # single-year period possible without re-running 03_02.
-            exact = None
+            found = None
             if period[0] == period[1] and not direct:
-                exact = per_year_count_draws(scenario_name, drivetrain, segment,
-                                             period[0], flow_metric, n_draws)
-            if exact is not None:
-                count_draws_cache[(drivetrain, segment)] = exact * VEHICLE_COUNT_UNIT_SCALE
-                exact_groups.add((drivetrain, segment))
+                found = per_year_count_draws(
+                    scenario_name, drivetrain, segment, period[0], flow_metric,
+                    n_draws, mc_summary=mc_summary, tracker=tracker, rng=rng)
+            if found is not None:
+                draws, source = found
+                count_draws_cache[(drivetrain, segment)] = draws * VEHICLE_COUNT_UNIT_SCALE
+                per_year_source.setdefault(source, set()).add((drivetrain, segment))
             else:
                 key = mc_summary_key(scenario_name, period, drivetrain, flow_metric, segment=None if direct else segment, direct=direct)
                 try:
@@ -1496,12 +1583,19 @@ def combine_flow_and_composition_draws(
 
         mass_draws_by_group[(drivetrain, segment, components, material)] = count_draws * comp_draws
 
-    if exact_groups:
-        print(f"[combine_flow_and_composition_draws] {len(exact_groups)} "
-              f"(drivetrain, segment) combination(s) used REAL per-year draws from "
-              f"data/processed/{PER_YEAR_DRAW_DIR} for {period[0]}, not a bootstrap "
-              f"from the period histogram: "
-              f"{sorted({d for d, _ in exact_groups})}")
+    for source, groups in sorted(per_year_source.items()):
+        drivetrains = sorted({d for d, _ in groups})
+        if source == "exact":
+            print(f"[combine_flow_and_composition_draws] {len(groups)} combination(s) "
+                  f"used REAL per-year draws for {period[0]} "
+                  f"(data/processed/{PER_YEAR_DRAW_DIR}): {drivetrains}")
+        else:
+            print(f"[combine_flow_and_composition_draws] {len(groups)} combination(s) "
+                  f"used the tracker's exact per-year LEVEL for {period[0]} with the "
+                  f"cumulative summary's SHAPE: {drivetrains}\n"
+                  f"    Their mean is exact; their spread is a FLOOR, because a "
+                  f"cumulative total averages year-to-year variation out. Only BEV "
+                  f"has real per-year draws (03_02 exports BEV only).")
     if skipped_groups:
         print(f"[combine_flow_and_composition_draws] WARNING: {len(skipped_groups)} "
               f"(drivetrain, segment) combination(s) have no matching mc_stage03_02_summary "
@@ -3100,7 +3194,7 @@ def main() -> dict[str, Any]:
                 print(f"  [{flow}] period {period}: MC mass, 12-segment ({n_draws:,} draws)...")
                 mc_draws_tables_flow[(period, flow)] = combine_flow_and_composition_draws(
                     mc_summary, scenario_name, period, flow_metric, mixed_composition_draws,
-                    n_draws, scenario_rng,
+                    n_draws, scenario_rng, tracker=tracker_keyed,
                 )
                 del mixed_composition_draws
 
