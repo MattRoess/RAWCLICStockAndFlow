@@ -807,12 +807,32 @@ class StockFlowParams:
     # SAFE TO CHANGE: only if the drivetrain lists themselves change. Every fine
     # drivetrain used downstream needs an entry, and every value must be a
     # drivetrain stage 02 actually models.
+    # THIS MUST MATCH WHERE EACH DRIVETRAIN'S VOLUME ACTUALLY COMES FROM.
+    # HEV maps to Liquids, not Hybrid, because HEV is carved OUT of Liquids -- see
+    # `disaggregation.hev_carved_from_liquids`. It was left pointing at Hybrid when
+    # that change was made, and the symptom was visible in the figures: HEV's
+    # uncertainty band nearly vanished. Measured, HEV's spread was 1.78% against
+    # 6.77% for Diesel and 10.93% for Petrol, because it was being handed the Hybrid
+    # group's deviation -- sized for a ~1.3 million quantity -- spread across its own
+    # ~3.9 million level. Petrol and Diesel were over-spread for the mirror-image
+    # reason: the whole Liquids deviation landed on a base that no longer included HEV.
+    #
+    # The sum-to-one guard in 03_02 cannot catch this. Shares still sum to 1 inside
+    # each group whichever group a drivetrain is put in; conservation says nothing
+    # about whether it is the RIGHT group. Only the figures showed it.
+    #
+    # If `hev_carved_from_liquids` is set False to reproduce an old result, HEV must
+    # be moved back to Hybrid here or its uncertainty will be wrong again.
+    #
+    # SAFE TO CHANGE: only if the drivetrain lists themselves change. Every fine
+    # drivetrain used downstream needs an entry, and every value must be a
+    # drivetrain stage 02 actually models.
     inflow_uncertainty_parent_by_drv: tuple[tuple[str, str], ...] = (
         ("BEV", "BEV"),
         ("Petrol", "Liquids"),
         ("Diesel", "Liquids"),
-        ("HEV", "Hybrid"),
-        ("PHEV", "Hybrid"),
+        ("HEV", "Liquids"),      # carved out of Liquids, so its volume varies with Liquids
+        ("PHEV", "Hybrid"),      # REMIND's "Hybrid electric" IS the plug-in hybrid
     )
 
     # HOW UNCERTAIN THE LIFETIMES ARE, per drivetrain, as a fraction: 0.15 means

@@ -1445,6 +1445,7 @@ def main() -> dict[str, Any]:
             prior = inflow_draws_for_scenario or {}
             composed: dict = {}
             _share_sum: dict[tuple, float] = {}
+            _has_volume: dict[tuple, bool] = {}
             _dev_cache: dict[tuple, np.ndarray] = {}
             for region, drv, seg, yr, val, par, parent_total in det.itertuples(
                 index=False, name=None
@@ -1471,6 +1472,17 @@ def main() -> dict[str, Any]:
 
                 share = (float(val) / float(parent_total)) if parent_total else 0.0
                 _share_sum[ck] = _share_sum.get(ck, 0.0) + share
+                # Remember whether this parent had any volume at all this year, so
+                # the guard below can tell "nothing to divide" apart from "a share
+                # went missing". See the note there.
+                #
+                # NON-ZERO, not positive. A parent's deterministic total can be
+                # NEGATIVE in a phase-out year -- stage 02's inflow is a residual and
+                # `negative_inflow_policy = "report_only"` records the negative rather
+                # than simulating it. The shares still divide it correctly and still
+                # sum to 1. Testing `> 0` here declared Hybrid 2041 volume-less and
+                # then tripped the very guard below on shares that were right.
+                _has_volume[ck] = _has_volume.get(ck, False) or (float(parent_total) != 0.0)
 
                 key = (region, drv, seg)
                 existing = prior.get(key, {}).get(int(yr))
@@ -1483,15 +1495,41 @@ def main() -> dict[str, Any]:
             # those shares must sum to 1 for the year. This is the check that would
             # have caught defect 1: with the old grouping it summed to 1 per
             # DRIVETRAIN, so a parent with two children summed to 2.
-            _bad = {k: s for k, s in _share_sum.items() if abs(s - 1.0) > 1e-6}
+            #
+            # A PARENT WITH NO VOLUME THAT YEAR IS EXEMPT, and this is not a
+            # loophole -- it is the difference between "nothing to divide" and "a
+            # share went missing". BEV has zero inflow before 2011, so in 2005 its
+            # parent total is 0, every share is 0/0 -> 0, and the sum is 0. Demanding
+            # 1 there is demanding that nothing be divided into something. The first
+            # version of this guard did exactly that and stopped a real 03_02 run on
+            # 48 legitimate (parent, year) pairs. The identical case is handled the
+            # same way in `disaggregation.compute_collected_export_unknown_shares`,
+            # which is where the pattern should have been copied from.
+            #
+            # The guard still bites where it matters: any parent that HAS volume must
+            # have its shares sum to 1.
+            _bad = {k: s for k, s in _share_sum.items()
+                    if _has_volume.get(k, False) and abs(s - 1.0) > 1e-6}
             if _bad:
                 k, s = sorted(_bad.items())[0]
                 raise ValueError(
                     f"[{name}] stage-02 inflow shares do not sum to 1 for "
                     f"parent={k[0]!r} year={k[1]}: got {s:.6f}, across {len(_bad)} "
-                    f"(parent, year) pairs. Each parent's volume must be DIVIDED "
-                    f"among its children, not handed to each of them. See the note "
-                    f"above this block and code/test_stage03_inflow.py."
+                    f"(parent, year) pairs with nonzero parent volume. Each parent's "
+                    f"volume must be DIVIDED among its children, not handed to each "
+                    f"of them. See the note above this block and "
+                    f"code/test_stage03_inflow.py."
+                )
+            # A parent WITH volume whose shares sum to zero would mean the volume
+            # vanished; that is caught above. A parent with no volume must sum to
+            # zero, which is asserted here so the exemption cannot hide a real loss.
+            _leaked = {k: s for k, s in _share_sum.items()
+                       if not _has_volume.get(k, False) and abs(s) > 1e-12}
+            if _leaked:
+                k, s = sorted(_leaked.items())[0]
+                raise ValueError(
+                    f"[{name}] parent={k[0]!r} year={k[1]} has no volume, yet its "
+                    f"shares sum to {s:.6e}. Volume is being created from nothing."
                 )
             inflow_draws_for_scenario = composed
 

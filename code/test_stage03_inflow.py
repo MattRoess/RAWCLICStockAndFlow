@@ -232,6 +232,49 @@ def main() -> int:
           f"Diesel 95% width: 2005 {w05:.4f} (stage 02 has no information there), "
           f"2006 {w06:.4f}")
 
+    # ---- a parent with no volume that year ---------------------------------
+    # THE CASE THAT GOT THROUGH. BEV has zero inflow before 2011, so in 2005 its
+    # parent total is 0, every share is 0, and they sum to 0 -- there is nothing to
+    # divide. The first version of the share guard demanded 1 unconditionally and
+    # stopped a real 03_02 run on 48 legitimate (parent, year) pairs.
+    #
+    # The tests missed it because this fixture is built from `tracker_keyed_BAU`,
+    # which drops zero rows, while 03_02 composes from `inflow_by_scenario`, which
+    # keeps them. A fixture that cannot represent the failing input cannot test for
+    # it, so the zero-volume case is constructed explicitly here.
+    def share_sums(records):
+        """The share arithmetic exactly as 03_02 does it."""
+        tot, has_vol = {}, {}
+        parent_total = {}
+        for r in records:
+            k = (r["parent"], r["year"])
+            parent_total[k] = parent_total.get(k, 0.0) + r["value"]
+        for r in records:
+            k = (r["parent"], r["year"])
+            pt = parent_total[k]
+            tot[k] = tot.get(k, 0.0) + ((r["value"] / pt) if pt else 0.0)
+            has_vol[k] = has_vol.get(k, False) or pt != 0.0
+        return tot, has_vol
+
+    zero_case = [{"parent": "BEV", "year": 2005, "value": 0.0} for _ in range(12)]
+    live_case = [{"parent": "Liquids", "year": 2005, "value": 1.0} for _ in range(12)]
+    # A phase-out year: the deterministic total is NEGATIVE (stage 02's inflow is a
+    # residual, recorded not simulated under negative_inflow_policy="report_only").
+    # The shares still divide it and still sum to 1, so this parent is NOT exempt.
+    # Testing `> 0` instead of `!= 0` made this case trip the guard on correct shares.
+    neg_case = [{"parent": "Hybrid", "year": 2041, "value": -0.5} for _ in range(12)]
+    z_tot, z_has = share_sums(zero_case)
+    l_tot, l_has = share_sums(live_case)
+    n_tot, n_has = share_sums(neg_case)
+    ok = (abs(z_tot[("BEV", 2005)]) < 1e-12 and z_has[("BEV", 2005)] is False
+          and abs(l_tot[("Liquids", 2005)] - 1.0) < 1e-12 and l_has[("Liquids", 2005)] is True
+          and abs(n_tot[("Hybrid", 2041)] - 1.0) < 1e-12 and n_has[("Hybrid", 2041)] is True)
+    check("zero volume is exempt; positive AND NEGATIVE volume must sum to 1",
+          ok,
+          f"zero {z_tot[('BEV', 2005)]:.2e} (exempt={not z_has[('BEV', 2005)]}); "
+          f"positive {l_tot[('Liquids', 2005)]:.6f} (checked={l_has[('Liquids', 2005)]}); "
+          f"negative {n_tot[('Hybrid', 2041)]:.6f} (checked={n_has[('Hybrid', 2041)]})")
+
     # ---- the HEV carve (option B) ------------------------------------------
     # HEV is carved out of Liquids, not split off Hybrid. REMIND has no non-plug-in
     # hybrid category at all -- "Hybrid electric" is the plug-in -- so splitting it
@@ -287,6 +330,53 @@ def main() -> int:
               abs(float(tbl.loc[2019, "HEV"]) - obs19) < 1e-9,
               f"table {100*float(tbl.loc[2019,'HEV']):.3f}%  vs observed (scoped) "
               f"{100*obs19:.3f}%")
+
+    # ---- the uncertainty parent must be where the volume comes from ---------
+    # THE CHECK THAT WAS MISSING. When HEV was carved out of Liquids, the taxonomy
+    # changed but `inflow_uncertainty_parent_by_drv` was left pointing HEV at Hybrid.
+    # HEV then received the Hybrid group's deviation -- sized for a ~1.3 million
+    # quantity -- spread across its own ~3.9 million level, and its band all but
+    # disappeared: CV 1.78% against 6.77% for Diesel and 10.93% for Petrol.
+    #
+    # THE SUM-TO-ONE GUARD CANNOT SEE THIS. Shares sum to 1 inside whichever group a
+    # drivetrain is placed in; conservation says nothing about it being the RIGHT
+    # group. It took a person looking at a figure.
+    #
+    # So this tests the thing conservation cannot: the drivetrains declared under a
+    # parent must actually ACCOUNT FOR that parent's volume. With HEV wrongly under
+    # Hybrid, HEV+PHEV came to ~2.3x Hybrid's own volume, which is what fails here.
+    #
+    # The bound is wide on purpose. Stage 02's mean and stage 03's deterministic
+    # value legitimately differ (inflow is nonlinear in the sampled lifetime, so
+    # E[inflow] != inflow(E[lambda]) -- measured 0.87 to 0.98), and per-draw flooring
+    # lifts near-zero years. This is here to catch a drivetrain in the wrong family,
+    # not to police that difference.
+    by_parent: dict[str, list[str]] = {}
+    for child, par in parent_of.items():
+        by_parent.setdefault(par, []).append(child)
+
+    worst_pair, worst_ratio = None, 1.0
+    detail_rows = []
+    for par, kids in sorted(by_parent.items()):
+        arr = draws.get(kids[0])          # every child holds the PARENT's array
+        if arr is None:
+            continue
+        yrs_ok = [y for y in sorted(yi) if np.isfinite(arr[yi[y]]).all()]
+        if not yrs_ok:
+            continue
+        parent_vol = float(sum(np.mean(arr[yi[y]]) for y in yrs_ok))
+        kids_vol = float(sum(float(determ.get((k, y), 0.0)) for k in kids for y in yrs_ok))
+        if abs(parent_vol) < 1e-9:
+            continue
+        ratio = kids_vol / parent_vol
+        detail_rows.append(f"{par}<-{'+'.join(sorted(kids))} {ratio:.2f}x")
+        if abs(ratio - 1.0) > abs(worst_ratio - 1.0):
+            worst_pair, worst_ratio = par, ratio
+
+    check("each parent's declared children account for its volume",
+          worst_pair is None or 0.5 <= worst_ratio <= 2.0,
+          f"worst: {worst_pair} at {worst_ratio:.2f}x  |  " + ", ".join(detail_rows)
+          + "  (HEV under Hybrid gave ~2.3x)")
 
     n_fail = sum(1 for s, _, _ in _results if s == FAIL)
     print(f"\n  {len(_results) - n_fail}/{len(_results)} passed")
