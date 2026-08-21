@@ -1643,7 +1643,7 @@ class MaterialsParams:
     # Monte Carlo section, but kept separate so this stage can be run at a different
     # cost from the rest of the pipeline.
     # SAFE TO CHANGE: yes -- lower it for a quick check.
-    materials_mc_n_draws: int = 200_000
+    materials_mc_n_draws: int = 50_000
 
     # Fixes this stage's random numbers so a re-run reproduces identical results.
     # SAFE TO CHANGE: yes, any whole number.
@@ -1890,7 +1890,7 @@ class MaterialsParams:
     #     ()        write nothing (the default)
     #     (2040,)   that one year
     # SAFE TO CHANGE: yes, together with monte_carlo.output_periods.
-    carcomposition_draws_years: tuple[int, ...] = ()
+    carcomposition_draws_years: tuple[int, ...] = (2040,)
 
     # WHERE THOSE DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then one per <drivetrain>_<flow>, then one .npy
@@ -2063,7 +2063,12 @@ class MonteCarloParams:
     #     [(1975, 2070),   # the whole model horizon
     #      (2030, 2030),   # one single year
     #      (2030, 2040)]   # a decade
-    output_periods: list[tuple[int, int]] = field(default_factory=lambda: [(1975, 2070)])
+    # (1975, 2070) is the cumulative headline period every figure and saved
+    # table is keyed on -- keep it, or those keys disappear. (2040, 2040) is
+    # added for the recovery-model export, which needs single-year periods
+    # (see materials.carcomposition_draws_years).
+    output_periods: list[tuple[int, int]] = field(
+        default_factory=lambda: [(1975, 2070), (2040, 2040)])
 
     def validate(self) -> list[str]:
         issues: list[str] = []

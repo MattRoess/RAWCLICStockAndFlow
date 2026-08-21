@@ -1303,6 +1303,64 @@ def compute_cohort_year_weights(
     return weights
 
 
+
+# -----------------------------------------------------------------------------------
+# PER-YEAR VEHICLE COUNTS, FROM DRAWS THAT ALREADY EXIST
+# -----------------------------------------------------------------------------------
+# `mc_stage03_02_summary` holds one CUMULATIVE distribution per period, so a
+# single-year period only works if 03_02 was run with that period in
+# `monte_carlo.output_periods`. It was not, and re-running 03_02 to add one is
+# hours of simulation for a number that is, for BEV, already on disk:
+#
+#     data/processed/bev_draws/<scenario>/BEV_<segment>_collected.npy
+#
+# is (n_draws, n_years) per-year vehicle counts in millions -- the export 03_02
+# already writes for stage 04_02. Same quantity, same scenario, same seed, and
+# per-year rather than cumulative. Reading it is strictly better than
+# bootstrapping from a histogram, because these ARE the draws.
+#
+# ONLY BEV HAS THEM. 03_02's export is BEV-only, so a single-year period yields
+# BEV and nothing else; the other four drivetrains fall back to the summary and
+# are skipped as before. Widening that export to every drivetrain is a one-line
+# change to 03_02's own filter, to be made next time it runs anyway.
+
+PER_YEAR_DRAW_DIR = "bev_draws"
+
+
+def per_year_count_draws(scenario_name: str, drivetrain: str, segment: str,
+                         year: int, flow_metric: str, n_draws: int) -> np.ndarray | None:
+    """
+    One (drivetrain, segment)'s vehicle-count draws for a single year, in millions,
+    or None when 03_02 exported no per-year draws for it.
+
+    Draws are taken from the FRONT of the array, never sampled, so a run at 50,000
+    is a strict prefix of the same run at 200,000.
+    """
+    metric = {"cumulative_collected": "collected", "cumulative_inflow": "inflow"}.get(flow_metric)
+    if metric is None:
+        return None
+
+    folder = PROJECT_ROOT / "data" / "processed" / PER_YEAR_DRAW_DIR / scenario_name
+    path = folder / f"{drivetrain}_{segment}_{metric}.npy"
+    years_path = folder / "years.npy"
+    if not (path.exists() and years_path.exists()):
+        return None
+
+    years = np.load(years_path)
+    where = np.flatnonzero(years == year)
+    if where.size == 0:
+        return None
+
+    array = np.load(path, mmap_mode="r")
+    if array.shape[0] < n_draws:
+        raise ValueError(
+            f"per_year_count_draws: {path.name} holds {array.shape[0]:,} draws, "
+            f"fewer than the {n_draws:,} asked for. Lower materials_mc_n_draws, or "
+            f"re-run 03_02 with more."
+        )
+    return np.asarray(array[:n_draws, int(where[0])], dtype=np.float64)
+
+
 def combine_flow_and_composition_draws(
     mc_summary: dict,
     scenario_name: str,
@@ -1399,19 +1457,33 @@ def combine_flow_and_composition_draws(
     count_draws_cache: dict[tuple[str, str], np.ndarray | None] = {}
     mass_draws_by_group: dict[tuple, np.ndarray] = {}
     skipped_groups: set[tuple[str, str]] = set()
+    exact_groups: set[tuple[str, str]] = set()
 
     for comp_key, comp_draws in composition_draws_by_group.items():
         drivetrain, segment, components, material = comp_key
 
         if (drivetrain, segment) not in count_draws_cache:
-            key = mc_summary_key(scenario_name, period, drivetrain, flow_metric, segment=None if direct else segment, direct=direct)
-            try:
-                count_draws_cache[(drivetrain, segment)] = bootstrap_vehicle_count_draws_from_summary(
-                    mc_summary, key, n_draws, rng
-                ) * VEHICLE_COUNT_UNIT_SCALE
-            except KeyError:
-                count_draws_cache[(drivetrain, segment)] = None
-                skipped_groups.add((drivetrain, segment))
+            # A single-year period first asks whether real per-year draws exist
+            # for this group (see per_year_count_draws). They are the same
+            # quantity the histogram below approximates, so preferring them is
+            # not a fallback -- it is the better source, and it is what makes a
+            # single-year period possible without re-running 03_02.
+            exact = None
+            if period[0] == period[1] and not direct:
+                exact = per_year_count_draws(scenario_name, drivetrain, segment,
+                                             period[0], flow_metric, n_draws)
+            if exact is not None:
+                count_draws_cache[(drivetrain, segment)] = exact * VEHICLE_COUNT_UNIT_SCALE
+                exact_groups.add((drivetrain, segment))
+            else:
+                key = mc_summary_key(scenario_name, period, drivetrain, flow_metric, segment=None if direct else segment, direct=direct)
+                try:
+                    count_draws_cache[(drivetrain, segment)] = bootstrap_vehicle_count_draws_from_summary(
+                        mc_summary, key, n_draws, rng
+                    ) * VEHICLE_COUNT_UNIT_SCALE
+                except KeyError:
+                    count_draws_cache[(drivetrain, segment)] = None
+                    skipped_groups.add((drivetrain, segment))
         count_draws = count_draws_cache[(drivetrain, segment)]
         if count_draws is None:
             continue  # no matching mc_summary entry -- treated as zero vehicles, zero mass
@@ -1424,6 +1496,12 @@ def combine_flow_and_composition_draws(
 
         mass_draws_by_group[(drivetrain, segment, components, material)] = count_draws * comp_draws
 
+    if exact_groups:
+        print(f"[combine_flow_and_composition_draws] {len(exact_groups)} "
+              f"(drivetrain, segment) combination(s) used REAL per-year draws from "
+              f"data/processed/{PER_YEAR_DRAW_DIR} for {period[0]}, not a bootstrap "
+              f"from the period histogram: "
+              f"{sorted({d for d, _ in exact_groups})}")
     if skipped_groups:
         print(f"[combine_flow_and_composition_draws] WARNING: {len(skipped_groups)} "
               f"(drivetrain, segment) combination(s) have no matching mc_stage03_02_summary "
