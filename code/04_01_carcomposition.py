@@ -2192,6 +2192,105 @@ def _scenario_color_map(scenario_names: list[str]) -> dict[str, Any]:
     return {name: cmap(i % 10) for i, name in enumerate(scenario_names)}
 
 
+
+# ---------------------------------------------------------------------------
+# THE EXPORT THE RECOVERY MODEL READS
+# ---------------------------------------------------------------------------
+
+KG_PER_KILOTONNE = 1_000_000.0
+
+
+def _write_carcomposition_draws(p04, scenario_name: str, flow: str,
+                                periods, mc_draws_tables_flow: dict,
+                                n_draws: int) -> None:
+    """
+    Write one scenario-flow's mass draws in the layout RAWCLICRecoveryModel reads.
+
+        <out_dir>/<scenario>/years.npy                       the year axis
+        <out_dir>/<scenario>/<drivetrain>_<flow>/
+            __component____elvBIW.npy      the component's own mass
+            calAHSS__elvBIW.npy            one material within it
+
+    Each array is (n_draws, n_years), float32, in KILOTONNES -- the unit the
+    reader assumes, where this stage works in kg.
+
+    THREE THINGS THIS DOES THAT ARE DECISIONS, NOT MECHANICS
+    --------------------------------------------------------
+    1. ONE FOLDER PER DRIVETRAIN. The recovery model has one product at
+       Layer 1, and here that product is the drivetrain -- a battery is pulled
+       from a BEV and a catalytic converter from a Petrol, so they are not the
+       same recovery study. Five drivetrains therefore mean five case folders
+       downstream, each naming its own `<drivetrain>_<flow>` and sharing one
+       coefficient table. Folding drivetrain into the component name instead
+       would put it at Layer 2, where the coefficients are keyed, and every
+       component would silently become five.
+
+    2. SEGMENTS ARE SUMMED. This stage carries 12 of them; the recovery model
+       has no layer for them. Summing is right if recovery does not depend on
+       car size, which is the assumption until a segment-specific coefficient
+       turns up. If one ever does, the alternative is a run per segment rather
+       than a new layer.
+
+    3. A PERIOD MUST BE ONE YEAR. This stage's draws are CUMULATIVE over a
+       period -- `monte_carlo.output_periods` defaults to one entry covering
+       1975-2070 -- while the recovery model's axis is years. So only
+       single-year periods are exported, and a multi-year one is skipped with
+       a note rather than written under a year label it does not mean. To get
+       an annual axis, set output_periods to single-year entries:
+
+           output_periods = [(y, y) for y in (2030, 2035, 2040, 2045, 2050)]
+    """
+    wanted = tuple(int(y) for y in (p04.carcomposition_draws_years or ()))
+    if not wanted:
+        return
+
+    single = {period[0]: period for period in periods if period[0] == period[1]}
+    present = [y for y in wanted if y in single]
+    skipped = sorted(set(wanted) - set(present))
+    if skipped:
+        print(f"    NOTE: carcomposition draw export skips {skipped} -- no "
+              f"single-year period for them in monte_carlo.output_periods.")
+    if not present:
+        return
+
+    out_dir = (PROJECT_ROOT / "data" / "processed"
+               / p04.carcomposition_draws_out_dir / scenario_name)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.save(out_dir / "years.npy", np.array(present))
+
+    # Sum over segment, and accumulate the component's own mass alongside its
+    # materials in the same pass -- the component total is the sum of the
+    # materials in it, so deriving it here keeps the two from disagreeing.
+    material: dict[tuple[str, str, str], np.ndarray] = {}
+    component: dict[tuple[str, str], np.ndarray] = {}
+    for column, year in enumerate(present):
+        table = mc_draws_tables_flow[(single[year], flow)]
+        for (drv, _segment, comp, mat), draws in table.items():
+            values = np.asarray(draws, dtype=np.float64) / KG_PER_KILOTONNE
+            for store, key in ((material, (drv, comp, mat)), (component, (drv, comp))):
+                if key not in store:
+                    store[key] = np.zeros((n_draws, len(present)))
+                store[key][:, column] += values
+
+    written = 0
+    for (drv, comp), array in sorted(component.items()):
+        folder = out_dir / f"{drv}_{flow}"
+        folder.mkdir(parents=True, exist_ok=True)
+        np.save(folder / f"__component____{comp}.npy", array.astype(np.float32))
+        written += 1
+    for (drv, comp, mat), array in sorted(material.items()):
+        np.save(out_dir / f"{drv}_{flow}" / f"{mat}__{comp}.npy",
+                array.astype(np.float32))
+        written += 1
+
+    size = written * n_draws * len(present) * 4 / 1e9
+    total = sum(a[:, -1].mean() for a in component.values())
+    print(f"    carcomposition draws -> "
+          f"{out_dir.relative_to(PROJECT_ROOT)}/<drivetrain>_{flow}  "
+          f"years {present}  {written} arrays  (about {size:.2f} GB)")
+    print(f"      {present[-1]}: {total:,.2f} kt across all drivetrains")
+
+
 def _extract_cross_scenario_summary(
     mc_draws_tables: dict[tuple, dict[tuple, np.ndarray]],
 ) -> dict[str, dict[tuple, np.ndarray]]:
@@ -3026,6 +3125,22 @@ def main() -> dict[str, Any]:
             #
             # Turn the parameter on if you want them for analysis outside this
             # pipeline; be aware it is tens of GB per run at 200,000 draws.
+            # [NEW] The slice of draws the recovery model reads.
+            #
+            # Same reasoning as 04_02's element-draw export: this stage keeps
+            # percentiles and drops the draws, which is right for a stage that
+            # plots bands, but a recovery model cannot use percentiles. It
+            # multiplies these by transfer coefficients that are themselves
+            # drawn, and a mean times a mean is not the mean of a product. So
+            # the draws for a few named periods are written on the way past,
+            # in the .npy layout RAWCLICRecoveryModel reads.
+            #
+            # Not the whole thing: that is the 8-17 GB per scenario-flow the
+            # block below refuses to write by default, and it would be no more
+            # readable for being on disk.
+            _write_carcomposition_draws(
+                p04, scenario_name, flow, periods, mc_draws_tables_flow, n_draws)
+
             if p04.persist_mc_mass_draws:
                 saved_paths.update(save_unregistered_scenario_outputs(artifacts_dir, {
                     f"04_01_mc_mass_draws_{scenario_name}_{flow}.pkl": mc_draws_tables_flow,

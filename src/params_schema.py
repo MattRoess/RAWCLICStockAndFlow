@@ -1868,6 +1868,39 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes.
     bev_electronics_element_draws_out_dir: str = "element_draws"
 
+    # WHICH YEARS OF 04_01's MASS DRAWS TO WRITE for RAWCLICRecoveryModel.
+    #
+    # Same trade as bev_electronics_element_draws_years above: the full
+    # per-draw arrays are 8 to 17 GB per scenario-flow (see
+    # persist_mc_mass_draws, which is off for exactly that reason), while a
+    # few named years are affordable and are what a recovery result is
+    # reported for. One year of the 476 (drivetrain, component, material)
+    # combinations is about 0.4 GB at 200,000 draws.
+    #
+    # A YEAR HERE MUST ALSO BE A SINGLE-YEAR PERIOD IN
+    # monte_carlo.output_periods, because 04_01's draws are cumulative over a
+    # period and the recovery model's axis is years. The default
+    # output_periods is one entry covering 1975-2070, which is cumulative and
+    # therefore exports nothing. To get an annual axis, set:
+    #
+    #     output_periods = [(y, y) for y in (2030, 2035, 2040, 2045, 2050)]
+    #
+    # A year with no matching single-year period is skipped with a note.
+    #
+    #     ()        write nothing (the default)
+    #     (2040,)   that one year
+    # SAFE TO CHANGE: yes, together with monte_carlo.output_periods.
+    carcomposition_draws_years: tuple[int, ...] = ()
+
+    # WHERE THOSE DRAWS ARE WRITTEN, under data/processed/.
+    # One folder per scenario, then one per <drivetrain>_<flow>, then one .npy
+    # per component and per component-and-material. One folder per drivetrain
+    # because the recovery model has a single product at Layer 1 and here that
+    # product IS the drivetrain -- a battery is pulled from a BEV and a
+    # catalytic converter from a Petrol, so they are different studies.
+    # SAFE TO CHANGE: yes.
+    carcomposition_draws_out_dir: str = "carcomposition_draws"
+
     def validate(self) -> list[str]:
         issues: list[str] = []
         if not (0.0 <= self.bev_electronics_segment_tilt <= 1.0):
