@@ -8,21 +8,12 @@ RUN THIS AFTER ANY CHANGE to the composition block in `03_02_adjustedflows.py`, 
 `build_inflow_draws_by_drivetrain`, or to `inflow_uncertainty_parent_by_drv`. It runs
 in about a minute at the reduced draw count below and needs no pipeline run.
 
-WHY THIS FILE EXISTS. That block was wrong for four days and produced inflow figures
-that were off by a factor of two, with nothing in the pipeline detecting it: every
-stage ran, every artifact was written, every figure rendered. It was found by a
-reader comparing two charts by hand. Each test below is one of the things that would
-have caught it immediately.
+WHY. That block was wrong by a factor of two for four days while every stage ran and
+every figure rendered; a reader comparing two charts found it. Each test is one thing
+that would have caught it. They check the RULE against real data, not the plumbing.
 
-The tests check the RULE, replayed against the real data, not the plumbing. Test 1
-is the decisive one -- it fails loudly against the old rule and passes against the
-current one.
-
-EXTERNAL VALIDATION. Tests 5 and 6 compare against real EU registration statistics
-(the EEA file on disk, itself confirmed against ACEA's published 2023 EU total of
-10.5 million to within 2%). Model output that drifts far from the real record is a
-result worth knowing about, so those tests carry deliberately wide bounds: they exist
-to catch a factor-of-two regression, not to police normal modelling change.
+Bounds against the EEA/ACEA record are deliberately wide -- they catch a
+factor-of-two regression, not ordinary modelling drift.
 """
 from __future__ import annotations
 
@@ -152,15 +143,10 @@ def main() -> int:
           f"worst deviation {worst_r[0]:.2e} at {worst_r[1]} {worst_r[2]} "
           f"across {len(ratios)} (drivetrain, year) pairs")
 
-    # 2b. FLOORING CAN ONLY LIFT, NEVER LOWER. Flooring per draw is deliberate and
-    #     nonlinear -- mean(max(x,0)) >= max(mean(x),0) -- so the mean after
-    #     flooring must be >= the deterministic value, never below it. Measured, the
-    #     lift is exactly 1.00x wherever there is real volume and only departs from
-    #     it in the tail of a phase-out: HEV 2040 has a deterministic 0.0128 million
-    #     (12,800 cars), 36.6% of draws go negative there, and the mean lifts to
-    #     0.1323. That is the correct Monte Carlo answer -- in a draw where the
-    #     fleet target lands higher, hybrid inflow really is still positive that
-    #     year -- but any result in a near-zero year should be read with it in mind.
+    # 2b. FLOORING ONLY LIFTS. mean(max(x,0)) >= max(mean(x),0), so the floored mean
+    #     must be >= deterministic. Measured 1.00x wherever there is real volume;
+    #     10.35x at HEV 2040, where deterministic is 0.0128 M (12,800 cars) and 36.6%
+    #     of draws go negative. Correct, but read near-zero years with that in mind.
     lifts = []
     for (drv, yr), (_raw, floored) in agg.items():
         d = float(determ.get((drv, yr), np.nan))
@@ -198,10 +184,8 @@ def main() -> int:
           f"{len(pre)} overridden years before 2005 (must be 0) -- stage 02 marks "
           f"them NaN and they keep their deterministic value")
 
-    # 5. Against the real record. Wide bounds on purpose: this catches a
-    #    factor-of-two regression, not ordinary modelling drift. Restricted to
-    #    2010-2019 because from 2020 the real series collapses with COVID and the
-    #    chip shortage, which a stock-driven scenario model does not reproduce.
+    # 5. Against the real record. 2010-2019 only: from 2020 the real series collapses
+    #    with COVID and the chip shortage, which this model does not reproduce.
     eea = (pd.read_csv(ROOT / "data" / "raw" / "EEA_final_data.csv")
              .groupby(["Year", "Drive Train"])["Registrations"].sum().unstack(fill_value=0) / 1e6)
     for drv, lo, hi in (("Diesel", 0.8, 1.5), ("Petrol", 0.8, 1.5), ("BEV", 0.5, 2.5)):
@@ -233,15 +217,12 @@ def main() -> int:
           f"2006 {w06:.4f}")
 
     # ---- a parent with no volume that year ---------------------------------
-    # THE CASE THAT GOT THROUGH. BEV has zero inflow before 2011, so in 2005 its
-    # parent total is 0, every share is 0, and they sum to 0 -- there is nothing to
-    # divide. The first version of the share guard demanded 1 unconditionally and
-    # stopped a real 03_02 run on 48 legitimate (parent, year) pairs.
-    #
-    # The tests missed it because this fixture is built from `tracker_keyed_BAU`,
-    # which drops zero rows, while 03_02 composes from `inflow_by_scenario`, which
-    # keeps them. A fixture that cannot represent the failing input cannot test for
-    # it, so the zero-volume case is constructed explicitly here.
+    # BEV has zero inflow before 2011, so its 2005 parent total is 0, every share is
+    # 0/0 -> 0 and they sum to 0 -- nothing to divide. The first share guard demanded
+    # 1 unconditionally and stopped a real run on 48 legitimate (parent, year) pairs.
+    # The tests missed it because this fixture comes from `tracker_keyed_BAU`, which
+    # drops zero rows, while 03_02 composes from `inflow_by_scenario`, which keeps
+    # them -- so the case is constructed explicitly below.
     def share_sums(records):
         """The share arithmetic exactly as 03_02 does it."""
         tot, has_vol = {}, {}
@@ -258,10 +239,9 @@ def main() -> int:
 
     zero_case = [{"parent": "BEV", "year": 2005, "value": 0.0} for _ in range(12)]
     live_case = [{"parent": "Liquids", "year": 2005, "value": 1.0} for _ in range(12)]
-    # A phase-out year: the deterministic total is NEGATIVE (stage 02's inflow is a
-    # residual, recorded not simulated under negative_inflow_policy="report_only").
-    # The shares still divide it and still sum to 1, so this parent is NOT exempt.
-    # Testing `> 0` instead of `!= 0` made this case trip the guard on correct shares.
+    # Phase-out year: the total is NEGATIVE (inflow is a residual; recorded, not
+    # simulated, under negative_inflow_policy="report_only"). Shares still sum to 1,
+    # so this is NOT exempt -- testing `> 0` instead of `!= 0` tripped the guard here.
     neg_case = [{"parent": "Hybrid", "year": 2041, "value": -0.5} for _ in range(12)]
     z_tot, z_has = share_sums(zero_case)
     l_tot, l_has = share_sums(live_case)
@@ -276,10 +256,8 @@ def main() -> int:
           f"negative {n_tot[('Hybrid', 2041)]:.6f} (checked={n_has[('Hybrid', 2041)]})")
 
     # ---- the HEV carve (option B) ------------------------------------------
-    # HEV is carved out of Liquids, not split off Hybrid. REMIND has no non-plug-in
-    # hybrid category at all -- "Hybrid electric" is the plug-in -- so splitting it
-    # into HEV and PHEV invented an HEV series while the real hybrids stayed inside
-    # Liquids. See documentation/DESIGN_hev_carve_from_liquids.md.
+    # HEV comes out of Liquids, not Hybrid: REMIND has no non-plug-in hybrid category
+    # ("Hybrid electric" IS the plug-in). See DESIGN_hev_carve_from_liquids.md.
     import src.disaggregation as dg                                    # noqa: E402
     from src.disaggregation import prepare_eea_share_tables            # noqa: E402
 
@@ -318,10 +296,9 @@ def main() -> int:
               f"s rises {100*float(mono.iloc[0]):.2f}% -> {100*float(mono.iloc[-1]):.2f}% "
               f"across {intro}-2019, never decreasing")
 
-        # Measured from the SAME country-scoped frame the builder uses (EU27 plus
-        # Norway and Iceland), not the raw 30-country file -- an earlier version of
-        # this check compared against the raw file and failed at 4.569 vs 4.385%,
-        # which was the scoping working correctly, not a defect.
+        # SAME country-scoped frame the builder uses (EU27 + Norway/Iceland), not the
+        # raw 30-country file: comparing against the raw file failed at 4.569 vs
+        # 4.385%, which was scoping working correctly, not a defect.
         scoped = (eea_data[eea_data["Drive Train"].isin(["HEV", "Petrol", "Diesel"])]
                   .groupby(["Year", "Drive Train"])["Registrations"].sum()
                   .unstack(fill_value=0.0))
@@ -332,25 +309,15 @@ def main() -> int:
               f"{100*obs19:.3f}%")
 
     # ---- the uncertainty parent must be where the volume comes from ---------
-    # THE CHECK THAT WAS MISSING. When HEV was carved out of Liquids, the taxonomy
-    # changed but `inflow_uncertainty_parent_by_drv` was left pointing HEV at Hybrid.
-    # HEV then received the Hybrid group's deviation -- sized for a ~1.3 million
-    # quantity -- spread across its own ~3.9 million level, and its band all but
-    # disappeared: CV 1.78% against 6.77% for Diesel and 10.93% for Petrol.
+    # Carving HEV out of Liquids left `inflow_uncertainty_parent_by_drv` pointing HEV
+    # at Hybrid, so HEV got the Hybrid deviation (sized for ~1.3 M) across its ~3.9 M
+    # level: CV 1.78% against 6.77% Diesel, 10.93% Petrol. Conservation CANNOT see
+    # this -- shares sum to 1 in whatever group a drivetrain sits in. A person looking
+    # at a figure found it.
     #
-    # THE SUM-TO-ONE GUARD CANNOT SEE THIS. Shares sum to 1 inside whichever group a
-    # drivetrain is placed in; conservation says nothing about it being the RIGHT
-    # group. It took a person looking at a figure.
-    #
-    # So this tests the thing conservation cannot: the drivetrains declared under a
-    # parent must actually ACCOUNT FOR that parent's volume. With HEV wrongly under
-    # Hybrid, HEV+PHEV came to ~2.3x Hybrid's own volume, which is what fails here.
-    #
-    # The bound is wide on purpose. Stage 02's mean and stage 03's deterministic
-    # value legitimately differ (inflow is nonlinear in the sampled lifetime, so
-    # E[inflow] != inflow(E[lambda]) -- measured 0.87 to 0.98), and per-draw flooring
-    # lifts near-zero years. This is here to catch a drivetrain in the wrong family,
-    # not to police that difference.
+    # So: the children declared under a parent must ACCOUNT FOR its volume. Bound is
+    # wide because stage 02's mean and stage 03's deterministic value legitimately
+    # differ (0.87-0.98, Jensen) and flooring lifts near-zero years.
     by_parent: dict[str, list[str]] = {}
     for child, par in parent_of.items():
         by_parent.setdefault(par, []).append(child)
