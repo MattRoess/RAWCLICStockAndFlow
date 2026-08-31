@@ -439,11 +439,17 @@ def load_element_draws(elem_dir: Path, groups: tuple[str, ...]) -> dict:
 
 def resolve_elements(wanted: tuple[str, ...], elem: dict) -> dict[str, list[str]]:
     """
-    Check every requested element exists somewhere, and report where.
+    Work out where each requested element can be found, and drop the ones nowhere.
 
     An element missing from one domain is normal -- platinum is a sensor element and
-    appears in no motor. An element missing from ALL of them is a typo or a request
-    the models cannot answer, and stops the run rather than quietly producing zeros.
+    appears in no motor. An element missing from ALL of them cannot be answered by
+    the element models this run was given, so it is SKIPPED with a note rather than
+    stopping the run: which elements the upstream models happen to resolve is a
+    property of those files, not of this stage, and the request list is only a
+    selection of what to report. Reporting the rest is better than reporting nothing.
+
+    Nothing resolving at all is a different matter -- that means the wrong directory
+    or the wrong models -- and still raises.
     """
     available: dict[str, set[str]] = {"Wiring": {"Cu"}}
     for dom in ("Motors", "PCB", "Sensors"):
@@ -459,11 +465,17 @@ def resolve_elements(wanted: tuple[str, ...], elem: dict) -> dict[str, list[str]
             where[e] = doms
         else:
             unknown.append(e)
+
+    every = sorted(set().union(*available.values()))
     if unknown:
-        every = sorted(set().union(*available.values()))
+        print(f"\n  NOTE: {unknown} are not resolved by any element model in this "
+              f"draws directory, so they are skipped. Everything else is reported "
+              f"as usual.\n        Available: {', '.join(every)}")
+    if not where:
         raise ValueError(
-            f"materials.bev_electronics_elements names {unknown}, which no domain "
-            f"resolves.\nAvailable: {', '.join(every)}")
+            f"none of materials.bev_electronics_elements {list(wanted)} is resolved "
+            f"by any domain. That points at the wrong element draws directory or the "
+            f"wrong models, not at the request list.\nAvailable: {', '.join(every)}")
     return where
 
 
@@ -1255,8 +1267,11 @@ def main() -> dict[str, Any]:
     if not elem_dir.is_absolute():
         elem_dir = (PROJECT_ROOT / "code" / elem_dir).resolve()
     elem = load_element_draws(elem_dir, groups)
-    elements = tuple(p04.bev_electronics_elements)
-    where = resolve_elements(elements, elem)
+    requested = tuple(p04.bev_electronics_elements)
+    where = resolve_elements(requested, elem)
+    # Only what the models actually resolve goes on from here, so every downstream
+    # consumer -- figures, tables, the draw export -- sees one consistent list.
+    elements = tuple(e for e in requested if e in where)
 
     n_elem = min(a.shape[0] for d in ("Motors", "PCB", "Sensors")
                  for _, a in elem[d].values())
@@ -1266,8 +1281,8 @@ def main() -> dict[str, Any]:
             f"Re-run the element models at >= {n_draws:,} draws -- resampling them "
             f"to fit would invent draws the models never made.")
 
-    print(f"\n  elements: {len(elements)} requested, resolved from "
-          f"{elem_dir.name}")
+    print(f"\n  elements: {len(elements)} of {len(requested)} requested, resolved "
+          f"from {elem_dir.name}")
     for e in elements:
         print(f"    {e:<4} {' + '.join(where[e])}")
 
@@ -1374,15 +1389,18 @@ def main() -> dict[str, Any]:
 
     i = list(years).index(2050) if 2050 in years else -1
     print()
-    print("  COPPER, all four domains [kt/year]:")
-    for flow in FLOWS:
-        d = el_by_flow[flow]["Cu"]["total"]
-        print(f"    {flow:<10} 2050: median {d['median'].iloc[i]:>8,.1f}   "
-              f"95% {d['p2_5'].iloc[i]:>8,.1f} - {d['p97_5'].iloc[i]:>8,.1f}")
-    print("    2050 inflow by domain:", ", ".join(
-        f"{d} {el_by_flow['inflow']['Cu'][d]['median'].iloc[i]:,.1f}"
-        for d in ELEMENT_DOMAINS if d in el_by_flow["inflow"]["Cu"]))
-    print()
+    # The copper read-out is a convenience, not a requirement: it is skipped rather
+    # than crashing if copper was left out of the request list.
+    if "Cu" in elements:
+        print("  COPPER, all four domains [kt/year]:")
+        for flow in FLOWS:
+            d = el_by_flow[flow]["Cu"]["total"]
+            print(f"    {flow:<10} 2050: median {d['median'].iloc[i]:>8,.1f}   "
+                  f"95% {d['p2_5'].iloc[i]:>8,.1f} - {d['p97_5'].iloc[i]:>8,.1f}")
+        print("    2050 inflow by domain:", ", ".join(
+            f"{d} {el_by_flow['inflow']['Cu'][d]['median'].iloc[i]:,.1f}"
+            for d in ELEMENT_DOMAINS if d in el_by_flow["inflow"]["Cu"]))
+        print()
     print("  ELEMENTS COLLECTED FOR RECYCLING, 2050 -- median [95% band]:")
     for e in elements:
         d = el_by_flow["collected"][e]["total"]

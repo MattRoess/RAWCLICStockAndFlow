@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **145** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **147** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 32 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 34 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -434,7 +434,7 @@ SAFE TO CHANGE: yes, add an entry whenever you find another bad code.
 | `hard_zero_inflow_from_year_by_drv` | `{ "Liquids": 2050, "Hybrid": 2050, }` |
 | `hard_zero_inflow_until_year_by_drv` | `{ "BEV": 2011, }` |
 | `propagate_stage02_inflow_uncertainty` | `True` |
-| `inflow_uncertainty_parent_by_drv` | `( ("BEV", "BEV"), ("Petrol", "Liquids"), ("Diesel", "Liquids"), ("HEV", "Hybrid"), ("PH...` |
+| `inflow_uncertainty_parent_by_drv` | `( ("BEV", "BEV"), ("Petrol", "Liquids"), ("Diesel", "Liquids"), ("HEV", "Liquids"), # c...` |
 | `lifetime_scale_lambda_relative_spread` | `{ # PLACEHOLDER values -- every drivetrain wrapped in AsymmetricSpread(lower, # upper) ...` |
 | `stock_target_uncertainty_start_year` | `2025` |
 | `stock_target_ramp_max_rate_per_year` | `0.005` |
@@ -644,7 +644,7 @@ numbers.
 
 ### `inflow_uncertainty_parent_by_drv`
 
-Default: `( ("BEV", "BEV"), ("Petrol", "Liquids"), ("Diesel", "Liquids"), ("HEV", "Hybrid"), ("PH...`
+Default: `( ("BEV", "BEV"), ("Petrol", "Liquids"), ("Diesel", "Liquids"), ("HEV", "Liquids"), # c...`
 
 WHICH COARSE DRIVETRAIN EACH FINE ONE INHERITS ITS INFLOW UNCERTAINTY FROM.
 
@@ -664,6 +664,26 @@ NOT do is decide how Liquids divides between petrol and diesel -- that split,
 and its own uncertainty and development over time, is stage 03_01's work and
 is left completely untouched. The two effects compose: 03_01 says how the
 cake is cut, stage 02 says how big the cake is.
+
+SAFE TO CHANGE: only if the drivetrain lists themselves change. Every fine
+drivetrain used downstream needs an entry, and every value must be a
+drivetrain stage 02 actually models.
+THIS MUST MATCH WHERE EACH DRIVETRAIN'S VOLUME ACTUALLY COMES FROM.
+HEV maps to Liquids, not Hybrid, because HEV is carved OUT of Liquids -- see
+`disaggregation.hev_carved_from_liquids`. It was left pointing at Hybrid when
+that change was made, and the symptom was visible in the figures: HEV's
+uncertainty band nearly vanished. Measured, HEV's spread was 1.78% against
+6.77% for Diesel and 10.93% for Petrol, because it was being handed the Hybrid
+group's deviation -- sized for a ~1.3 million quantity -- spread across its own
+~3.9 million level. Petrol and Diesel were over-spread for the mirror-image
+reason: the whole Liquids deviation landed on a base that no longer included HEV.
+
+The sum-to-one guard in 03_02 cannot catch this. Shares still sum to 1 inside
+each group whichever group a drivetrain is put in; conservation says nothing
+about whether it is the RIGHT group. Only the figures showed it.
+
+If `hev_carved_from_liquids` is set False to reproduce an old result, HEV must
+be moved back to Hybrid here or its uncertainty will be wrong again.
 
 SAFE TO CHANGE: only if the drivetrain lists themselves change. Every fine
 drivetrain used downstream needs an entry, and every value must be a
@@ -1103,7 +1123,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**32 parameters.**
+**34 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1124,7 +1144,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `histogram_file_name` | `"37_MonteCarlo_Histograms.xlsx"` |
 | `histogram_sheet_names_by_drv` | `{ "Petrol": ["componentCarPetrol"], "Diesel": ["componentCarDiesel"], "BEV": ["componen...` |
 | `material_mc_time_resolution` | `"period"` |
-| `materials_mc_n_draws` | `200_000` |
+| `materials_mc_n_draws` | `50_000` |
 | `materials_mc_seed` | `42` |
 | `persist_mc_mass_draws` | `False` |
 | `bev_electronics_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/draws"` |
@@ -1139,6 +1159,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `bev_electronics_export_draws` | `True` |
 | `bev_electronics_element_draws_years` | `(2030, 2035, 2040, 2045, 2050)` |
 | `bev_electronics_element_draws_out_dir` | `"element_draws"` |
+| `carcomposition_draws_years` | `(2040,)` |
+| `carcomposition_draws_out_dir` | `"carcomposition_draws"` |
 
 
 ### `segment_map`
@@ -1303,7 +1325,7 @@ files -- the existing per-scenario ones already run to several GB.
 
 ### `materials_mc_n_draws`
 
-Default: `200_000`
+Default: `50_000`
 
 How many uncertainty draws this stage runs. Same meaning as `n_draws` in the
 Monte Carlo section, but kept separate so this stage can be run at a different
@@ -1499,8 +1521,11 @@ Sn Ge Li W Ta Cr Zn
 wiring   (1) Cu -- the wiring model reports copper and nothing else
 
 An element absent from a domain simply contributes nothing there; it is not an
-error. Asking for a name no domain resolves IS an error, and the message lists
-what is available.
+error. A name NO domain resolves is skipped with a note listing what is
+available -- which elements exist is a property of the element models' own
+files, so the stage reports the rest rather than refusing to run. Only a list
+where nothing at all resolves stops the run, since that means the element
+draws directory is wrong.
 
 NOTE Pd and Pt come from one domain each (PCB and sensors respectively), so
 their bands are narrower than a multi-domain element's -- they carry only that
@@ -1570,6 +1595,47 @@ element-and-domain. The recovery model reads this folder.
 SAFE TO CHANGE: yes.
 
 
+### `carcomposition_draws_years`
+
+Default: `(2040,)`
+
+WHICH YEARS OF 04_01's MASS DRAWS TO WRITE for RAWCLICRecoveryModel.
+
+Same trade as bev_electronics_element_draws_years above: the full
+per-draw arrays are 8 to 17 GB per scenario-flow (see
+persist_mc_mass_draws, which is off for exactly that reason), while a
+few named years are affordable and are what a recovery result is
+reported for. One year of the 476 (drivetrain, component, material)
+combinations is about 0.4 GB at 200,000 draws.
+
+A YEAR HERE MUST ALSO BE A SINGLE-YEAR PERIOD IN
+monte_carlo.output_periods, because 04_01's draws are cumulative over a
+period and the recovery model's axis is years. The default
+output_periods is one entry covering 1975-2070, which is cumulative and
+therefore exports nothing. To get an annual axis, set:
+
+output_periods = [(y, y) for y in (2030, 2035, 2040, 2045, 2050)]
+
+A year with no matching single-year period is skipped with a note.
+
+()        write nothing (the default)
+(2040,)   that one year
+SAFE TO CHANGE: yes, together with monte_carlo.output_periods.
+
+
+### `carcomposition_draws_out_dir`
+
+Default: `"carcomposition_draws"`
+
+WHERE THOSE DRAWS ARE WRITTEN, under data/processed/.
+One folder per scenario, then one per <drivetrain>_<flow>, then one .npy
+per component and per component-and-material. One folder per drivetrain
+because the recovery model has a single product at Layer 1 and here that
+product IS the drivetrain -- a battery is pulled from a BEV and a
+catalytic converter from a Petrol, so they are different studies.
+SAFE TO CHANGE: yes.
+
+
 ---
 
 ## Monte Carlo — cross-cutting
@@ -1590,7 +1656,7 @@ SAFE TO CHANGE: yes.
 | `stockflow_lifetime_spread` | `0.15` |
 | `stockflow_share_spread` | `0.15` |
 | `chunk_size` | `20_000` |
-| `output_periods` | `[(1975, 2070)]` |
+| `output_periods` | `default_factory=lambda: [(1975, 2070), (2040, 2040)]` |
 
 
 ### `enabled`
@@ -1694,7 +1760,7 @@ out of memory.
 
 ### `output_periods`
 
-Default: `[(1975, 2070)]`
+Default: `default_factory=lambda: [(1975, 2070), (2040, 2040)]`
 
 Which time windows to report results for, written as (first year, last year),
 both years included. Every window listed here gets a full summary: mean, median,
@@ -1714,6 +1780,10 @@ not simulation work, so a handful costs very little. For example:
 [(1975, 2070),   # the whole model horizon
 (2030, 2030),   # one single year
 (2030, 2040)]   # a decade
+(1975, 2070) is the cumulative headline period every figure and saved
+table is keyed on -- keep it, or those keys disappear. (2040, 2040) is
+added for the recovery-model export, which needs single-year periods
+(see materials.carcomposition_draws_years).
 
 
 ---

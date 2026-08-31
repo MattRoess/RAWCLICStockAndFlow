@@ -191,8 +191,12 @@ Cu, Nd, Dy, Pr, Tb, Co, Li, Pt, Pd, Au, Ag, Ga, Ge, In, Ta, W, Nb, Al
 
 An element absent from a domain contributes nothing there and that is normal —
 platinum is a sensor element and appears in no motor. An element **no** domain
-resolves stops the run with a message listing what is available, rather than quietly
-producing zeros.
+resolves is **skipped**, with a note naming it and listing what is available, and the
+run continues with the rest. Which elements exist is a property of the element
+models' own output files, not of this stage, so the request list is a selection and
+not a contract — a set of draws without Pr, Tb and Nb still reports the other
+fifteen. A list where **nothing** resolves does stop the run: that means the wrong
+draws directory or the wrong models.
 
 Pd and Pt each come from a single domain, so their bands carry only that one model's
 uncertainty and are narrower than a multi-domain element's.

@@ -1802,8 +1802,11 @@ class MaterialsParams:
     #   wiring   (1) Cu -- the wiring model reports copper and nothing else
     #
     # An element absent from a domain simply contributes nothing there; it is not an
-    # error. Asking for a name no domain resolves IS an error, and the message lists
-    # what is available.
+    # error. A name NO domain resolves is skipped with a note listing what is
+    # available -- which elements exist is a property of the element models' own
+    # files, so the stage reports the rest rather than refusing to run. Only a list
+    # where nothing at all resolves stops the run, since that means the element
+    # draws directory is wrong.
     #
     # NOTE Pd and Pt come from one domain each (PCB and sensors respectively), so
     # their bands are narrower than a multi-domain element's -- they carry only that
