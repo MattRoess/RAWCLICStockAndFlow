@@ -1,4 +1,4 @@
-# Handover — updated 2026-08-14
+# Handover — updated 2026-08-31
 
 Where the work stands, what is safe, what is not, and what to do next.
 
@@ -18,6 +18,8 @@ Where the work stands, what is safe, what is not, and what to do next.
 | `code/04_02_BEVelectronics.py` | **new** — BEV electronics material flows | yes — at 300 draws |
 | `code/04_01_carcomposition.py` | all mass figures switched to Mt; new standard-vs-segments boxplot | yes — rendered |
 | `src/artifacts.py` | registers `bev_electronics_summary` | yes |
+| `code/04_01_carcomposition.py` | per-year mass draws exported for the recovery model; reads the per-year draws 03_02 already writes instead of asking for a period; every drivetrain gets a single-year vehicle count without re-running 03_02 | yes — re-run 31 Aug |
+| `code/04_02_BEVelectronics.py` | an element no domain resolves is now SKIPPED with a note, not fatal (see §4.2) | yes — re-run 31 Aug |
 
 ### RAWCLICVehicleElectronics — 7 files changed by this work
 
@@ -46,7 +48,8 @@ repository went from 6.7 GB to 1.7 GB. The four files that ARE read
 modified. **Those are not from this work** — they were already modified at 13:38
 and 11:58, before this session, and `mc_composition.py` writes neither.
 
-Committed on branch `mc-correctness-and-bev-electronics`. A backup of the two electronics CSVs is at
+Work continued on branch `carcomposition-draw-export` (the earlier work is on
+`mc-correctness-and-bev-electronics`). A backup of the two electronics CSVs is at
 `/private/tmp/elec_backup/` (temporary — copy it somewhere permanent if wanted).
 
 ---
@@ -85,8 +88,18 @@ pickle by hand.
   at 200,000 draws.
 - **04_01 and 04_02 figures.** Rendered and inspected.
 
-Everything in 03_02 and 04_02 was tested at **300 draws**. The first full-scale
-run has not been done.
+Draw counts as actually run, from the output files themselves:
+
+| stage | last run | draws |
+|---|---|---|
+| 03_02 + BEV export | 2026-08-28 16:37–16:47 | 200,000 (96 years, float32) |
+| 04_01 | 2026-08-31 07:45 | 50,000 (`materials_mc_n_draws`) |
+| 04_02 | 2026-08-31 07:52 | 20,000 — the electronics models' own count, which caps it |
+
+04_02 is capped by the electronics draws, not by choice: the fleet arrays hold
+200,000 and the electronics arrays 20,000, and the stage pairs the first 20,000 of
+each rather than resampling. Raising it means re-running the element models at
+>= the fleet count.
 
 ---
 
@@ -109,7 +122,7 @@ Design, rejected alternatives and measurements:
 **Consequence: any result produced before 14 August 2026 understates inflow
 uncertainty downstream and should be regenerated.**
 
-### 4.1b OPEN — collected-flow fix is in, the re-run is not
+### 4.1b CLOSED — collected-flow fix is in, and the re-run is done
 
 Fixed 19 August 2026, reported by Yousef and colleagues. `03_02`'s deterministic
 tracker computed `collected = out_survival x (1 - unknown)`, dropping the export
@@ -121,12 +134,15 @@ Done: the shared function is now used everywhere, and the partition invariant is
 asserted at three choke points. 03_01 re-run clean at 200,000 draws with the guards
 active, numbers unchanged.
 
-**NOT DONE — this is the next thing to run.** 03_02 and then 04_01 must be re-run.
-Until then the fix is verified in code but not on the tracker path, and **04_01's
-collected material masses are still the old, overstated ones**. 03_02 is the ~56 min
-run. Expect collected to fall ~2.3% for BEV and ~16.3% elsewhere, and the new
-partition check to close. If that check FIRES instead, there is a second defect in
-the same area — investigate before changing anything else.
+**DONE 2026-08-28.** 03_02 re-ran with the guards active — `03_02_mc_summary.pkl`
+written 16:47 and the whole BEV export 16:37–16:46, well after the last code change
+to 03_02 or `stockflow_model.py` (`714fa6b`, 21 Aug 06:30). The run completed and
+saved, so the partition assertions did not fire. 04_01 followed on 2026-08-31 07:45,
+so its collected material masses are the corrected ones.
+
+Not verified: the *predicted magnitude* — collected falling ~2.3% for BEV and ~16.3%
+elsewhere. Nobody has compared the new summary against the old one. If that matters,
+it is a direct comparison of two pickles, not another run.
 
 Stage 04_02 is unaffected either way: it reads `per_year_collected` from the Monte
 Carlo engine, which always used the correct three-way split.
@@ -181,9 +197,10 @@ real at 2019, PHEV 1.02x at 2021 (0.33x before), conservation 1.11e-16.
 Full account: `DESIGN_hev_carve_from_liquids.md`.
 
 **THE DRIVETRAIN TAXONOMY HAS CHANGED.** `HEV` is now a slice of Liquids, not of
-Hybrid; `PHEV` is all of Hybrid. 03_01 has been re-run; **03_02 and 04_01 have NOT**,
-so anything downstream still holds the old split. Anything published with the old
-HEV/PHEV series should be regenerated.
+Hybrid; `PHEV` is all of Hybrid. All three stages have now been re-run — 03_01,
+then 03_02 on 28 Aug and 04_01 on 31 Aug — so downstream holds the new split.
+Anything published *before* those dates with the old HEV/PHEV series should be
+regenerated.
 
 Also open there: 2020-2023 runs 1.9-2.2x high because the model does not reproduce
 the COVID and chip-shortage collapse, and 1975-2004 is flat because **no pre-2005
@@ -214,13 +231,28 @@ that one.
   sensor study's own level, but the **domain-mass** figures still carry the
   understatement. Fixing it at source regenerates `Composition/csv`, which has been
   validated byte-identically, so it was deliberately deferred.
-- `KG_PER_TONNE` in `04_01_carcomposition.py` is now unused.
+- **`04_02` was welded to its element list — FIXED 2026-08-31 (`cbf8903`).**
+  `resolve_elements` raised on any requested element that no domain resolved, so a
+  set of element draws without Pr, Tb and Nb stopped the entire stage instead of
+  reporting the other fifteen. Which elements exist is a property of the upstream
+  models' files, not of this stage, and the request list is only a selection of what
+  to report. Unresolved names are now skipped with a note naming them and listing
+  what is available; `main` narrows `elements` to what resolved, so the figures, the
+  tables and the draw export all see one consistent list. A list where **nothing**
+  resolves still raises — that is the wrong draws directory, not a wrong request.
+  The closing copper read-out is guarded too, so dropping `Cu` no longer crashes it.
+  Verified by a full run: 15 elements reported, Pr/Tb/Nb skipped, every figure drawn.
+  See §8 for the rest of the codebase.
+- `KG_PER_TONNE` in `04_01_carcomposition.py` is still there and still unused
+  (checked 31 Aug).
 - Two functions vanished from `04_01` on 2026-07-09 (`plot_material_mass_by_year`,
   `quantify_and_aggregate`). Successors appear to exist; not confirmed.
-- `data/processed/intermediate/` is **71 GB**, including duplicated files with a
-  trailing " 2" in the name (roughly 25 GB of accidental copies).
+- **`data/processed/intermediate/` is now 724 MB**, and `find` reports **zero**
+  files with a trailing " 2" in the name (checked 31 Aug). The 71 GB and the ~25 GB
+  of accidental copies are gone. `data/processed` as a whole is 3.6 GB.
 - Scenario-comparison figures need two or more entries in `scenarios_to_run`;
   it is currently `("BAU",)`.
+- `materials_mc_n_draws` is now **50,000**, down from 200,000.
 
 ---
 
@@ -277,10 +309,14 @@ now Markdown, one of them generated, and moved to `superseded/`.
 |---|---|
 | `README.md` | index — start here |
 | `RUNNING.md` | how to run everything, what it costs, what catches people out |
-| `PARAMETER_REFERENCE.md` | all 140 parameters, **generated** from `src/params_schema.py` |
+| `PARAMETER_REFERENCE.md` | all **147** parameters, **generated** from `src/params_schema.py` |
 | `MODEL_DESCRIPTION.md` | converted from the `.docx`, plus section 7 for everything since 13 July |
 | `UNCERTAINTY_MAP.md` | where uncertainty enters, travels and stops |
 | `DESIGN_inflow_uncertainty_propagation.md` | the propagation design and two rejected alternatives |
+| `DESIGN_collected_flow_definition.md` | the collected-flow defect and the shared definition (§4.1b) |
+| `DESIGN_hev_carve_from_liquids.md` | why HEV is carved out of Liquids (§4.1c) |
+| `DESIGN_element_resolution.md` | how 04_02 resolves elements, and the two defects found doing it (§4.2, §8) |
+| `DESIGN_inflow_parent_split.md` | which stage-02 parent each fine drivetrain draws its uncertainty from |
 
 Regenerate the parameter reference after any parameter change:
 
@@ -291,3 +327,76 @@ Regenerate the parameter reference after any parameter change:
 It reports how many parameters have no explanation in the code. That count is **0**
 and should stay there — it is the check that stops the reference silently rotting the
 way its predecessor did.
+
+---
+
+## 8. Element independence — the rest of the codebase
+
+Written 2026-08-31, after `04_02`'s element list turned out to be a hard gate.
+
+### The principle
+
+**A name list is a request, not a contract.** Which elements exist is a property of
+the upstream models' output files. A stage asked for an element those files do not
+carry should say so and report the rest. Two failure modes bracket the right
+behaviour, and both are wrong:
+
+| | behaviour | why it is wrong |
+|---|---|---|
+| too strict | raise on any unresolved name | one absent element costs you the other fifteen; the stage cannot run against a different set of draws |
+| too loose | drop it silently | the figure comes out with a missing series and nothing says why; this is the failure mode that produces plausible wrong numbers |
+
+The rule: **skip, name what was skipped, list what was available, continue.** That
+is what `resolve_elements` now does and it is the pattern to copy.
+
+The distinction that matters: this applies to **name lists** (which elements, which
+materials). It does **not** apply to **structural** checks — a missing column, a
+missing draws file, a domain absent from the series list. Those stay fatal, and
+several of them are (`load_element_draws`, `materials.py:200`, `04_04:136`,
+`04_03:207`). A shorter list is a legitimate input; a broken file is not.
+
+### What the survey found
+
+Element names appear in exactly two files — `src/params_schema.py` and
+`code/04_02_BEVelectronics.py`. Everything else refers to elements through a
+parameter. So the blast radius is small.
+
+| site | state | action |
+|---|---|---|
+| `04_02` `resolve_elements` | FIXED `cbf8903` | none |
+| `src/plotting.py:450` `plot_elements_by_flow` | too loose — `.isin(element_list)`, then `continue` on an empty frame, silently | see below |
+| `src/plotting.py:711` `plot_mass_by_drv_flow_elements` | same | see below |
+| `general.element_list` / `element_list_noAlCu` | `("Ag","In","Ta","Zn","Dy","Nd","Pr","Al","Cu")` and the same without Al/Cu | see below |
+| `04_01` `MATERIALS_ALWAYS_SHOWN_INDIVIDUALLY` | already independent — a "prefer to show" set; an absent name simply never matches, and it only takes effect when `top_n` is an int, which it is not | none |
+| structural checks in `04_01`, `04_03`, `04_04`, `materials.py` | correctly fatal | none |
+
+**Both `plotting.py` functions have no callers anywhere in the repository** — grep
+across `.py` and `.ipynb` finds only their own definitions. So do not fix them
+before deciding whether they should exist at all. Two options, and this is the
+user's call:
+
+1. **Delete them**, and `element_list` / `element_list_noAlCu` with them — they are
+   the only consumers, so those two parameters are currently inert.
+2. **Keep and fix**: replace the silent `continue` with the `04_02` note, and derive
+   the "drop the top two" behaviour from the data rather than from a second
+   hard-coded list.
+
+Until one is chosen, nothing in the running pipeline depends on either, so nothing
+is at risk.
+
+### The workflow, when a new name list appears
+
+1. **Find where the names actually come from.** For elements it is the `.txt` files
+   beside the `.npy` draws. The available set is data, so read it; never hard-code
+   a mirror of it.
+2. **Resolve, do not assert.** Partition the request into resolved and unresolved.
+3. **Narrow the working list to what resolved**, once, near the top of `main`, and
+   pass that list everywhere downstream. This is the step that keeps the figures,
+   the summary tables and the draw export from disagreeing.
+4. **Print the skip.** Name what was dropped and list what was available, on one
+   line. Silence here is the expensive failure.
+5. **Raise only on an empty intersection**, and say in the message that it points at
+   the wrong input directory rather than at the request list.
+6. **Guard any code that names a specific element**, such as the copper read-out at
+   the end of `04_02` — `if "Cu" in elements:`.
+7. **Run the stage against a deliberately short list** and confirm it completes.
