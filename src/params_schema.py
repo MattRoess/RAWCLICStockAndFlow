@@ -1798,9 +1798,43 @@ class MaterialsParams:
     # carries only that one model's uncertainty, so its band is narrower than a
     # multi-domain element's for a reason that is not physical.
     #
+    # THE SELECTION: critical and strategic raw materials only.
+    #
+    # Empty would report all 62 names the draws carry, which is not useful -- most
+    # of them are sulfur, oxygen, carbon and phosphorus, or copper-winding
+    # contamination, and none of those is a recovery target.
+    #
+    # Names ending `__<material>` come from the motor model, where an element is
+    # identified by the material it sits in. `Cu` has no suffix because copper is
+    # summed across every motor material by decision. PCB and sensor elements have
+    # no suffix either -- those models resolve one material each.
+    #
+    # WHAT WAS LEFT OUT, and why:
+    #   the 16 `__copper` entries   contamination in the winding, not a target.
+    #                               Bi, Sb, Se, Te and Cd occur ONLY there, so they
+    #                               leave the report entirely.
+    #   S, O, C, P everywhere       not of interest, whatever material they sit in.
+    #   Fe and its variants         bulk, not critical.
+    #   Si, Si__esteel, Ba          on the CRM list but alloying or bulk here.
+    #   Plastic, Unspecified        not elements.
+    #
+    # Mn__esteel and Mn__cfsteel ARE included: manganese in the steels is an
+    # alloying addition, not contamination, so the rule that drops the `__copper`
+    # entries does not reach them.
+    #
     # SAFE TO CHANGE: yes. This only selects what is reported; it does not change
-    # any calculation.
-    bev_electronics_elements: tuple[str, ...] = ()
+    # any calculation. A name no domain resolves is skipped with a note, so this
+    # list cannot break a run.
+    bev_electronics_elements: tuple[str, ...] = (
+        "Cu",                                       # the priority element
+        "Nd", "Dy",                                 # magnet rare earths, sensors
+        "Sr__magnet",                               # the motor's ferrite magnet
+        "Co", "Li",                                 # battery-adjacent, sensors
+        "Pt", "Pd", "Au", "Ag",                     # precious, PCB and sensors
+        "Ga", "Ge", "In", "Ta", "W", "Ti", "B",     # semiconductor and hard metals
+        "Ni", "Mn", "Mn__esteel", "Mn__cfsteel",    # CRM, incl. steel alloying
+        "Al__bulk",                                 # housing and frame aluminium
+    )
 
     # Whether stage 03_02 exports the BEV per-year, per-draw vehicle counts that
     # stage 04_02 needs.

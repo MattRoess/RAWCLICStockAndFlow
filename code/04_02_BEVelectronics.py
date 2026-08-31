@@ -1405,14 +1405,16 @@ def main() -> dict[str, Any]:
         jobs.append(("04_02_12_copper_collected_by_domain.png",
                      lambda p: fig_element_domains(el_by_flow, years, "Cu", "collected", p)))
 
-    # One figure per element, for the three flows and for the domain split. These
-    # are the per-element detail behind the summary panels above.
-    for e in elements:
-        jobs.append((f"04_02_16_element_{e}.png",
-                     lambda p, _e=e: fig_element_total(el_by_flow, years, _e, p, n_draws)))
-        jobs.append((f"04_02_17_element_{e}_by_domain.png",
-                     lambda p, _e=e: fig_element_domains(el_by_flow, years, _e,
-                                                         "collected", p)))
+    # NO FIGURE PER ELEMENT. There used to be two -- a total and a domain split --
+    # for every element, which was 80 of this stage's 86 figures and grew with the
+    # element list. They were also redundant: 04_02_13 and _14 already panel every
+    # element, and _15 shows the recovery spread across all of them. A hundred
+    # near-identical charts is not more information, it is less, because nobody
+    # reads them.
+    #
+    # `fig_element_total` and `fig_element_domains` are kept -- copper still uses
+    # the second one above -- so putting a named element back on its own page is
+    # one appended job, not new plotting code.
 
     for name, fn in jobs:
         path = fig_dir / name

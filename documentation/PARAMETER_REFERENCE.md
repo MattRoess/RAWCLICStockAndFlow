@@ -1136,7 +1136,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `bev_electronics_year_min` | `2020` |
 | `bev_electronics_year_max` | `2070` |
 | `bev_electronics_element_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/element_draws"` |
-| `bev_electronics_elements` | `()` |
+| `bev_electronics_elements` | `( "Cu", # the priority element "Nd", "Dy", # magnet rare earths, sensors "Sr__magnet", ...` |
 | `bev_electronics_export_draws` | `True` |
 | `bev_electronics_element_draws_years` | `(2030, 2035, 2040, 2045, 2050)` |
 | `bev_electronics_element_draws_out_dir` | `"element_draws"` |
@@ -1483,7 +1483,7 @@ SAFE TO CHANGE: only if you move that repository.
 
 ### `bev_electronics_elements`
 
-Default: `()`
+Default: `( "Cu", # the priority element "Nd", "Dy", # magnet rare earths, sensors "Sr__magnet", ...`
 
 WHICH ELEMENTS TO REPORT.
 
@@ -1509,8 +1509,33 @@ that comes from a single domain, such as Pd from PCB or Pt from sensors,
 carries only that one model's uncertainty, so its band is narrower than a
 multi-domain element's for a reason that is not physical.
 
+THE SELECTION: critical and strategic raw materials only.
+
+Empty would report all 62 names the draws carry, which is not useful -- most
+of them are sulfur, oxygen, carbon and phosphorus, or copper-winding
+contamination, and none of those is a recovery target.
+
+Names ending `__<material>` come from the motor model, where an element is
+identified by the material it sits in. `Cu` has no suffix because copper is
+summed across every motor material by decision. PCB and sensor elements have
+no suffix either -- those models resolve one material each.
+
+WHAT WAS LEFT OUT, and why:
+the 16 `__copper` entries   contamination in the winding, not a target.
+Bi, Sb, Se, Te and Cd occur ONLY there, so they
+leave the report entirely.
+S, O, C, P everywhere       not of interest, whatever material they sit in.
+Fe and its variants         bulk, not critical.
+Si, Si__esteel, Ba          on the CRM list but alloying or bulk here.
+Plastic, Unspecified        not elements.
+
+Mn__esteel and Mn__cfsteel ARE included: manganese in the steels is an
+alloying addition, not contamination, so the rule that drops the `__copper`
+entries does not reach them.
+
 SAFE TO CHANGE: yes. This only selects what is reported; it does not change
-any calculation.
+any calculation. A name no domain resolves is skipped with a note, so this
+list cannot break a run.
 
 
 ### `bev_electronics_export_draws`
