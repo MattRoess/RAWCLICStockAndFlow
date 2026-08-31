@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import pickle
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -322,7 +323,13 @@ def build_segment_electronics(
         large_v = np.asarray(fleet[(seg_large, "inflow")][:n_draws][:, keep]).sum()
         w_small = float(small_v / (small_v + large_v)) if (small_v + large_v) > 0 else 0.5
 
-        small, large = split_pair_by_tilt(pool, w_small, tilt, seed=seed + hash(group) % 10_000)
+        # zlib.crc32, NOT hash(): Python salts str hashing per process, so
+        # `hash(group)` handed this split a different seed on every run and the
+        # stage was not reproducible -- the recombination error moved in the
+        # fourth decimal from one run to the next. crc32 of the same bytes is the
+        # same number in every process, forever.
+        offset = zlib.crc32(group.encode()) % 10_000
+        small, large = split_pair_by_tilt(pool, w_small, tilt, seed=seed + offset)
         per_segment[seg_small] = small
         per_segment[seg_large] = large
         per_segment["J" + seg_small] = small
@@ -388,6 +395,11 @@ def multiply(
 #            is taken at its own level and only the SHAPE of the sensor trajectory
 #            -- its year-to-year profile, normalised to 1.0 at the base year -- is
 #            taken from mc_composition.
+# The wiring model is a single-element model: it reports a copper mass, full stop.
+# Named once here so the fact lives in one place rather than in a literal buried
+# in the resolver.
+WIRING_ELEMENT = "Cu"
+
 ELEMENT_DOMAINS = ("Wiring", "Motors", "PCB", "Sensors")
 SENSOR_BASE_YEAR = 2025          # the year the sensor study's composition is fixed at
 MG_PER_GRAM = 1_000.0
@@ -439,23 +451,40 @@ def load_element_draws(elem_dir: Path, groups: tuple[str, ...]) -> dict:
 
 def resolve_elements(wanted: tuple[str, ...], elem: dict) -> dict[str, list[str]]:
     """
-    Work out where each requested element can be found, and drop the ones nowhere.
+    Work out which elements to report and where each one is found.
 
-    An element missing from one domain is normal -- platinum is a sensor element and
-    appears in no motor. An element missing from ALL of them cannot be answered by
-    the element models this run was given, so it is SKIPPED with a note rather than
-    stopping the run: which elements the upstream models happen to resolve is a
-    property of those files, not of this stage, and the request list is only a
-    selection of what to report. Reporting the rest is better than reporting nothing.
+    THE ELEMENT NAMES COME FROM THE DRAWS, NOT FROM THIS FILE. `available` is read
+    out of the `*_elements.txt` files that ship beside the `.npy` arrays, so the
+    stage reports whatever the element models produced. An empty `wanted` -- the
+    default -- means every element they resolve, in a stable order.
+
+    `wanted` may name a subset. Then an element missing from one domain is normal
+    (platinum is a sensor element and appears in no motor), and an element missing
+    from ALL of them is SKIPPED with a note rather than stopping the run: a request
+    list is a selection, not a contract, and reporting the rest beats reporting
+    nothing.
 
     Nothing resolving at all is a different matter -- that means the wrong directory
     or the wrong models -- and still raises.
+
+    ORDER. Copper first when present, because it is the element this stage exists to
+    quantify and the read-outs lead with it; everything else alphabetical. Sorting,
+    rather than set iteration order, is what keeps two runs' figures identical.
     """
-    available: dict[str, set[str]] = {"Wiring": {"Cu"}}
+    # The ONE element name left in this file, and it is a statement about the model
+    # rather than a selection: the wiring model reports a copper mass and nothing
+    # else, so Wiring has no `*_elements.txt` to read and its single element cannot
+    # be discovered from data that does not exist. Every other domain's names come
+    # out of its own files below.
+    available: dict[str, set[str]] = {"Wiring": {WIRING_ELEMENT}}
     for dom in ("Motors", "PCB", "Sensors"):
         available[dom] = set()
         for els, _ in elem[dom].values():
             available[dom].update(els)
+
+    every = sorted(set().union(*available.values()))
+    if not wanted:
+        wanted = tuple(["Cu"] * ("Cu" in every) + [e for e in every if e != "Cu"])
 
     where: dict[str, list[str]] = {}
     unknown = []
@@ -466,7 +495,6 @@ def resolve_elements(wanted: tuple[str, ...], elem: dict) -> dict[str, list[str]
         else:
             unknown.append(e)
 
-    every = sorted(set().union(*available.values()))
     if unknown:
         print(f"\n  NOTE: {unknown} are not resolved by any element model in this "
               f"draws directory, so they are skipped. Everything else is reported "
@@ -1271,7 +1299,10 @@ def main() -> dict[str, Any]:
     where = resolve_elements(requested, elem)
     # Only what the models actually resolve goes on from here, so every downstream
     # consumer -- figures, tables, the draw export -- sees one consistent list.
-    elements = tuple(e for e in requested if e in where)
+    # `where` is built in the order the elements will be reported in, which is the
+    # request's own order when there is a request and the draws' order when there
+    # is not, so take the list from there rather than re-deriving it.
+    elements = tuple(where)
 
     n_elem = min(a.shape[0] for d in ("Motors", "PCB", "Sensors")
                  for _, a in elem[d].values())
@@ -1281,10 +1312,12 @@ def main() -> dict[str, Any]:
             f"Re-run the element models at >= {n_draws:,} draws -- resampling them "
             f"to fit would invent draws the models never made.")
 
-    print(f"\n  elements: {len(elements)} of {len(requested)} requested, resolved "
-          f"from {elem_dir.name}")
+    asked = (f"{len(elements)} of {len(requested)} requested" if requested
+             else f"{len(elements)} -- every element the draws carry")
+    print(f"\n  elements: {asked}, resolved from {elem_dir.name}")
+    width = max(len(e) for e in elements) + 1
     for e in elements:
-        print(f"    {e:<4} {' + '.join(where[e])}")
+        print(f"    {e:<{width}} {' + '.join(where[e])}")
 
     # ---- the slice of draws the recovery model reads --------------------
     # This stage keeps percentiles and drops the draws, which is right for a
@@ -1343,10 +1376,6 @@ def main() -> dict[str, Any]:
          lambda p: fig_domains(by_series_by_flow["outflow"], years, "outflow", p)),
         ("04_02_05c_by_domain_collected.png",
          lambda p: fig_domains(by_series_by_flow["collected"], years, "collected", p)),
-        ("04_02_11_copper.png",
-         lambda p: fig_copper(el_by_flow, years, p, n_draws)),
-        ("04_02_12_copper_collected_by_domain.png",
-         lambda p: fig_element_domains(el_by_flow, years, "Cu", "collected", p)),
         ("04_02_13_elements_inflow.png",
          lambda p: fig_element_panel(el_by_flow, years, elements, "inflow", p, n_draws)),
         ("04_02_14_elements_collected.png",
@@ -1366,6 +1395,16 @@ def main() -> dict[str, Any]:
          lambda p: fig_variance_split(fleet, per_segment_by_series["Total"], keep,
                                       years, segments, n_draws, p)),
     ]
+    # The two dedicated copper figures. Copper is the element this stage was built
+    # to quantify and it is the only one with a wiring contribution, so it gets its
+    # own pair -- but only if it is being reported at all, since the element list is
+    # the draws' to decide and a narrowed request may leave it out.
+    if "Cu" in elements:
+        jobs.append(("04_02_11_copper.png",
+                     lambda p: fig_copper(el_by_flow, years, p, n_draws)))
+        jobs.append(("04_02_12_copper_collected_by_domain.png",
+                     lambda p: fig_element_domains(el_by_flow, years, "Cu", "collected", p)))
+
     # One figure per element, for the three flows and for the domain split. These
     # are the per-element detail behind the summary panels above.
     for e in elements:

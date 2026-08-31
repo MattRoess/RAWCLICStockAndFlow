@@ -358,13 +358,27 @@ several of them are (`load_element_draws`, `materials.py:200`, `04_04:136`,
 
 ### What the survey found
 
-Element names now appear in exactly **one** file — `code/04_02_BEVelectronics.py`,
-in the `bev_electronics_elements` default and nowhere else. Nothing else in the
-repository holds a list of element names at all.
+**No element list exists in this repository any more.**
+`materials.bev_electronics_elements` defaults to **empty**, and empty means every
+element the draws resolve — the names are read from the `*_elements.txt` files beside
+the `.npy` arrays. At the current draws that is 51 elements, copper first and the
+rest alphabetical. Naming elements in the parameter still narrows the report to a
+subset, and an unresolvable name in that subset is skipped with a note.
+
+One element name remains anywhere in the code: `WIRING_ELEMENT = "Cu"` in `04_02`.
+That is a statement about the model rather than a selection — the wiring model
+reports a copper mass and nothing else, so Wiring has no `*_elements.txt` and its
+single element cannot be read from a file that does not exist. The two dedicated
+copper figures are guarded on `"Cu" in elements`, so a request that drops copper
+still runs.
+
+Reporting all 51 costs 102 per-element figures instead of 30, and 0.31 GB of element
+draw export instead of 0.09 GB. Nothing about the calculation changes.
 
 | site | state |
 |---|---|
-| `04_02` `resolve_elements` | FIXED `cbf8903` — skips, names the skip, continues |
+| `04_02` `resolve_elements` | FIXED — skips, names the skip, continues (`cbf8903`), and an empty request now means every element the draws carry |
+| `materials.bev_electronics_elements` | was 18 hard-coded names, now `()` — the default is "whatever the models resolved" |
 | `src/plotting.py` `plot_elements_by_flow` | DELETED — dead code, no callers |
 | `src/plotting.py` `plot_mass_by_drv_flow_elements` | DELETED — dead code, no callers |
 | `data_prep.element_list` / `element_list_noAlCu` | DELETED with them; the two plotting functions were their only consumers, so they were inert |
@@ -398,3 +412,30 @@ alone deliberately: they are snapshots, not live code.
 6. **Guard any code that names a specific element**, such as the copper read-out at
    the end of `04_02` — `if "Cu" in elements:`.
 7. **Run the stage against a deliberately short list** and confirm it completes.
+
+---
+
+## 9. Reproducibility — one defect, fixed
+
+Found 2026-08-31 while explaining why two 04_02 runs disagreed in the third decimal.
+
+`04_02` seeded each pair's segment split with `seed + hash(group) % 10_000`. **Python
+salts `str` hashing per process**, so that seed was different in every run and the
+stage was not reproducible. The symptom was small enough to dismiss as ordinary Monte
+Carlo noise — the recombination error moved in the fourth decimal, 2050 collected
+copper wandered by ~0.07% — which is exactly why it survived this long. It is now
+`zlib.crc32(group.encode()) % 10_000`, the same number in every process, forever.
+
+Verified: two consecutive full runs of 04_02 are **byte-identical**, diffed over the
+complete log.
+
+**This was the only unseeded randomness in the pipeline.** The sweep behind that
+claim: no module in `code/` or `src/` calls the global `np.random.*` samplers or
+constructs a bare `default_rng()`; every generator descends from `monte_carlo.seed`
+or `materials_mc_seed` through `np.random.SeedSequence`, spawned in sorted order
+(`03_01`, over `sorted(mc_stage02.keys())`), in configuration order (`03_02` and
+`04_01`, over `active_scenario_names()`), or in the input frame's own row order
+(`cohort_flow_mc`, per entity). `hash()` appeared exactly once in the whole
+codebase, and that was the one site.
+
+If a stage ever needs a per-name seed offset again: **crc32, never `hash`.**

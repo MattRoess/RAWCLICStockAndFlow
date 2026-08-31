@@ -1776,41 +1776,31 @@ class MaterialsParams:
 
     # WHICH ELEMENTS TO REPORT.
     #
-    # The default is the critical and strategic ones -- the raw materials whose
-    # supply is the reason for tracking this at all -- rather than everything the
-    # element models happen to resolve. Iron and silicon are the bulk of a motor by
-    # mass and are of no interest for criticality, so they are left out by default.
+    # EMPTY MEANS EVERY ELEMENT THE DRAWS RESOLVE, and empty is the default. The
+    # stage reads the element names out of the `*_elements.txt` files that sit
+    # beside the `.npy` draws, so what gets reported follows whatever the element
+    # models produced. Nothing in this repository holds a list of element names.
     #
-    # Any element the models resolve can be added. The full available set is:
+    # That is deliberate. A hard-coded list made the stage fail outright the first
+    # time it met a set of draws without Pr, Tb and Nb in it -- the code was welded
+    # to names that are not its to decide. The available set is a property of the
+    # upstream models' output files and it changes when those models change.
     #
-    #   motors  (34) Cu Fe Si C Mn Al P S Nd B Dy Tb Pr Co Nb Ga Plastic
-    #                Unspecified, plus 16 trace impurities named *_ppm
-    #   PCB     (10) Cu Ag Au Sn Pb Ni Pd Al Zn Fe
-    #   sensors (27) Si Cu Ni Fe Mn Co Au Ag Pt Al Ga As In Pb Zr Ti Nd B Dy Ba
-    #                Sn Ge Li W Ta Cr Zn
-    #   wiring   (1) Cu -- the wiring model reports copper and nothing else
+    # Naming elements here narrows the report to a subset, which is useful when you
+    # want the critical raw materials only rather than iron, silicon and the trace
+    # `*_ppm` impurities. A name no domain resolves is skipped with a note listing
+    # what was available; only a list where NOTHING resolves stops the run, since
+    # that means the draws directory is wrong.
     #
-    # An element absent from a domain simply contributes nothing there; it is not an
-    # error. A name NO domain resolves is skipped with a note listing what is
-    # available -- which elements exist is a property of the element models' own
-    # files, so the stage reports the rest rather than refusing to run. Only a list
-    # where nothing at all resolves stops the run, since that means the element
-    # draws directory is wrong.
-    #
-    # NOTE Pd and Pt come from one domain each (PCB and sensors respectively), so
-    # their bands are narrower than a multi-domain element's -- they carry only that
-    # one model's uncertainty.
+    # Two things to know before narrowing it. Some names are not elements at all --
+    # `Plastic` and `Unspecified` are real rows in the motor model. And an element
+    # that comes from a single domain, such as Pd from PCB or Pt from sensors,
+    # carries only that one model's uncertainty, so its band is narrower than a
+    # multi-domain element's for a reason that is not physical.
     #
     # SAFE TO CHANGE: yes. This only selects what is reported; it does not change
     # any calculation.
-    bev_electronics_elements: tuple[str, ...] = (
-        "Cu",                                      # the priority element
-        "Nd", "Dy", "Pr", "Tb",                    # magnet rare earths
-        "Co", "Li",                                # battery-adjacent, in sensors
-        "Pt", "Pd", "Au", "Ag",                    # precious, PCB and sensors
-        "Ga", "Ge", "In", "Ta", "W", "Nb",         # semiconductor and hard metals
-        "Al",                                      # bulk, but an EU critical material
-    )
+    bev_electronics_elements: tuple[str, ...] = ()
 
     # Whether stage 03_02 exports the BEV per-year, per-draw vehicle counts that
     # stage 04_02 needs.
@@ -1909,11 +1899,6 @@ class MaterialsParams:
             issues.append(
                 "materials.bev_electronics_series must include 'Total' -- the "
                 "headline results are built from it."
-            )
-        if not self.bev_electronics_elements:
-            issues.append(
-                "materials.bev_electronics_elements is empty -- stage 04_02 would "
-                "produce no element results. Name at least one element."
             )
         if len(set(self.bev_electronics_elements)) != len(self.bev_electronics_elements):
             dupes = sorted({e for e in self.bev_electronics_elements

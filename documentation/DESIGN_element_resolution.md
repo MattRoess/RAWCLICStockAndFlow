@@ -181,22 +181,67 @@ instruction and are not re-added here.
 
 ## 5. Which elements are reported
 
-`materials.bev_electronics_elements` — critical and strategic raw materials by
-default, not everything the models resolve. Iron and silicon are most of a motor by
-mass and are of no interest for criticality.
+**Whatever the draws carry.** `materials.bev_electronics_elements` defaults to
+**empty**, and empty means every element the element models resolved. The names come
+out of the `*_elements.txt` files beside the `.npy` arrays, so the report follows the
+upstream models rather than a list held here. At the current draws that is **51
+elements**, copper first and the rest alphabetical.
 
-```
-Cu, Nd, Dy, Pr, Tb, Co, Li, Pt, Pd, Au, Ag, Ga, Ge, In, Ta, W, Nb, Al
-```
+The default used to be eighteen critical and strategic raw materials, hard-coded.
+That list made the stage fail outright against a set of draws that had no Pr, Tb or
+Nb — the code was welded to names that were never its to decide. The available set is
+a property of the upstream models' files and changes when those models change.
 
-An element absent from a domain contributes nothing there and that is normal —
-platinum is a sensor element and appears in no motor. An element **no** domain
-resolves is **skipped**, with a note naming it and listing what is available, and the
-run continues with the rest. Which elements exist is a property of the element
-models' own output files, not of this stage, so the request list is a selection and
-not a contract — a set of draws without Pr, Tb and Nb still reports the other
-fifteen. A list where **nothing** resolves does stop the run: that means the wrong
-draws directory or the wrong models.
+Naming elements in the parameter narrows the report to a subset, which is what you
+want if you care about the critical raw materials and not about iron, silicon and the
+sixteen trace `*_ppm` impurities. Then:
+
+- An element absent from **one** domain contributes nothing there and that is normal
+  — platinum is a sensor element and appears in no motor.
+- An element **no** domain resolves is **skipped**, with a note naming it and listing
+  what was available. A request list is a selection, not a contract.
+- A list where **nothing** resolves does stop the run: that means the wrong draws
+  directory or the wrong models.
+
+Two cautions when narrowing it. Not every name is an element — `Plastic` and
+`Unspecified` are real rows in the motor model. And an element from a single domain,
+such as Pd from PCB or Pt from sensors, carries only that one model's uncertainty, so
+its band is narrower than a multi-domain element's for a reason that is not physical.
+
+**One element name remains in the code**, in `04_02`'s `WIRING_ELEMENT = "Cu"`. It is
+a statement about the model, not a selection: the wiring model reports a copper mass
+and nothing else, so Wiring has no `*_elements.txt` and its single element cannot be
+read from a file that does not exist. The two dedicated copper figures are guarded on
+`"Cu" in elements` so a narrowed request that drops copper still runs.
+
+### Cost of reporting everything
+
+| | 18 requested (15 resolved) | empty — all 51 |
+|---|---|---|
+| per-element figures | 30 | 102 |
+| element draw export, 5 years | 0.09 GB | 0.31 GB |
+
+Narrow the parameter if that matters; nothing about the calculation changes either
+way.
+
+---
+
+## 5b. Reproducibility
+
+`04_02` is now deterministic: two consecutive runs are **byte-identical**, checked by
+diffing their full logs.
+
+It was not before. The per-pair seed for the segment split was
+`seed + hash(group) % 10_000`, and Python salts `str` hashing per process, so every
+run split the pairs differently. The symptom was small and easy to dismiss — the
+recombination error moved in the fourth decimal, 2050 collected copper wandered by
+~0.07% between runs — which is exactly why it survived. `zlib.crc32` of the same
+bytes is the same number in every process, forever.
+
+This was the only unseeded randomness in the pipeline. Every other stage derives its
+generators from `monte_carlo.seed` or `materials_mc_seed` through
+`np.random.SeedSequence`, spawned in sorted or configuration order, and no stage uses
+the global `np.random` functions.
 
 Pd and Pt each come from a single domain, so their bands carry only that one model's
 uncertainty and are narrower than a multi-domain element's.
