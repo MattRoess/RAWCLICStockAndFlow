@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **147** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **145** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -30,7 +30,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 
 ## Sections
 
-- [Stage 01 — Data preparation](#stage-01-data-preparation) — `DataPrepParams`, 34 parameters
+- [Stage 01 — Data preparation](#stage-01-data-preparation) — `DataPrepParams`, 32 parameters
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
@@ -52,7 +52,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 
 > The very first stage: reads the raw REMIND fleet projections and the trade data, trims them to Europe, fills in the years REMIND does not supply, and hands a clean fleet trajectory to stage 02. The setting that matters most here is `scenario` -- it decides which possible future the entire pipeline is built on.
 
-**34 parameters.**
+**32 parameters.**
 
 | parameter | default |
 |---|---|
@@ -81,8 +81,6 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 | `target_class_detail` | `( "Large Car and SUV", "Van", "Compact Car", "Midsize Car", "Mini Car", "Subcompact Car...` |
 | `attribute_list` | `("Region", "technology")` |
 | `key_names` | `("Region", "Drivetrain")` |
-| `element_list` | `tuple(ELEMENT_LIST)` |
-| `element_list_noAlCu` | `tuple(ELEMENT_LIST_NO_AL_CU)` |
 | `input_dir` | `"../data/raw/"` |
 | `output_dir` | `"../data/processed/"` |
 | `export_data_file_name` | `"usedvehicles_v1.2.xlsx"` |
@@ -320,23 +318,6 @@ SAFE TO CHANGE: no, unless the source format changes.
 ### `key_names`
 
 Default: `("Region", "Drivetrain")`
-
-*Explained in the description of `DataPrepParams` at the top of this section.*
-
-
-### `element_list`
-
-Default: `tuple(ELEMENT_LIST)`
-
-Which chemical elements the material analysis tracks. The second list is the same
-set without aluminium and copper, for charts where those two dominate so heavily
-that everything else becomes invisible.
-SAFE TO CHANGE: yes, if composition data exists for the elements you add.
-
-
-### `element_list_noAlCu`
-
-Default: `tuple(ELEMENT_LIST_NO_AL_CU)`
 
 *Explained in the description of `DataPrepParams` at the top of this section.*
 

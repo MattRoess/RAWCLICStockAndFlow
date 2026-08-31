@@ -20,6 +20,7 @@ Where the work stands, what is safe, what is not, and what to do next.
 | `src/artifacts.py` | registers `bev_electronics_summary` | yes |
 | `code/04_01_carcomposition.py` | per-year mass draws exported for the recovery model; reads the per-year draws 03_02 already writes instead of asking for a period; every drivetrain gets a single-year vehicle count without re-running 03_02 | yes — re-run 31 Aug |
 | `code/04_02_BEVelectronics.py` | an element no domain resolves is now SKIPPED with a note, not fatal (see §4.2) | yes — re-run 31 Aug |
+| `src/plotting.py`, `src/params_schema.py`, `src/materials.py` | the two dead element plots deleted, and `element_list` / `element_list_noAlCu` with them (see §8) | yes — `Params()` builds, old pickle still loads |
 
 ### RAWCLICVehicleElectronics — 7 files changed by this work
 
@@ -309,7 +310,7 @@ now Markdown, one of them generated, and moved to `superseded/`.
 |---|---|
 | `README.md` | index — start here |
 | `RUNNING.md` | how to run everything, what it costs, what catches people out |
-| `PARAMETER_REFERENCE.md` | all **147** parameters, **generated** from `src/params_schema.py` |
+| `PARAMETER_REFERENCE.md` | all **145** parameters, **generated** from `src/params_schema.py` |
 | `MODEL_DESCRIPTION.md` | converted from the `.docx`, plus section 7 for everything since 13 July |
 | `UNCERTAINTY_MAP.md` | where uncertainty enters, travels and stops |
 | `DESIGN_inflow_uncertainty_propagation.md` | the propagation design and two rejected alternatives |
@@ -357,32 +358,29 @@ several of them are (`load_element_draws`, `materials.py:200`, `04_04:136`,
 
 ### What the survey found
 
-Element names appear in exactly two files — `src/params_schema.py` and
-`code/04_02_BEVelectronics.py`. Everything else refers to elements through a
-parameter. So the blast radius is small.
+Element names now appear in exactly **one** file — `code/04_02_BEVelectronics.py`,
+in the `bev_electronics_elements` default and nowhere else. Nothing else in the
+repository holds a list of element names at all.
 
-| site | state | action |
-|---|---|---|
-| `04_02` `resolve_elements` | FIXED `cbf8903` | none |
-| `src/plotting.py:450` `plot_elements_by_flow` | too loose — `.isin(element_list)`, then `continue` on an empty frame, silently | see below |
-| `src/plotting.py:711` `plot_mass_by_drv_flow_elements` | same | see below |
-| `general.element_list` / `element_list_noAlCu` | `("Ag","In","Ta","Zn","Dy","Nd","Pr","Al","Cu")` and the same without Al/Cu | see below |
-| `04_01` `MATERIALS_ALWAYS_SHOWN_INDIVIDUALLY` | already independent — a "prefer to show" set; an absent name simply never matches, and it only takes effect when `top_n` is an int, which it is not | none |
-| structural checks in `04_01`, `04_03`, `04_04`, `materials.py` | correctly fatal | none |
+| site | state |
+|---|---|
+| `04_02` `resolve_elements` | FIXED `cbf8903` — skips, names the skip, continues |
+| `src/plotting.py` `plot_elements_by_flow` | DELETED — dead code, no callers |
+| `src/plotting.py` `plot_mass_by_drv_flow_elements` | DELETED — dead code, no callers |
+| `data_prep.element_list` / `element_list_noAlCu` | DELETED with them; the two plotting functions were their only consumers, so they were inert |
+| `ELEMENT_LIST` / `ELEMENT_LIST_NO_AL_CU` in `params_schema.py` | DELETED — the two parameters were their only use |
+| `04_01` `MATERIALS_ALWAYS_SHOWN_INDIVIDUALLY` | already independent — a "prefer to show" set; an absent name simply never matches, and it only takes effect when `top_n` is an int, which it is not |
+| structural checks in `04_01`, `04_03`, `04_04`, `materials.py` | correctly fatal — a missing column or draws file is a broken input, not a shorter list |
 
-**Both `plotting.py` functions have no callers anywhere in the repository** — grep
-across `.py` and `.ipynb` finds only their own definitions. So do not fix them
-before deciding whether they should exist at all. Two options, and this is the
-user's call:
+The deletion was checked, not assumed. Both functions were greppable to nothing
+across `.py` and `.ipynb`; the two parameters were used only by them; the two
+module constants were used only by the two parameters. `Params()` still builds, the
+parameter count went 147 → 145, and the existing `00_params.pkl` still unpickles —
+it simply carries `element_list` and `element_list_noAlCu` as stray attributes on
+`data_prep` that no code reads, and `asdict` round-trips unchanged.
 
-1. **Delete them**, and `element_list` / `element_list_noAlCu` with them — they are
-   the only consumers, so those two parameters are currently inert.
-2. **Keep and fix**: replace the silent `continue` with the `04_02` note, and derive
-   the "drop the top two" behaviour from the data rather than from a second
-   hard-coded list.
-
-Until one is chosen, nothing in the running pipeline depends on either, so nothing
-is at risk.
+The archived copies under `src/archive/` still contain all of this. They were left
+alone deliberately: they are snapshots, not live code.
 
 ### The workflow, when a new name list appears
 

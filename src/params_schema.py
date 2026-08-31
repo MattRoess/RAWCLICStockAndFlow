@@ -35,9 +35,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-ELEMENT_LIST: list[str] = ["Ag", "In", "Ta", "Zn", "Dy", "Nd", "Pr", "Al", "Cu"]
-ELEMENT_LIST_NO_AL_CU: list[str] = ["Ag", "In", "Ta", "Zn", "Dy", "Nd", "Pr"]
-
 ALL_DRIVETRAINS: list[str] = [
     "BEV", "HEV", "PHEV", "Hybrid", "Liquids", "Petrol", "Diesel", "Gases", "FCEV",
 ]
@@ -478,14 +475,6 @@ class DataPrepParams:
     attribute_list: tuple[str, ...] = ("Region", "technology")
 
     key_names: tuple[str, ...] = ("Region", "Drivetrain")
-
-    # Which chemical elements the material analysis tracks. The second list is the same
-    # set without aluminium and copper, for charts where those two dominate so heavily
-    # that everything else becomes invisible.
-    # SAFE TO CHANGE: yes, if composition data exists for the elements you add.
-    element_list: tuple[str, ...] = tuple(ELEMENT_LIST)
-
-    element_list_noAlCu: tuple[str, ...] = tuple(ELEMENT_LIST_NO_AL_CU)
 
     # Where raw input data is read from, and where processed results are written.
     # Both are relative to the `code/` directory.

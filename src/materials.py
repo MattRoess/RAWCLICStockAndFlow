@@ -16,7 +16,8 @@ ELEMENTS. This file already supports exactly that distinction via `parameter_cod
     in the merge either way, so component-level grouping is always available.
   - `parameter_code="e-m"` (previous default, still available if ever needed): merges
     in composition rows with an actual `element` column (individual chemical elements
-    like Ag, In, Ta, Zn, Dy, Nd, Pr, Al, Cu -- see `params_schema.py`'s `ELEMENT_LIST`).
+    like Ag, In, Ta, Zn, Dy, Nd, Pr, Al, Cu). Which elements exist is whatever the
+    composition file carries; nothing here holds a list of them.
 
 **Changed this round**: the function default is now `"m-c"`, matching the project's
 requirement. No existing caller depends on the old default -- no stage-04 script has
