@@ -308,6 +308,27 @@ genuinely unresolved, and the recovery model derives it as a `rest` child and
 treats it as unrecovered — the honest reading, and what makes every recovery
 figure there a lower bound.
 
+### An alloy domain exports its alloys and nothing else
+
+`Wiring` and `Motors` write their alloys and their domain mass, and **no element
+files at all**. Writing both would put the same mass in the folder twice under
+two names — `fealloy__Motors` already contains every gram of `Mn__esteel__Motors`
+and `Sr__magnet__Motors` — and a consumer reading the folder as materials would
+count both. The elements inside an alloy are not recovered separately, so there
+is nothing downstream for them to key on either.
+
+The skip is per **domain**, not per element, so it cannot be got wrong by
+editing `bev_electronics_elements`. Requesting `Mn__esteel` still reports and
+plots it here; it simply does not reach the export. `PCB` and `Sensors` are
+unaffected and keep every element file they had.
+
+So the folder after a run holds, per flow:
+
+    __domain____Wiring   __domain____Motors   __domain____PCB   __domain____Sensors
+    copper__Wiring
+    copper__Motors   alalloy__Motors   fealloy__Motors
+    <element>__PCB   <element>__Sensors
+
 Verified by replaying the added block against the real element files rather than
 by re-running the stage: `Wiring` writes `copper` at 100% of its domain,
 `Motors` writes `fealloy` 68.3%, `copper` 15.0% and `alalloy` 9.3%, no alloy

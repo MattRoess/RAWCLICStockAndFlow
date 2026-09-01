@@ -715,7 +715,19 @@ def element_flows(
                     part += pooled[k] * col                  # fraction of domain mass
             part /= TONNES_PER_KILOTONNE
             total += part
-            if export is not None:
+            # AN ALLOY DOMAIN EXPORTS ITS ALLOYS AND NOTHING ELSE. Writing the
+            # elements as well would be writing the same mass twice under two
+            # names -- `fealloy__Motors` already contains every gram of
+            # `Mn__esteel__Motors` and `Sr__magnet__Motors` -- and a consumer
+            # reading the folder as materials would count both. The elements
+            # inside an alloy are not recovered separately, so there is nothing
+            # downstream for them to key on either.
+            #
+            # This is per-DOMAIN and not per-element on purpose: it cannot be
+            # got wrong by editing `bev_electronics_elements`. Requesting
+            # `Mn__esteel` still reports and plots it here; it just does not
+            # reach the export.
+            if export is not None and dom not in ALLOY_DOMAINS:
                 _write_element_draws(export, flow, e, dom, part)
             per_dom[dom] = summarize_by_year(part, years)
             del part
