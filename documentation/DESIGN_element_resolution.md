@@ -248,6 +248,74 @@ uncertainty and are narrower than a multi-domain element's.
 
 ---
 
+## 5c. The alloys, and why the draw export also writes them
+
+**Added 2026-09-01, for the recovery model.**
+
+What comes out of a shredder is a **material, not an element**. Magnetic
+separation takes a ferrous stream, eddy current a non-ferrous one, and what the
+recycler sells is steel scrap, an aluminium alloy and copper. Elements alloyed
+into one of those stay in it — nobody separates the manganese out of recovered
+steel, so *"manganese recovered"* describes a process that does not happen.
+
+So the draw export writes each alloy's own mass alongside the elements:
+
+    <out>/<flow>/copper__Wiring.npy     the harness
+                 copper__Motors.npy     the windings
+                 alalloy__Motors.npy
+                 fealloy__Motors.npy
+
+`04_01_carcomposition.py` has exported this shape all along, as
+`<material>__<component>.npy`, and the recovery model reads it with
+`child_layer = material` and no element layer at all. This makes 04_02's export
+usable the same way. **Boards and sensors keep their element export and get no
+alloy one**: they go to a recycler that genuinely does separate elements, so
+gold, silver and palladium come out as themselves.
+
+### The mapping, which is the only domain knowledge involved
+
+`ALLOY_OF` in `code/04_02_BEVelectronics.py`, one line per alloy:
+
+| alloy | from | note |
+|---|---|---|
+| `copper` | `copper`, and the bare `Cu` column | the element models name copper's own copper **without** a suffix — it is the base metal and the `__copper` columns are its impurities |
+| `alalloy` | `bulk` | |
+| `fealloy` | `esteel`, `cfsteel`, `magnet` | ferrite is ferrimagnetic, so a magnet leaves the separator **inside the ferrous stream** as an impurity in the steel. It is not a magnet product, and its strontium is not recovered as strontium |
+
+### Nothing is approximated
+
+`motors_<segment>_<alloy>_elements.txt` names an alloy's elements, and every one
+of them appears in the main `motors_<segment>_elements.txt` as
+`<element>__<alloy>` — esteel's `Fe Si C Mn Al P S` are all there. An alloy's
+mass is therefore the **exact** sum of its columns.
+
+The sum is taken over **all** columns, never over the reported `elements`
+subset. Narrowing that list would otherwise shrink an alloy without saying so —
+and that is not hypothetical: the 2026-09-01 run resolved 24 elements, dropped
+`Fe`, and left the two steels holding their manganese alone.
+
+Measured on the committed element files, mean fraction of a motor:
+
+| segment | `copper` | `alalloy` | `fealloy` | unmapped | total |
+|---|---|---|---|---|---|
+| AB | 0.1546 | 0.0313 | 0.7416 | 0.0725 | **1.000000** |
+| CD | 0.1490 | 0.1030 | 0.6737 | 0.0743 | **1.000000** |
+| EF | 0.1466 | 0.1458 | 0.6309 | 0.0767 | **1.000000** |
+
+Every material named in the files is mapped; the unmapped remainder is
+`Plastic` and `Unspecified`, which is **deliberately not exported**. It is
+genuinely unresolved, and the recovery model derives it as a `rest` child and
+treats it as unrecovered — the honest reading, and what makes every recovery
+figure there a lower bound.
+
+Verified by replaying the added block against the real element files rather than
+by re-running the stage: `Wiring` writes `copper` at 100% of its domain,
+`Motors` writes `fealloy` 68.3%, `copper` 15.0% and `alalloy` 9.3%, no alloy
+exceeds its domain on any draw, and the three plus the unmapped remainder come
+to the whole.
+
+---
+
 ## 6. Verification
 
 | check | result |

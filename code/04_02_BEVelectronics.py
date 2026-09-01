@@ -404,6 +404,55 @@ ELEMENT_DOMAINS = ("Wiring", "Motors", "PCB", "Sensors")
 SENSOR_BASE_YEAR = 2025          # the year the sensor study's composition is fixed at
 MG_PER_GRAM = 1_000.0
 
+# ---- alloys, for the recovery model -----------------------------------------
+#
+# WHAT COMES OUT OF A SHREDDER IS A MATERIAL, NOT AN ELEMENT. Magnetic
+# separation takes a ferrous stream, eddy current a non-ferrous one, and what
+# the recycler sells is steel scrap, an aluminium alloy and copper. Elements
+# alloyed into one of those stay in it: nobody separates the manganese out of
+# recovered steel, so "manganese recovered" describes a process that does not
+# happen.
+#
+# So the draw export also writes each ALLOY'S OWN MASS, which is what the
+# recovery model keys its coefficients on. 04_01 has exported exactly this shape
+# all along, as `<material>__<component>.npy`, and the recovery model reads it
+# with no element layer at all.
+#
+# THE MAPPING IS THE ONLY DOMAIN KNOWLEDGE HERE, one line per alloy:
+#
+#   copper    the windings and the harness. NOTE the bare `Cu` column: the
+#             element models name copper's own copper WITHOUT a suffix -- it is
+#             the base metal and the `__copper` columns are its impurities --
+#             so `Cu` belongs to this alloy too.
+#   alalloy   aluminium.
+#   fealloy   steel, cast iron AND the ferrite magnets. Ferrite is
+#             ferrimagnetic, so a magnet leaves the separator inside the ferrous
+#             stream as an impurity in the steel. It is not a magnet product,
+#             and its strontium is not recovered as strontium.
+#
+# NOTHING IS APPROXIMATED. `motors_<segment>_<alloy>_elements.txt` names an
+# alloy's elements and every one of them appears in the main
+# `motors_<segment>_elements.txt` as `<element>__<alloy>` -- esteel's
+# Fe Si C Mn Al P S are all there -- so an alloy's mass is the EXACT sum of its
+# columns. This is also why the sum is taken over ALL columns and never over the
+# reported `elements` subset: narrowing that list would silently shrink an alloy.
+#
+# What is not in the map -- `Plastic`, `Unspecified` -- is deliberately not
+# exported. It is genuinely unresolved, and the recovery model derives it as a
+# `rest` child and treats it as unrecovered, which is the honest reading.
+ALLOY_OF = {"copper": "copper", "bulk": "alalloy",
+            "esteel": "fealloy", "cfsteel": "fealloy", "magnet": "fealloy"}
+
+# A bare column that is nonetheless an alloy's own metal, per the note above.
+# Only copper has one; aluminium's is written `Al__bulk`.
+BARE_ALLOY_COLUMN = {WIRING_ELEMENT: "copper"}
+
+# Domains worth splitting into alloys at all. Boards and sensors go to a
+# recycler that DOES separate elements -- gold, silver and palladium come out as
+# themselves -- so they keep their element export and get no alloy one. Wiring
+# is copper by definition and has no element file to split.
+ALLOY_DOMAINS = ("Wiring", "Motors")
+
 
 def load_element_draws(elem_dir: Path, groups: tuple[str, ...]) -> dict:
     """
@@ -603,6 +652,44 @@ def element_flows(
             domain_mass /= TONNES_PER_KILOTONNE
             _write_element_draws(export, flow, "__domain__", dom, domain_mass)
             del domain_mass
+
+    # ---- and each alloy's own mass ---------------------------------------
+    # See ALLOY_OF. Written beside the elements, under names with no `__` in
+    # them, so the recovery model reads them as materials in their own right.
+    if export is not None:
+        for dom in ALLOY_DOMAINS:
+            groups = [(g, v) for (d, g), v in pooled.items() if d == dom]
+            if not groups:
+                continue
+
+            alloys: dict[str, np.ndarray] = {}
+            for g, v in groups:
+                if dom not in elem or g not in elem[dom]:
+                    # Wiring has no element file: the domain IS copper, and the
+                    # pooled array is already its mass.
+                    alloy = ALLOY_OF[BARE_ALLOY_COLUMN[WIRING_ELEMENT]]
+                    part = np.asarray(v, dtype=np.float64)
+                    alloys[alloy] = part if alloy not in alloys else alloys[alloy] + part
+                    continue
+
+                els, arr = elem[dom][g]
+                # Every column, not the reported subset: a narrowed element list
+                # would otherwise shrink an alloy without saying so.
+                for column, name in enumerate(els):
+                    material = (name.split("__", 1)[1] if "__" in name
+                                else BARE_ALLOY_COLUMN.get(name))
+                    alloy = ALLOY_OF.get(material) if material else None
+                    if alloy is None:
+                        continue           # Plastic, Unspecified: left to `rest`
+                    fraction = np.asarray(
+                        arr[:n_draws, column], dtype=np.float64)[:, None]
+                    part = v * fraction
+                    alloys[alloy] = part if alloy not in alloys else alloys[alloy] + part
+
+            for alloy, mass in sorted(alloys.items()):
+                _write_element_draws(export, flow, alloy, dom,
+                                     mass / TONNES_PER_KILOTONNE)
+            del alloys
 
     # ---- one element at a time -------------------------------------------
     out: dict[str, dict[str, pd.DataFrame]] = {}
