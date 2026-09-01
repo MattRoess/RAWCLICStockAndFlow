@@ -732,7 +732,14 @@ def element_flows(
             per_dom[dom] = summarize_by_year(part, years)
             del part
         per_dom["total"] = summarize_by_year(total, years)
-        if export is not None:
+        # An element that lives ONLY in alloy domains has no total worth
+        # exporting either: `Al__bulk__total` is the same mass as the
+        # `Al__bulk__Motors` that was just skipped, under a name that still
+        # spells out an element inside an alloy. Consumers skip `__total`, so
+        # it was inert -- but inert and misreadable is not a reason to write it.
+        # `Cu__total` and `Au__total` stay: they span domains that DO report
+        # elements, and the total is the useful thing about them.
+        if export is not None and not set(where[e]) <= set(ALLOY_DOMAINS):
             _write_element_draws(export, flow, e, "total", total)
         out[e] = per_dom
         del total

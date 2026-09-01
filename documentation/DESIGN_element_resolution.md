@@ -322,12 +322,38 @@ editing `bev_electronics_elements`. Requesting `Mn__esteel` still reports and
 plots it here; it simply does not reach the export. `PCB` and `Sensors` are
 unaffected and keep every element file they had.
 
+Nor under a `__total` name. An element that lives only in alloy domains has no
+total worth exporting either: `Al__bulk__total` is the same mass as the
+`Al__bulk__Motors` that was just skipped, under a name that still spells out an
+element inside an alloy. Consumers skip `__total`, so it was inert — but inert
+and misreadable is not a reason to write it. `Cu__total` and `Au__total` stay:
+they span domains that do report elements.
+
 So the folder after a run holds, per flow:
 
     __domain____Wiring   __domain____Motors   __domain____PCB   __domain____Sensors
     copper__Wiring
     copper__Motors   alalloy__Motors   fealloy__Motors
-    <element>__PCB   <element>__Sensors
+    <element>__PCB   <element>__Sensors   <element>__total
+
+### And it is tested by listing the folder
+
+`code/test_stage04_02_export.py` calls `element_flows` for real with `export`
+set, against the committed element files at 50 draws, and asserts on the file
+names it finds. About a second, no pipeline run.
+
+**It exists because the check that was skipped is the one that mattered.** The
+alloy export was added on 2026-09-01 and verified in isolation; the element
+export was not removed, so a run wrote `fealloy__Motors` *and*
+`Mn__esteel__Motors` *and* `Sr__magnet__Motors` — the same mass twice, which is
+the exact double-count the alloy export exists to prevent. Checking a block in
+isolation tells you the block does what you wrote. Listing the folder tells you
+the stage does what you meant. It cost two full runs of the stage to find.
+
+The test asks for `Sr__magnet`, `Mn__esteel`, `Mn__cfsteel` and `Al__bulk` on
+purpose: a test that asked only for `Cu` and `Au` would have passed against the
+broken version. Both checks were confirmed by restoring each defect and watching
+them fail.
 
 Verified by replaying the added block against the real element files rather than
 by re-running the stage: `Wiring` writes `copper` at 100% of its domain,
