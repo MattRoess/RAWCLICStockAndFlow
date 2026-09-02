@@ -3055,8 +3055,26 @@ def main() -> dict[str, Any]:
     params = loaded["params"]
     p04 = params.materials
     region = p04.region
-    periods = params.monte_carlo.output_periods
-    headline_period = max(periods, key=lambda p: p[1] - p[0])
+    # WHAT IS REPORTED, and what is merely COMPUTED, are two different lists.
+    #
+    # `monte_carlo.output_periods` is shared with stages 02, 03_01 and 03_02, and
+    # every entry there is a reporting window all of them compute and write. The
+    # recovery model needs single-year draws, and the export can only write a
+    # period this stage actually computed -- so for a while the answer was to put
+    # 51 single-year windows into that shared setting. That made four stages do
+    # fifty-one windows of reporting work to serve one downstream reader, and it
+    # was rightly rejected.
+    #
+    # So the extra years are computed here and NOWHERE ELSE: added to the loop
+    # below, written by the export, and then removed from the tables before
+    # anything reports on them. Every consumer downstream of that pruning sees
+    # exactly the periods it saw before.
+    report_periods = list(params.monte_carlo.output_periods)
+    headline_period = max(report_periods, key=lambda p: p[1] - p[0])
+    export_only = [(y, y) for y in sorted(int(y) for y in
+                                          (p04.carcomposition_draws_years or ()))
+                   if (y, y) not in report_periods]
+    periods = report_periods + export_only
     active_scenario_names = params.adjusted_flows.active_scenario_names()
     n_draws = p04.materials_mc_n_draws
 
@@ -3064,7 +3082,12 @@ def main() -> dict[str, Any]:
         raise RuntimeError("params.adjusted_flows.active_scenario_names() is empty -- nothing to process.")
 
     print(f"Active scenarios: {active_scenario_names}")
-    print(f"Periods: {periods} (headline for MC-panel plots: {headline_period})")
+    print(f"Periods: {report_periods} (headline for MC-panel plots: {headline_period})")
+    if export_only:
+        print(f"        + {len(export_only)} single-year period(s) computed for the "
+              f"draw export only, {export_only[0][0]}-{export_only[-1][0]}:")
+        print(f"          they are written to disk and then dropped, so nothing "
+              f"else in this stage sees them.")
     print(f"Region: {region!r}, materials MC n_draws: {n_draws:,}")
 
     master_seed_seq = np.random.SeedSequence(p04.materials_mc_seed)
@@ -3226,6 +3249,23 @@ def main() -> dict[str, Any]:
                 del mixed_composition_draws_standard
                 gc.collect()
 
+            # [NEW] The slice of draws the recovery model reads, written HERE --
+            # immediately after the period loop and before anything reports.
+            #
+            # Position matters. `_extract_cross_scenario_summary` below iterates
+            # every (period, flow) entry in these tables, so an export-only period
+            # left in place would reach the cross-scenario summary and appear in
+            # output nobody asked for it in. Writing first and pruning second is
+            # what keeps this change invisible to the rest of the stage.
+            _write_carcomposition_draws(
+                p04, scenario_name, flow, periods, mc_draws_tables_flow, n_draws)
+            for extra in export_only:
+                mc_draws_tables_flow.pop((extra, flow), None)
+                mc_draws_tables_standard_flow.pop((extra, flow), None)
+                scalar_tables.pop((extra, flow), None)
+                scalar_tables_standard.pop((extra, flow), None)
+                mass_by_year_tables.pop((extra, flow), None)
+
             # -----------------------------------------------------------------------
             # Everything below needs THIS FLOW's full-resolution draws -- done right
             # here, while they're still in memory, before they get freed at the end
@@ -3310,9 +3350,6 @@ def main() -> dict[str, Any]:
             # Not the whole thing: that is the 8-17 GB per scenario-flow the
             # block below refuses to write by default, and it would be no more
             # readable for being on disk.
-            _write_carcomposition_draws(
-                p04, scenario_name, flow, periods, mc_draws_tables_flow, n_draws)
-
             if p04.persist_mc_mass_draws:
                 saved_paths.update(save_unregistered_scenario_outputs(artifacts_dir, {
                     f"04_01_mc_mass_draws_{scenario_name}_{flow}.pkl": mc_draws_tables_flow,

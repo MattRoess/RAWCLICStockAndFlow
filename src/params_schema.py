@@ -1924,19 +1924,22 @@ class MaterialsParams:
     #     ()        write nothing
     #     (2040,)   that one year
     #
-    # STILL ONE YEAR, and not for want of trying. 04_02's export was widened to
-    # all 51 years so that a downstream question never costs an upstream run;
-    # the same cannot be done here without a code change, because a year is
-    # exported only when monte_carlo.output_periods holds a matching (y, y) --
-    # and that setting is shared by stages 02, 03_01 and 03_02, so filling it
-    # with 51 single-year windows makes all of them do 51 windows of reporting
-    # work. That was tried on 2026-09-02 and reverted.
+    # EVERY YEAR, and this setting alone decides it. 04_01 now computes a
+    # single-year period for each year named here, writes it, and drops it again
+    # before anything reports -- so monte_carlo.output_periods no longer has to
+    # carry them and stages 02, 03_01 and 03_02 are untouched.
     #
-    # The fix belongs in 04_01: the export should derive the single-year slices
-    # it needs, rather than requiring a shared reporting list to carry them.
+    #     0.15 GB per year, so 7.6 GB for 2020-2070.
     #
-    # SAFE TO CHANGE: yes, together with monte_carlo.output_periods.
-    carcomposition_draws_years: tuple[int, ...] = (2040,)
+    # THE COST IS COMPUTE, NOT DISK, and it is the real one. Every year here is
+    # a period this stage must bootstrap composition draws for and combine with
+    # the flow draws. Two periods becomes fifty-two, so the stage's own run gets
+    # substantially longer. That is the price of never having to run it again
+    # because somebody wanted a different year, which was the alternative.
+    #
+    # SAFE TO CHANGE: yes, on its own. Narrow it if the run time matters more
+    # than the coverage.
+    carcomposition_draws_years: tuple[int, ...] = tuple(range(2020, 2071))
 
     # WHERE THOSE DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then one per <drivetrain>_<flow>, then one .npy
