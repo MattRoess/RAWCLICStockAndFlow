@@ -1929,17 +1929,26 @@ class MaterialsParams:
     # before anything reports -- so monte_carlo.output_periods no longer has to
     # carry them and stages 02, 03_01 and 03_02 are untouched.
     #
-    #     0.15 GB per year, so 7.6 GB for 2020-2070.
+    # THE COST IS COMPUTE, NOT DISK, and it is the real one. MEASURED on this
+    # machine at 50,000 draws: 1.2 minutes per period, and the period loop runs
+    # once per flow -- there are two, `inflow` and `collected`. So the run time
+    # is roughly 2.4 minutes per year in this list, on top of the two reporting
+    # periods:
     #
-    # THE COST IS COMPUTE, NOT DISK, and it is the real one. Every year here is
-    # a period this stage must bootstrap composition draws for and combine with
-    # the flow draws. Two periods becomes fifty-two, so the stage's own run gets
-    # substantially longer. That is the price of never having to run it again
-    # because somebody wanted a different year, which was the alternative.
+    #     every 5th year, 2020-2070   11 years   13 periods/flow   ~31 min   1.6 GB
+    #     every 2nd year              26 years   28 periods/flow   ~62 min   3.8 GB
+    #     every year                  51 years   53 periods/flow   ~2h 06m   7.6 GB
     #
-    # SAFE TO CHANGE: yes, on its own. Narrow it if the run time matters more
-    # than the coverage.
-    carcomposition_draws_years: tuple[int, ...] = tuple(range(2020, 2071))
+    # Every year was tried on 2026-09-02 and abandoned at the 1h 50m mark. A
+    # step of 5 is what the recovery model was actually asked for, and it cannot
+    # use many more: five drivetrains across all 51 years is about 84 GB of
+    # result against a 4 GB memory budget, so it would refuse to run them anyway.
+    #
+    # If a specific intermediate year is ever needed, add it here and re-run --
+    # that is a targeted 31 minutes, not a standing two-hour tax on every run.
+    #
+    # SAFE TO CHANGE: yes, on its own. Nothing else moves with it any more.
+    carcomposition_draws_years: tuple[int, ...] = tuple(range(2020, 2071, 5))
 
     # WHERE THOSE DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then one per <drivetrain>_<flow>, then one .npy
@@ -2114,12 +2123,21 @@ class MonteCarloParams:
     #
     # DO NOT ADD SINGLE-YEAR ENTRIES HERE TO SERVE 04_01's DRAW EXPORT. This
     # setting is shared by stages 02, 03_01, 03_02 and 04_01, and every entry is
-    # a reporting window each of them computes and writes. On 2026-09-02 it was
-    # briefly set to 52 entries so that 04_01 would export a year per period;
-    # that turned two windows into fifty-two across four stages, which is a
-    # pipeline-wide cost for one downstream reader. Reverted the same day.
+    # a reporting window each of them computes and writes.
+    #
+    # (2040, 2040) used to sit here and was removed on 2026-09-02. It was added
+    # in 00af52a for one reason: 04_01's draw export could only write a year that
+    # had a matching single-year period, so 2040 was put in the shared list to
+    # get 2040 exported. Since 7b39946 that stage derives its own single-year
+    # periods from materials.carcomposition_draws_years, so the entry bought
+    # nothing and cost four stages an extra reporting window on every run.
+    #
+    # The same shortcut was taken again at 51x the scale earlier the same day and
+    # rejected. If a year is wanted in the EXPORT, put it in
+    # carcomposition_draws_years. Put a window here only when the window itself
+    # is the thing being reported on.
     output_periods: list[tuple[int, int]] = field(
-        default_factory=lambda: [(1975, 2070), (2040, 2040)])
+        default_factory=lambda: [(1975, 2070)])
 
     def validate(self) -> list[str]:
         issues: list[str] = []
