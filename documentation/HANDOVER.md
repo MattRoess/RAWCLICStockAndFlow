@@ -298,6 +298,20 @@ that one.
 
   Naming: NdFeB is a **REM**, Fe-Sr is a **ferrite**, and a magnet is called by its
   name, never by its constituent elements.
+- **04_01 AND 04_02 DO NOT DOUBLE COUNT — 04_02's mass is ADDITIONAL** (measured
+  2026-09-02). 04_01's BEV 2050 inflow is 33,415 kt across twelve components
+  (`elvBIW`, `elvBattery`, `elvChassis`, `elvPowertrain`, …). Searching its material
+  names for electronics, cable, actuator, controller, light, wiring or harness
+  returns **nothing**: vehicle electronics are absent from its composition data,
+  which is why 04_02 exists. 04_02's 992.9 kt of BEV electronics is therefore on top
+  of 04_01's total, not inside it. Neither stage reads the other and nothing sums
+  them, but both now export per-draw arrays for the recovery model, so this is the
+  fact that stage needs.
+
+  What misled a reader once: `MATERIALS_ALWAYS_SHOWN_INDIVIDUALLY` in 04_01 lists
+  `powerElectronics`, `actuators`, `controllers`, `cableLike`. It is a DISPLAY
+  preference, inert at the current settings (`top_n` is None), and it names materials
+  the composition data does not contain. It is not a second electronics account.
 - `KG_PER_TONNE` in `04_01_carcomposition.py` is still there and still unused
   (checked 31 Aug).
 - Two functions vanished from `04_01` on 2026-07-09 (`plot_material_mass_by_year`,
