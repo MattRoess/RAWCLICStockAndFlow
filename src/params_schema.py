@@ -1924,17 +1924,19 @@ class MaterialsParams:
     #     ()        write nothing
     #     (2040,)   that one year
     #
-    # EVERY YEAR, for the same reason as bev_electronics_element_draws_years
-    # above: a downstream question must not cost an upstream run. 0.15 GB per
-    # year, so 7.8 GB for 2020-2070 -- one-off, against a re-run of this stage
-    # every time somebody wants a year that was not on the list.
+    # STILL ONE YEAR, and not for want of trying. 04_02's export was widened to
+    # all 51 years so that a downstream question never costs an upstream run;
+    # the same cannot be done here without a code change, because a year is
+    # exported only when monte_carlo.output_periods holds a matching (y, y) --
+    # and that setting is shared by stages 02, 03_01 and 03_02, so filling it
+    # with 51 single-year windows makes all of them do 51 windows of reporting
+    # work. That was tried on 2026-09-02 and reverted.
     #
-    # `output_periods` below carries the matching single-year entries. The two
-    # have to move together, and that is why they are both set here rather than
-    # left for a reader to discover one of.
+    # The fix belongs in 04_01: the export should derive the single-year slices
+    # it needs, rather than requiring a shared reporting list to carry them.
     #
     # SAFE TO CHANGE: yes, together with monte_carlo.output_periods.
-    carcomposition_draws_years: tuple[int, ...] = tuple(range(2020, 2071))
+    carcomposition_draws_years: tuple[int, ...] = (2040,)
 
     # WHERE THOSE DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then one per <drivetrain>_<flow>, then one .npy
@@ -2107,18 +2109,14 @@ class MonteCarloParams:
     # added for the recovery-model export, which needs single-year periods
     # (see materials.carcomposition_draws_years).
     #
-    # THE SINGLE-YEAR ENTRIES ARE NOT OPTIONAL DECORATION. 04_01's draws are
-    # cumulative over a period, and the recovery model's axis is years, so a
-    # year is exported only if a period (y, y) exists here. They are generated
-    # rather than typed so that this list and
-    # materials.carcomposition_draws_years cannot drift apart -- one being
-    # widened without the other writes nothing and says only "skipped with a
-    # note", which is a quiet way to lose a day.
-    #
-    # (1975, 2070) is kept first: every existing figure and saved table in this
-    # stage is keyed on it.
+    # DO NOT ADD SINGLE-YEAR ENTRIES HERE TO SERVE 04_01's DRAW EXPORT. This
+    # setting is shared by stages 02, 03_01, 03_02 and 04_01, and every entry is
+    # a reporting window each of them computes and writes. On 2026-09-02 it was
+    # briefly set to 52 entries so that 04_01 would export a year per period;
+    # that turned two windows into fifty-two across four stages, which is a
+    # pipeline-wide cost for one downstream reader. Reverted the same day.
     output_periods: list[tuple[int, int]] = field(
-        default_factory=lambda: [(1975, 2070)] + [(y, y) for y in range(2020, 2071)])
+        default_factory=lambda: [(1975, 2070), (2040, 2040)])
 
     def validate(self) -> list[str]:
         issues: list[str] = []
