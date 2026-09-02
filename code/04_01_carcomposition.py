@@ -1114,6 +1114,9 @@ def bootstrap_mixed_composition_draws(
     mixed: dict[tuple, np.ndarray] = {}
     n_dt_seg_total = len(cohort_year_weights)
     n_groups_done = 0
+    # Groups whose every draw is zero, summarised once at the end of the
+    # call rather than printed one line each -- see the NOTE below.
+    all_zero: list[tuple[str, str, str, str]] = []
 
     for (drivetrain, segment), year_weights in cohort_year_weights.items():
         years = list(year_weights.keys())
@@ -1208,18 +1211,34 @@ def bootstrap_mixed_composition_draws(
                     year_bins["frequency"].to_numpy(dtype=float),
                     cnt, rng,
                 )
-            if verbose and n_missing_year_draws == n_draws:
-                # Every single draw for this group had no composition data at all in
-                # its assigned cohort year -- the whole group is legitimately
-                # all-zero mass (material not present for this drivetrain/segment/
-                # component at all). Printed once per such group so this is visible
-                # in the log, not silently invisible as before.
-                print(f"  [bootstrap_mixed_composition_draws] NOTE: "
-                      f"(drivetrain={drivetrain!r}, segment={segment!r}, "
-                      f"components={components!r}, material={material!r}) has NO "
-                      f"composition data in ANY of its assigned cohort years -- all "
-                      f"{n_draws:,} draws are 0 (material not present for this group).")
+            if n_missing_year_draws == n_draws:
+                # Every draw for this group had no composition data at all in its
+                # assigned cohort year -- legitimately all-zero mass, the material
+                # is not recorded for that drivetrain/segment/component.
+                #
+                # COLLECTED, then summarised once per call. It used to print a line
+                # each, which was readable while this stage ran two periods; the
+                # draw export now runs one period per exported year, and 52 periods
+                # x tens of gaps buried every other line of the log in the same
+                # three facts. A count, with the materials named, says the same
+                # thing and can be read.
+                all_zero.append((drivetrain, segment, components, material))
             mixed[(drivetrain, segment, components, material)] = out
+
+    if verbose and all_zero:
+        from collections import Counter
+        by_material = Counter(material for *_, material in all_zero)
+        worst, worst_n = by_material.most_common(1)[0]
+        example = next(g for g in all_zero if g[3] == worst)
+        print(f"  [bootstrap_mixed_composition_draws] NOTE: {len(all_zero):,} of "
+              f"{len(mixed):,} groups have NO composition data in any of their "
+              f"assigned cohort years, so all {n_draws:,} draws are 0.")
+        print("      by material: "
+              + ", ".join(f"{name} {count}" for name, count in by_material.most_common(6))
+              + (f", ... and {len(by_material) - 6} more"
+                 if len(by_material) > 6 else ""))
+        print(f"      e.g. drivetrain={example[0]!r} segment={example[1]!r} "
+              f"components={example[2]!r} material={worst!r}")
 
     if verbose:
         print(f"[bootstrap_mixed_composition_draws] done: {len(mixed):,} groups across "
