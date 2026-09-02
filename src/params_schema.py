@@ -1865,18 +1865,28 @@ class MaterialsParams:
     # not the mean of the product. It does not need every year: one year, or a
     # short span, is what a recovery result is reported for.
     #
-    # So a narrow slice is written instead of nothing. One year of all 18
-    # elements across 4 domains and 3 flows is about 170 MB at 200,000 draws --
-    # affordable, where the full span is not.
+    # So a narrow slice is written instead of nothing. MEASURED on the current
+    # export, which writes the alloys rather than every element: 131 MB per year
+    # at 200,000 draws across 4 domains and 3 flows.
+    #
+    #     11 years, every fifth 2020-2070    1.4 GB     <- the default below
+    #     51 years, every year               6.7 GB
     #
     #     ()            write nothing (the old behaviour)
     #     (2040,)       that one year
     #     (2030, 2040)  those two years
-    #     tuple(range(2030, 2051))  a span
+    #     tuple(range(2020, 2071, 5))  a span with a step
+    #
+    # WHY IT MATTERS WHICH YEARS ARE HERE. The recovery model's `run.years`
+    # selects from what this wrote, so a year missing here cannot be run there
+    # -- and it cannot be interpolated either, because the model needs the
+    # DRAWS and not a summary. Asking that model for 2020-2070 while this said
+    # five years returned five years; it now says so plainly rather than
+    # narrowing in silence, but the fix is here.
     #
     # SAFE TO CHANGE: yes. Years outside the run's own range are ignored with a
     # note rather than silently dropped.
-    bev_electronics_element_draws_years: tuple[int, ...] = (2030, 2035, 2040, 2045, 2050)
+    bev_electronics_element_draws_years: tuple[int, ...] = tuple(range(2020, 2071, 5))
 
     # WHERE THOSE PER-ELEMENT DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then per flow, then one .npy per element and per
