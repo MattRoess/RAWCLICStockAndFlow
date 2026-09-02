@@ -1869,8 +1869,16 @@ class MaterialsParams:
     # export, which writes the alloys rather than every element: 131 MB per year
     # at 200,000 draws across 4 domains and 3 flows.
     #
-    #     11 years, every fifth 2020-2070    1.4 GB     <- the default below
-    #     51 years, every year               6.7 GB
+    #     11 years, every fifth 2020-2070    1.4 GB
+    #     51 years, every year               6.7 GB     <- the default below
+    #
+    # EVERY YEAR, BECAUSE A DOWNSTREAM QUESTION MUST NOT COST AN UPSTREAM RUN.
+    # This stage computes all 51 years whatever this says; the setting only
+    # decides which of them survive to disk. Writing a subset meant that asking
+    # the recovery model for a year outside it required re-running this stage --
+    # minutes here, and the whole point of exporting draws was to avoid exactly
+    # that. 6.7 GB is one-off and the disk has it; a re-run is paid every time
+    # somebody changes their mind about a year.
     #
     #     ()            write nothing (the old behaviour)
     #     (2040,)       that one year
@@ -1886,7 +1894,7 @@ class MaterialsParams:
     #
     # SAFE TO CHANGE: yes. Years outside the run's own range are ignored with a
     # note rather than silently dropped.
-    bev_electronics_element_draws_years: tuple[int, ...] = tuple(range(2020, 2071, 5))
+    bev_electronics_element_draws_years: tuple[int, ...] = tuple(range(2020, 2071))
 
     # WHERE THOSE PER-ELEMENT DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then per flow, then one .npy per element and per
@@ -1913,10 +1921,20 @@ class MaterialsParams:
     #
     # A year with no matching single-year period is skipped with a note.
     #
-    #     ()        write nothing (the default)
+    #     ()        write nothing
     #     (2040,)   that one year
+    #
+    # EVERY YEAR, for the same reason as bev_electronics_element_draws_years
+    # above: a downstream question must not cost an upstream run. 0.15 GB per
+    # year, so 7.8 GB for 2020-2070 -- one-off, against a re-run of this stage
+    # every time somebody wants a year that was not on the list.
+    #
+    # `output_periods` below carries the matching single-year entries. The two
+    # have to move together, and that is why they are both set here rather than
+    # left for a reader to discover one of.
+    #
     # SAFE TO CHANGE: yes, together with monte_carlo.output_periods.
-    carcomposition_draws_years: tuple[int, ...] = (2040,)
+    carcomposition_draws_years: tuple[int, ...] = tuple(range(2020, 2071))
 
     # WHERE THOSE DRAWS ARE WRITTEN, under data/processed/.
     # One folder per scenario, then one per <drivetrain>_<flow>, then one .npy
@@ -2088,8 +2106,19 @@ class MonteCarloParams:
     # table is keyed on -- keep it, or those keys disappear. (2040, 2040) is
     # added for the recovery-model export, which needs single-year periods
     # (see materials.carcomposition_draws_years).
+    #
+    # THE SINGLE-YEAR ENTRIES ARE NOT OPTIONAL DECORATION. 04_01's draws are
+    # cumulative over a period, and the recovery model's axis is years, so a
+    # year is exported only if a period (y, y) exists here. They are generated
+    # rather than typed so that this list and
+    # materials.carcomposition_draws_years cannot drift apart -- one being
+    # widened without the other writes nothing and says only "skipped with a
+    # note", which is a quiet way to lose a day.
+    #
+    # (1975, 2070) is kept first: every existing figure and saved table in this
+    # stage is keyed on it.
     output_periods: list[tuple[int, int]] = field(
-        default_factory=lambda: [(1975, 2070), (2040, 2040)])
+        default_factory=lambda: [(1975, 2070)] + [(y, y) for y in range(2020, 2071)])
 
     def validate(self) -> list[str]:
         issues: list[str] = []
