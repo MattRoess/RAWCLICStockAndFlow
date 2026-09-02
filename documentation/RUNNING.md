@@ -109,9 +109,12 @@ If either is missing, `04_02` stops with a message saying exactly which.
 from before a parameter was added will inherit the new default rather than fail —
 but only for simple values. Running `00_parameters.py` removes the ambiguity.
 
-**Disk.** `data/processed/intermediate/` currently holds **71 GB**, mostly the
-04_01 mass-draw files, and includes some accidental duplicates with a trailing
-" 2" in the filename.
+**Disk.** `data/processed/intermediate/` holds **724 MB** and
+`data/processed` **4.0 GB** in total (measured 2026-09-02). It once held 71 GB,
+mostly 04_01 mass-draw files, plus roughly 25 GB of accidental iCloud duplicates
+with a trailing " 2" in the filename; both are gone, and `find data/processed -name
+"* 2.*"` now returns nothing. Persisting per-draw mass arrays is what fills it, so
+watch it again if `materials.persist_mc_mass_draws` is switched on.
 
 
 Figures land in `data/processed/figures/`.
