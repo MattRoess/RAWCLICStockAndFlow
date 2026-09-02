@@ -70,9 +70,6 @@ Run `00_parameters.py` first. Old saved parameter files do still load — the
 `default_factory` trap that would have broken them was found and fixed — but
 regenerating is cleaner.
 
-`code/inspect_mc.py` browses any stage's Monte Carlo results without opening a
-pickle by hand.
-
 ---
 
 ## 3. What is verified, and to what standard
@@ -93,14 +90,26 @@ Draw counts as actually run, from the output files themselves:
 
 | stage | last run | draws |
 |---|---|---|
-| 03_02 + BEV export | 2026-08-28 16:37–16:47 | 200,000 (96 years, float32) |
-| 04_01 | 2026-08-31 07:45 | 50,000 (`materials_mc_n_draws`) |
-| 04_02 | 2026-08-31 07:52 | 20,000 — the electronics models' own count, which caps it |
+| 03_02 + BEV export | 2026-08-28 16:37–16:47 | 200,000 |
+| 04_01 | 2026-08-31 08:50 | 50,000 (`materials_mc_n_draws`) |
+| `mc_composition` (electronics) | 2026-08-31 14:56 | 200,000 |
+| `ElectricMotorMC` / `ElectricMotorElementMC` | 2026-08-31 12:43 / 14:09 | 200,000 |
+| 04_02 | 2026-08-31 15:43 | **200,000** |
 
-04_02 is capped by the electronics draws, not by choice: the fleet arrays hold
-200,000 and the electronics arrays 20,000, and the stage pairs the first 20,000 of
-each rather than resampling. Raising it means re-running the element models at
->= the fleet count.
+04_02 pairs draw *i* with draw *i* across independent samples and discards the
+surplus rather than resampling, so its run size is the SMALLEST of its inputs. It
+sat at 20,000 for a long time because `tools/mc_composition.py` had last been run
+with `200000` passed as its argument omitted — the electronics draws were 20,000
+rows against the fleet's 200,000, and nine draws in ten were thrown away. Re-running
+`python3 tools/mc_composition.py 200000` (1m44s) fixed it. If 04_02 ever prints a
+NOTE about mismatched draw counts, that is this, and the fix is to re-run whichever
+input is short.
+
+That re-run also regenerated `Composition/csv`. Six of its eight files came back
+**byte-identical**; the two built from the Monte Carlo (`joint_mc_stats`,
+`joint_mc_histograms`) moved as convergence, not as a shift — median change 0.03%
+on the mean and median, 0.08–0.09% on the tails, 0.50% on the mode, which is the
+least stable statistic at any draw count.
 
 ---
 
@@ -244,6 +253,31 @@ that one.
   The closing copper read-out is guarded too, so dropping `Cu` no longer crashes it.
   Verified by a full run: 15 elements reported, Pr/Tb/Nb skipped, every figure drawn.
   See §8 for the rest of the codebase.
+- **THE MOTOR MAGNET IS A FERRITE, AND IT IS NAMED FOR THE PART** (2026-08-31).
+  The composition switched from NdFeB to strontium ferrite on 13 August, but the
+  NAME did not follow: `ratio__NdFeB`, the histogram filenames and the element
+  model's `mass_col` all still said NdFeB, because the magnet row was identified by
+  its MATERIAL. A motor has a magnet whatever it is made of, and
+  `05_VehicleElectricMotorsWeight.xlsx` already carried that in its `component`
+  column, unused. Now: workbook `A4` = `Magnet` in all four motor sheets,
+  `ElectricMotorMC` keys that row on `component`, exports are `ratio__Magnet` /
+  `mass_kg__Magnet`. Changing the magnet material is now a workbook cell and a
+  composition sheet — no code, no filenames, no column names. Verified as a pure
+  rename: 04_02's output was byte-identical afterwards.
+
+  **This is also why `Pr`, `Tb` and `Nb` stopped resolving** and the old hard-coded
+  element list failed — those three existed only in the NdFeB magnet. The rare
+  earths still in the results come from Sensors, which is the sensor study's own
+  data and a separate question.
+
+  **Known bias, left in deliberately**, recorded in full in
+  `ElectricMotorElementMC.py` above `FERRITE_ELEMENTS` — not repeated here. Short
+  version: the stepper sheets' magnet mass fractions were measured on NdFeB
+  magnets and the model now splits that mass as ferrite, so stepper magnet mass is
+  LOW. Direction known, size not; correcting it needs a source, not a multiplier.
+
+  Naming: NdFeB is a **REM**, Fe-Sr is a **ferrite**, and a magnet is called by its
+  name, never by its constituent elements.
 - `KG_PER_TONNE` in `04_01_carcomposition.py` is still there and still unused
   (checked 31 Aug).
 - Two functions vanished from `04_01` on 2026-07-09 (`plot_material_mass_by_year`,
@@ -358,12 +392,35 @@ several of them are (`load_element_draws`, `materials.py:200`, `04_04:136`,
 
 ### What the survey found
 
-**No element list exists in this repository any more.**
-`materials.bev_electronics_elements` defaults to **empty**, and empty means every
-element the draws resolve — the names are read from the `*_elements.txt` files beside
-the `.npy` arrays. At the current draws that is 51 elements, copper first and the
-rest alphabetical. Naming elements in the parameter still narrows the report to a
-subset, and an unresolvable name in that subset is skipped with a note.
+**No element list is hard-coded in the code.** The names come from the
+`*_elements.txt` files beside the `.npy` draws;
+`materials.bev_electronics_elements` selects which of them to REPORT, and empty
+would mean all of them.
+
+**An element is identified by the material it sits in.** `S__esteel` and
+`S__copper` are both sulfur and are not the same quantity — one is alloyed into the
+electrical steel, the other is an impurity in the copper winding. They are different
+materials in different parts of the motor and adding them describes nothing. Copper
+is the single exception, summed across every motor material as a plain `Cu`, because
+one motor total is what it is wanted for. Bulk aluminium is `Al__bulk` under the same
+rule. Only the MOTOR names carry a material; the PCB and sensor models resolve one
+material each, so their names are plain — which does mean `Fe` (PCB) and `Fe__esteel`
+(motors) sit side by side under different conventions. Making that uniform is a
+change in those two models.
+
+**The report is the critical and strategic materials, 22 of them** — set 2026-08-31,
+with the exclusions and their reasons written into the parameter itself. Left out:
+the 16 `__copper` entries as contamination (which removes Bi, Sb, Se, Te and Cd
+entirely, as they occur only there); S, O, C and P wherever they sit; Fe as bulk;
+Si, `Si__esteel` and Ba as alloying or bulk; Plastic and Unspecified as not elements.
+`Mn__esteel` and `Mn__cfsteel` are IN — manganese in the steels is an alloying
+addition, not contamination.
+
+**Figures: 17, down from 86.** There used to be two per element, a total and a domain
+split, which was 80 of them and grew with the list; they were redundant with the
+panels in `04_02_13`/`_14` and the recovery spread in `_15`. `fig_element_total` and
+`fig_element_domains` are kept, so a named element goes back on its own page as one
+appended job.
 
 One element name remains anywhere in the code: `WIRING_ELEMENT = "Cu"` in `04_02`.
 That is a statement about the model rather than a selection — the wiring model
@@ -372,13 +429,10 @@ single element cannot be read from a file that does not exist. The two dedicated
 copper figures are guarded on `"Cu" in elements`, so a request that drops copper
 still runs.
 
-Reporting all 51 costs 102 per-element figures instead of 30, and 0.31 GB of element
-draw export instead of 0.09 GB. Nothing about the calculation changes.
-
 | site | state |
 |---|---|
 | `04_02` `resolve_elements` | FIXED — skips, names the skip, continues (`cbf8903`), and an empty request now means every element the draws carry |
-| `materials.bev_electronics_elements` | was 18 hard-coded names, now `()` — the default is "whatever the models resolved" |
+| `materials.bev_electronics_elements` | was 18 hard-coded names; now names the 22 critical and strategic materials, and an empty value would mean "whatever the models resolved" |
 | `src/plotting.py` `plot_elements_by_flow` | DELETED — dead code, no callers |
 | `src/plotting.py` `plot_mass_by_drv_flow_elements` | DELETED — dead code, no callers |
 | `data_prep.element_list` / `element_list_noAlCu` | DELETED with them; the two plotting functions were their only consumers, so they were inert |

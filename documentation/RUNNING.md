@@ -113,20 +113,6 @@ but only for simple values. Running `00_parameters.py` removes the ambiguity.
 04_01 mass-draw files, and includes some accidental duplicates with a trailing
 " 2" in the filename.
 
----
-
-## 5. Looking at results without opening a pickle
-
-```bash
-.venv/bin/python code/inspect_mc.py                       # what exists
-.venv/bin/python code/inspect_mc.py 02 --drv Liquids      # one drivetrain
-.venv/bin/python code/inspect_mc.py 02 --band --drv BEV   # per-year bands
-.venv/bin/python code/inspect_mc.py 02 --sens             # what drives the spread
-.venv/bin/python code/inspect_mc.py 03_02 --scope EU_total
-```
-
-Filters are case-insensitive substring matches and combine. `--csv out.csv` writes
-whatever table you just looked at.
 
 Figures land in `data/processed/figures/`.
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# pre-commit -- run the stage-03 inflow regression tests before allowing a commit
-# that touches the files they protect.
+# pre-commit -- run a test suite before allowing a commit that touches the files it
+# protects. Two guards, independent: the stage-03 inflow rule, and 04_02's export.
 #
 # WHY. The inflow composition block was wrong by a factor of two for four days and
 # nothing detected it: every stage ran, every artifact was written, every figure
@@ -27,6 +27,28 @@ PY="$ROOT/.venv/bin/python"
 WATCHED='^(code/03_02_adjustedflows\.py|src/stockflow_model\.py|src/params_schema\.py|code/test_stage03_inflow\.py)$'
 STAGED="$(git diff --cached --name-only --diff-filter=ACM | grep -E "$WATCHED" || true)"
 
+# ---- guard two: 04_02's element draw export -------------------------------
+# One second, so this one is unconditional-ish: it fires whenever the stage or its
+# own test is staged. It calls element_flows for real at 50 draws and LISTS THE
+# FILES, because the export was once "verified" by reading the code, which is how
+# an export that wrote nothing passed review.
+EXPORT_WATCHED='^(code/04_02_BEVelectronics\.py|code/test_stage04_02_export\.py)$'
+EXPORT_STAGED="$(git diff --cached --name-only --diff-filter=ACM | grep -E "$EXPORT_WATCHED" || true)"
+
+if [ -n "$EXPORT_STAGED" ] && [ -x "$PY" ]; then
+    echo "pre-commit: staged changes touch 04_02 -- running code/test_stage04_02_export.py..."
+    if ! "$PY" "$ROOT/code/test_stage04_02_export.py"; then
+        echo ""
+        echo "pre-commit: 04_02 EXPORT TEST FAILED -- commit refused."
+        echo "  The recovery model reads those per-draw files. An export that writes"
+        echo "  the wrong set, or nothing at all, is invisible in every figure."
+        echo "  To commit anyway (work in progress only): git commit --no-verify"
+        exit 1
+    fi
+    echo "pre-commit: 04_02 export test passed."
+fi
+
+# ---- guard one: the stage-03 inflow rule ----------------------------------
 if [ -z "$STAGED" ]; then
     exit 0
 fi
