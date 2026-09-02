@@ -158,10 +158,17 @@ through time. A fraction multiplied by the mode-based mass would have inherited 
 1.73x understatement invisibly, because the bias is in the estimator, not in the
 sampling, and no amount of Monte Carlo reveals it.
 
-**Not fixed at source.** `mc_composition`'s Sensors series is still mode-based, so
-the *domain mass* figures still understate sensors by ~1.73x. Fixing it there would
-regenerate `Composition/csv`, which has been validated byte-identically against the
-published study. That is a deliberate deferral, not an oversight.
+**Fixed at source, 2026-09-02.** `sensor_mg_per_type()` now takes the mean of each
+element's triangular instead of its mode, so the domain-mass figures no longer carry
+the understatement. It had been deferred because the fix regenerates
+`Composition/csv`, which was the byte-identical anchor against the published study;
+that anchor was spent deliberately. Measurements in `HANDOVER.md` §4.2 — not repeated
+here.
+
+The workaround described above stays exactly as it is: 04_02 still takes sensor
+element mass from `SensorElementsMC`'s own level and only the shape of
+`mc_composition`'s trajectory. Its element results were unchanged by the fix, which
+is the evidence that the workaround was doing what it claimed.
 
 ### What a sensor is made of is only half known
 

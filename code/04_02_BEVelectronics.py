@@ -1166,58 +1166,60 @@ def fig_element_panel(el_by_flow, years, elements, flow, path: Path, n_draws: in
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
-def fig_element_recovery(el_by_flow, years, elements, path: Path) -> None:
+def fig_element_recovery(by_flow_arr, years, elements, path: Path) -> None:
     """
-    Collected as a share of what left the fleet -- ONE curve, not one per element.
+    Collected as a share of what leaves the fleet, WITH ITS MONTE CARLO BAND.
 
-    THIS FIGURE DELIBERATELY DOES NOT SHOW EIGHTEEN LINES. The first version did, and
-    it was misleading: every element came out between 87.65% and 87.96%, so on an
-    axis auto-scaled to a 0.3-point range the lines fanned apart dramatically and
-    invited exactly the wrong conclusion -- that some elements are recovered better
-    than others.
+    ONE curve, not one per element. Collection is applied to VEHICLES: a car is
+    collected or it is not and everything in it goes with it, so every element shares
+    one rate by construction. Drawing 22 lines invited exactly the wrong conclusion --
+    that some elements are recovered better than others.
 
-    They are not, and cannot be, in this model. Collection is applied to VEHICLES:
-    a car is collected or it is not, and everything in it goes with it. Every element
-    therefore shares one collection rate by construction, and the residual scatter is
-    draw noise in a ratio of medians, not a real difference.
+    THE BAND IS THE 95% INTERVAL ACROSS DRAWS, AND IT IS THE POINT OF THE CHART.
+    The previous version shaded the min-to-max spread ACROSS ELEMENTS, which is a
+    tenth of a percentage point of draw noise and therefore invisible. Worse, it was
+    built by taking each element's MEDIAN collected and MEDIAN outflow and dividing
+    them: the draws were thrown away before the division, so a chart whose entire
+    subject is a rate showed no uncertainty at all.
 
-    So the honest chart is the single shared rate, drawn on an axis from zero where
-    its flatness is visible, with the spread across elements quantified in the caption
-    rather than dramatised by the y-axis.
+    RATIO PER DRAW, THEN PERCENTILES. Row i of `by_flow_arr["collected"]` and row i
+    of `by_flow_arr["outflow"]` are the SAME simulated world, so their ratio is a
+    collection rate that actually occurred in that world. A ratio of two medians is
+    not any world's rate, and the spread of such ratios is not an uncertainty. This
+    is the same rule the rest of the stage follows for sums.
 
     What is NOT modelled, and matters for recycling: element-specific recovery inside
     the recycling chain. Copper in a harness is recovered at a very different yield
     from neodymium in a bonded magnet or gold on a board. That is a separate process
-    step downstream of this model, and nothing here should be read as a recovery
-    yield.
+    step downstream of this model, and nothing here is a recovery yield.
     """
-    rates = []
-    for e in elements:
-        out = el_by_flow["outflow"][e]["total"]["median"].to_numpy()
-        col = el_by_flow["collected"][e]["total"]["median"].to_numpy()
-        rates.append(np.divide(col, out, out=np.full_like(col, np.nan), where=out > 0))
-    R = 100 * np.vstack(rates)
-    lo, hi, mid = np.nanmin(R, axis=0), np.nanmax(R, axis=0), np.nanmedian(R, axis=0)
+    out = np.asarray(by_flow_arr["outflow"], dtype=np.float64)
+    col = np.asarray(by_flow_arr["collected"], dtype=np.float64)
+    rate = 100.0 * np.divide(col, out, out=np.full_like(col, np.nan), where=out > 0)
+    lo, mid, hi = np.nanpercentile(rate, [2.5, 50, 97.5], axis=0)
+    width = float(np.nanmax(hi - lo))
 
     fig, ax = plt.subplots(figsize=(11, 6))
     ax.plot(years, mid, color="#2b8a3e", linewidth=2.0,
-            label="collection rate (identical for every element)")
+            label="collection rate, median across draws")
     ax.fill_between(years, lo, hi, color="#2b8a3e", alpha=0.25, linewidth=0,
-                    label="full spread across all elements")
+                    label="95% band across draws")
     ax.set_ylim(0, 100)
-    ax.set_title("Collected as a share of what leaves the fleet", fontsize=12)
+    ax.set_title("Collected as a share of what leaves the fleet "
+                 f"(n={out.shape[0]:,} draws)", fontsize=12)
     ax.set_xlabel("Year"); ax.set_ylabel("Collected / outflow [%]")
     ax.grid(True, linestyle="--", alpha=0.3)
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
     ax.legend(frameon=False, loc="lower right")
     fig.text(0.01, 0.01,
-             f"Collection is applied to whole vehicles, so all {len(elements)} elements "
-             f"share one rate: the spread across them is {np.nanmax(hi - lo):.2f} "
-             f"percentage points at its widest, which is draw noise. This is a "
-             f"COLLECTION rate, not a recovery yield -- element-specific losses inside "
-             f"the recycling chain are not modelled here.",
-             fontsize=7, color="#666666")
-    plt.tight_layout()
+             f"Ratio taken PER DRAW, then percentiles -- row i of collected and row i of "
+             f"outflow are the same simulated world. The 95% band is at most {width:.2f} "
+             f"percentage points wide. Collection is applied to whole vehicles, so all "
+             f"{len(elements)} elements share this one rate. It is a COLLECTION rate, "
+             f"not a recovery yield -- element-specific losses inside the recycling "
+             f"chain are not modelled here.",
+             fontsize=7, color="#555555")
+    plt.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
@@ -1487,7 +1489,7 @@ def main() -> dict[str, Any]:
         ("04_02_14_elements_collected.png",
          lambda p: fig_element_panel(el_by_flow, years, elements, "collected", p, n_draws)),
         ("04_02_15_element_recovery.png",
-         lambda p: fig_element_recovery(el_by_flow, years, elements, p)),
+         lambda p: fig_element_recovery(by_flow_arr, years, elements, p)),
         ("04_02_10_domain_recovery.png",
          lambda p: fig_domain_recovery(by_series_by_flow, years, series, p)),
         ("04_02_06_by_segment.png",
