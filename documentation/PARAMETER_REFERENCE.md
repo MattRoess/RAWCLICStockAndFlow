@@ -1125,7 +1125,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `histogram_file_name` | `"37_MonteCarlo_Histograms.xlsx"` |
 | `histogram_sheet_names_by_drv` | `{ "Petrol": ["componentCarPetrol"], "Diesel": ["componentCarDiesel"], "BEV": ["componen...` |
 | `material_mc_time_resolution` | `"period"` |
-| `materials_mc_n_draws` | `50_000` |
+| `materials_mc_n_draws` | `200_000` |
 | `materials_mc_seed` | `42` |
 | `persist_mc_mass_draws` | `False` |
 | `bev_electronics_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/draws"` |
@@ -1138,9 +1138,9 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `bev_electronics_element_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/element_draws"` |
 | `bev_electronics_elements` | `( "Cu", # the priority element "Nd", "Dy", # magnet rare earths, sensors "Sr__magnet", ...` |
 | `bev_electronics_export_draws` | `True` |
-| `bev_electronics_element_draws_years` | `(2030, 2035, 2040, 2045, 2050)` |
+| `bev_electronics_element_draws_years` | `tuple(range(2020, 2071))` |
 | `bev_electronics_element_draws_out_dir` | `"element_draws"` |
-| `carcomposition_draws_years` | `(2040,)` |
+| `carcomposition_draws_years` | `tuple(range(2020, 2071, 5))` |
 | `carcomposition_draws_out_dir` | `"carcomposition_draws"` |
 
 
@@ -1306,7 +1306,7 @@ files -- the existing per-scenario ones already run to several GB.
 
 ### `materials_mc_n_draws`
 
-Default: `50_000`
+Default: `200_000`
 
 How many uncertainty draws this stage runs. Same meaning as `n_draws` in the
 Monte Carlo section, but kept separate so this stage can be run at a different
@@ -1561,7 +1561,7 @@ files are missing.
 
 ### `bev_electronics_element_draws_years`
 
-Default: `(2030, 2035, 2040, 2045, 2050)`
+Default: `tuple(range(2020, 2071))`
 
 WHICH YEARS' PER-ELEMENT DRAWS TO WRITE OUT, for the recovery model.
 
@@ -1575,14 +1575,32 @@ by transfer coefficients that are also drawn, and a mean times a mean is
 not the mean of the product. It does not need every year: one year, or a
 short span, is what a recovery result is reported for.
 
-So a narrow slice is written instead of nothing. One year of all 18
-elements across 4 domains and 3 flows is about 170 MB at 200,000 draws --
-affordable, where the full span is not.
+So a narrow slice is written instead of nothing. MEASURED on the current
+export, which writes the alloys rather than every element: 131 MB per year
+at 200,000 draws across 4 domains and 3 flows.
+
+11 years, every fifth 2020-2070    1.4 GB
+51 years, every year               6.7 GB     <- the default below
+
+EVERY YEAR, BECAUSE A DOWNSTREAM QUESTION MUST NOT COST AN UPSTREAM RUN.
+This stage computes all 51 years whatever this says; the setting only
+decides which of them survive to disk. Writing a subset meant that asking
+the recovery model for a year outside it required re-running this stage --
+minutes here, and the whole point of exporting draws was to avoid exactly
+that. 6.7 GB is one-off and the disk has it; a re-run is paid every time
+somebody changes their mind about a year.
 
 ()            write nothing (the old behaviour)
 (2040,)       that one year
 (2030, 2040)  those two years
-tuple(range(2030, 2051))  a span
+tuple(range(2020, 2071, 5))  a span with a step
+
+WHY IT MATTERS WHICH YEARS ARE HERE. The recovery model's `run.years`
+selects from what this wrote, so a year missing here cannot be run there
+-- and it cannot be interpolated either, because the model needs the
+DRAWS and not a summary. Asking that model for 2020-2070 while this said
+five years returned five years; it now says so plainly rather than
+narrowing in silence, but the fix is here.
 
 SAFE TO CHANGE: yes. Years outside the run's own range are ignored with a
 note rather than silently dropped.
@@ -1600,7 +1618,7 @@ SAFE TO CHANGE: yes.
 
 ### `carcomposition_draws_years`
 
-Default: `(2040,)`
+Default: `tuple(range(2020, 2071, 5))`
 
 WHICH YEARS OF 04_01's MASS DRAWS TO WRITE for RAWCLICRecoveryModel.
 
@@ -1621,9 +1639,33 @@ output_periods = [(y, y) for y in (2030, 2035, 2040, 2045, 2050)]
 
 A year with no matching single-year period is skipped with a note.
 
-()        write nothing (the default)
+()        write nothing
 (2040,)   that one year
-SAFE TO CHANGE: yes, together with monte_carlo.output_periods.
+
+EVERY YEAR, and this setting alone decides it. 04_01 now computes a
+single-year period for each year named here, writes it, and drops it again
+before anything reports -- so monte_carlo.output_periods no longer has to
+carry them and stages 02, 03_01 and 03_02 are untouched.
+
+THE COST IS COMPUTE, NOT DISK, and it is the real one. MEASURED on this
+machine at 50,000 draws: 1.2 minutes per period, and the period loop runs
+once per flow -- there are two, `inflow` and `collected`. So the run time
+is roughly 2.4 minutes per year in this list, on top of the two reporting
+periods:
+
+every 5th year, 2020-2070   11 years   13 periods/flow   ~31 min   1.6 GB
+every 2nd year              26 years   28 periods/flow   ~62 min   3.8 GB
+every year                  51 years   53 periods/flow   ~2h 06m   7.6 GB
+
+Every year was tried on 2026-09-02 and abandoned at the 1h 50m mark. A
+step of 5 is what the recovery model was actually asked for, and it cannot
+use many more: five drivetrains across all 51 years is about 84 GB of
+result against a 4 GB memory budget, so it would refuse to run them anyway.
+
+If a specific intermediate year is ever needed, add it here and re-run --
+that is a targeted 31 minutes, not a standing two-hour tax on every run.
+
+SAFE TO CHANGE: yes, on its own. Nothing else moves with it any more.
 
 
 ### `carcomposition_draws_out_dir`
@@ -1659,7 +1701,7 @@ SAFE TO CHANGE: yes.
 | `stockflow_lifetime_spread` | `0.15` |
 | `stockflow_share_spread` | `0.15` |
 | `chunk_size` | `20_000` |
-| `output_periods` | `default_factory=lambda: [(1975, 2070), (2040, 2040)]` |
+| `output_periods` | `default_factory=lambda: [(1975, 2070)]` |
 
 
 ### `enabled`
@@ -1763,7 +1805,7 @@ out of memory.
 
 ### `output_periods`
 
-Default: `default_factory=lambda: [(1975, 2070), (2040, 2040)]`
+Default: `default_factory=lambda: [(1975, 2070)]`
 
 Which time windows to report results for, written as (first year, last year),
 both years included. Every window listed here gets a full summary: mean, median,
@@ -1787,6 +1829,22 @@ not simulation work, so a handful costs very little. For example:
 table is keyed on -- keep it, or those keys disappear. (2040, 2040) is
 added for the recovery-model export, which needs single-year periods
 (see materials.carcomposition_draws_years).
+
+DO NOT ADD SINGLE-YEAR ENTRIES HERE TO SERVE 04_01's DRAW EXPORT. This
+setting is shared by stages 02, 03_01, 03_02 and 04_01, and every entry is
+a reporting window each of them computes and writes.
+
+(2040, 2040) used to sit here and was removed on 2026-09-02. It was added
+in 00af52a for one reason: 04_01's draw export could only write a year that
+had a matching single-year period, so 2040 was put in the shared list to
+get 2040 exported. Since 7b39946 that stage derives its own single-year
+periods from materials.carcomposition_draws_years, so the entry bought
+nothing and cost four stages an extra reporting window on every run.
+
+The same shortcut was taken again at 51x the scale earlier the same day and
+rejected. If a year is wanted in the EXPORT, put it in
+carcomposition_draws_years. Put a window here only when the window itself
+is the thing being reported on.
 
 
 ---

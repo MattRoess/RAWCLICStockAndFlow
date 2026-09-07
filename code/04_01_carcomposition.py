@@ -1474,6 +1474,7 @@ def combine_flow_and_composition_draws(
     rng: np.random.Generator,
     direct: bool = False,
     tracker: dict | None = None,
+    consume: bool = False,
 ) -> dict[tuple, np.ndarray]:
     """
     Combine ONE scenario's vehicle-count MC uncertainty with per-vehicle composition MC
@@ -1563,7 +1564,9 @@ def combine_flow_and_composition_draws(
     skipped_groups: set[tuple[str, str]] = set()
     per_year_source: dict[str, set[tuple[str, str]]] = {}
 
-    for comp_key, comp_draws in composition_draws_by_group.items():
+    for comp_key in (list(composition_draws_by_group) if consume
+                     else composition_draws_by_group):
+        comp_draws = composition_draws_by_group[comp_key]
         drivetrain, segment, components, material = comp_key
 
         if (drivetrain, segment) not in count_draws_cache:
@@ -1600,7 +1603,21 @@ def combine_flow_and_composition_draws(
                 f"have length {len(comp_draws)}, expected n_draws={n_draws}."
             )
 
-        mass_draws_by_group[(drivetrain, segment, components, material)] = count_draws * comp_draws
+        # float32, NOT float64. This dict is the stage's largest object -- 5,602
+        # groups x n_draws -- and at 200,000 draws that is 8.35 GB in float64 against
+        # 4.2 GB here. float32 carries ~7 significant digits, which is far beyond what
+        # a bootstrapped composition histogram and a bootstrapped vehicle count can
+        # justify between them; the same argument already governs every .npy this
+        # project writes. Summation downstream promotes back to float64.
+        mass_draws_by_group[(drivetrain, segment, components, material)] = (
+            (count_draws * comp_draws).astype(np.float32)
+        )
+        if consume:
+            # The caller deletes this dict immediately after the call, so releasing
+            # each group as it is consumed halves the peak: without it the input and
+            # the output are both fully resident at the moment the last group is
+            # multiplied.
+            composition_draws_by_group[comp_key] = None
 
     for source, groups in sorted(per_year_source.items()):
         drivetrains = sorted({d for d, _ in groups})
@@ -2391,9 +2408,58 @@ def _scenario_color_map(scenario_names: list[str]) -> dict[str, Any]:
 KG_PER_KILOTONNE = 1_000_000.0
 
 
-def _write_carcomposition_draws(p04, scenario_name: str, flow: str,
-                                periods, mc_draws_tables_flow: dict,
+def _plan_carcomposition_export(p04, periods) -> dict:
+    """
+    What the export needs, worked out ONCE per flow, before any draws exist.
+
+    Returns {"present": [year, ...], "single": {year: period}, "material": {},
+    "component": {}} -- the last two are the accumulator `_fold_carcomposition_period`
+    fills in, one export year at a time.
+
+    WHY THIS IS SPLIT OUT. The export used to be written after the period loop, from
+    a dict holding EVERY period's full-resolution draws at once. At 200,000 draws one
+    period's table is 5,602 groups x 200,000 x 8 bytes = 8.35 GB, and eleven export
+    years plus the reporting period meant ~100 GB of intent. The process was killed by
+    the kernel partway through 2065 -- no traceback, just `zsh: killed`.
+
+    Folding each year in as it is produced, and dropping that year's table
+    immediately, keeps the export's cost at ONE accumulator -- (n_draws, n_years) per
+    (drivetrain, component, material) -- instead of one full table per year.
+    """
+    wanted = tuple(int(y) for y in (p04.carcomposition_draws_years or ()))
+    single = {period[0]: period for period in periods if period[0] == period[1]}
+    present = [y for y in wanted if y in single] if wanted else []
+    skipped = sorted(set(wanted) - set(present)) if wanted else []
+    if skipped:
+        print(f"    NOTE: carcomposition draw export skips {skipped} -- no "
+              f"single-year period for them in monte_carlo.output_periods.")
+    return {"present": present, "single": single, "material": {}, "component": {}}
+
+
+def _fold_carcomposition_period(export_store: dict, year: int, table: dict,
                                 n_draws: int) -> None:
+    """
+    Add ONE export year's draws to the accumulator, then let the caller drop them.
+
+    Sums over segment, and accumulates the component's own mass alongside its
+    materials in the same pass -- the component total is the sum of the materials in
+    it, so deriving it here keeps the two from disagreeing.
+    """
+    present = export_store["present"]
+    if year not in present:
+        return
+    column = present.index(year)
+    material, component = export_store["material"], export_store["component"]
+    for (drv, _segment, comp, mat), draws in table.items():
+        values = np.asarray(draws, dtype=np.float64) / KG_PER_KILOTONNE
+        for store, key in ((material, (drv, comp, mat)), (component, (drv, comp))):
+            if key not in store:
+                store[key] = np.zeros((n_draws, len(present)))
+            store[key][:, column] += values
+
+
+def _write_carcomposition_draws(p04, scenario_name: str, flow: str,
+                                export_store: dict, n_draws: int) -> None:
     """
     Write one scenario-flow's mass draws in the layout RAWCLICRecoveryModel reads.
 
@@ -2431,37 +2497,18 @@ def _write_carcomposition_draws(p04, scenario_name: str, flow: str,
 
            output_periods = [(y, y) for y in (2030, 2035, 2040, 2045, 2050)]
     """
-    wanted = tuple(int(y) for y in (p04.carcomposition_draws_years or ()))
-    if not wanted:
-        return
-
-    single = {period[0]: period for period in periods if period[0] == period[1]}
-    present = [y for y in wanted if y in single]
-    skipped = sorted(set(wanted) - set(present))
-    if skipped:
-        print(f"    NOTE: carcomposition draw export skips {skipped} -- no "
-              f"single-year period for them in monte_carlo.output_periods.")
+    present = export_store["present"]
     if not present:
+        return
+    material = export_store["material"]
+    component = export_store["component"]
+    if not component:
         return
 
     out_dir = (PROJECT_ROOT / "data" / "processed"
                / p04.carcomposition_draws_out_dir / scenario_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     np.save(out_dir / "years.npy", np.array(present))
-
-    # Sum over segment, and accumulate the component's own mass alongside its
-    # materials in the same pass -- the component total is the sum of the
-    # materials in it, so deriving it here keeps the two from disagreeing.
-    material: dict[tuple[str, str, str], np.ndarray] = {}
-    component: dict[tuple[str, str], np.ndarray] = {}
-    for column, year in enumerate(present):
-        table = mc_draws_tables_flow[(single[year], flow)]
-        for (drv, _segment, comp, mat), draws in table.items():
-            values = np.asarray(draws, dtype=np.float64) / KG_PER_KILOTONNE
-            for store, key in ((material, (drv, comp, mat)), (component, (drv, comp))):
-                if key not in store:
-                    store[key] = np.zeros((n_draws, len(present)))
-                store[key][:, column] += values
 
     written = 0
     for (drv, comp), array in sorted(component.items()):
@@ -3217,6 +3264,10 @@ def main() -> dict[str, Any]:
             mc_draws_tables_flow: dict[tuple, dict[tuple, np.ndarray]] = {}
             mc_draws_tables_standard_flow: dict[tuple, dict[tuple, np.ndarray]] = {}
 
+            # Worked out before the loop so each export year can be folded in and
+            # dropped as it is produced -- see `_plan_carcomposition_export`.
+            export_store = _plan_carcomposition_export(p04, periods)
+
             for period in periods:
                 print(f"  [{flow}] period {period}: scalar mass (12-segment)...")
                 scalar_tables[(period, flow)] = combine_scalar_mass_from_tracker(
@@ -3234,11 +3285,24 @@ def main() -> dict[str, Any]:
                 )
 
                 print(f"  [{flow}] period {period}: MC mass, 12-segment ({n_draws:,} draws)...")
-                mc_draws_tables_flow[(period, flow)] = combine_flow_and_composition_draws(
+                table = combine_flow_and_composition_draws(
                     mc_summary, scenario_name, period, flow_metric, mixed_composition_draws,
-                    n_draws, scenario_rng, tracker=tracker_keyed,
+                    n_draws, scenario_rng, tracker=tracker_keyed, consume=True,
                 )
                 del mixed_composition_draws
+
+                # AN EXPORT-ONLY PERIOD IS FOLDED IN AND DROPPED HERE. Nothing below
+                # the loop reads it -- the plots and the cross-scenario summary use
+                # the headline period only, and the old code popped these straight
+                # after writing. Keeping twelve of them alive to write at the end was
+                # what made 200,000 draws impossible: 8.35 GB each.
+                if period in export_only:
+                    _fold_carcomposition_period(export_store, period[0], table, n_draws)
+                    del table
+                    gc.collect()
+                else:
+                    mc_draws_tables_flow[(period, flow)] = table
+                    del table
 
                 print(f"  [{flow}] period {period}: scalar mass (standard)...")
                 scalar_tables_standard[(period, flow)] = combine_scalar_mass_standard(
@@ -3261,11 +3325,16 @@ def main() -> dict[str, Any]:
                 )
 
                 print(f"  [{flow}] period {period}: MC mass, standard ({n_draws:,} draws)...")
-                mc_draws_tables_standard_flow[(period, flow)] = combine_flow_and_composition_draws(
+                table_standard = combine_flow_and_composition_draws(
                     mc_summary, scenario_name, period, flow_metric, mixed_composition_draws_standard,
-                    n_draws, scenario_rng, direct=True,
+                    n_draws, scenario_rng, direct=True, consume=True,
                 )
                 del mixed_composition_draws_standard
+                # Same reasoning as the 12-segment table above: only the headline
+                # period is read below, and the standard table is not exported at all.
+                if period not in export_only:
+                    mc_draws_tables_standard_flow[(period, flow)] = table_standard
+                del table_standard
                 gc.collect()
 
             # [NEW] The slice of draws the recovery model reads, written HERE --
@@ -3276,11 +3345,13 @@ def main() -> dict[str, Any]:
             # left in place would reach the cross-scenario summary and appear in
             # output nobody asked for it in. Writing first and pruning second is
             # what keeps this change invisible to the rest of the stage.
-            _write_carcomposition_draws(
-                p04, scenario_name, flow, periods, mc_draws_tables_flow, n_draws)
+            _write_carcomposition_draws(p04, scenario_name, flow, export_store, n_draws)
+            del export_store
+            gc.collect()
+            # The full-resolution draw tables for export-only periods were folded in
+            # and freed inside the loop; only these lighter tables still need pruning
+            # so an export-only period cannot reach the cross-scenario summary.
             for extra in export_only:
-                mc_draws_tables_flow.pop((extra, flow), None)
-                mc_draws_tables_standard_flow.pop((extra, flow), None)
                 scalar_tables.pop((extra, flow), None)
                 scalar_tables_standard.pop((extra, flow), None)
                 mass_by_year_tables.pop((extra, flow), None)

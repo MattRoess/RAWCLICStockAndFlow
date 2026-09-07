@@ -1632,7 +1632,7 @@ class MaterialsParams:
     # Monte Carlo section, but kept separate so this stage can be run at a different
     # cost from the rest of the pipeline.
     # SAFE TO CHANGE: yes -- lower it for a quick check.
-    materials_mc_n_draws: int = 50_000
+    materials_mc_n_draws: int = 200_000
 
     # Fixes this stage's random numbers so a re-run reproduces identical results.
     # SAFE TO CHANGE: yes, any whole number.
