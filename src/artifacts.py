@@ -149,6 +149,11 @@ ARTIFACT_FILES: dict[str, str] = {
     # chemistry, flow, year, element). The chemistries are NOT summed -- see
     # that stage's docstring.
     "battery_material_flows": "04_04_battery_material_flows.pkl",
+    # The same flows at COMPONENT level -- cathode, anode, electrolyte,
+    # separator, casing, frame. Kept apart from the element frame rather than
+    # stacked into it because the two do not add up to each other: the elements
+    # miss 7-11% of the pack, which is exactly why this level exists.
+    "battery_component_flows": "04_04_battery_component_flows.pkl",
     # The share of the fleet whose chemistry has no composition at all
     # (sodium-ion, solid-state), carried so a missing mass is visible as a gap
     # rather than read as a fall in demand.

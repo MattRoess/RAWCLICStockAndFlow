@@ -102,6 +102,13 @@ from src.battery_voltage import voltage_draws  # noqa: E402
 # 0.88 times the outflow.
 FLOWS = ("inflow", "outflow", "collected")
 
+# Both levels the battery project writes. The elements do not add up to the
+# pack -- the cell casing and the separator have no element rows and the
+# electrolyte's cover 1% of its mass -- so 7-11% of every pack, the plastics,
+# the separator and the electrolyte, exists only at the component level. That
+# is the part a recycler has to deal with rather than sell.
+LEVELS = ("element", "component")
+
 
 def load_flow_draws(root: Path, scenario: str, segment: str, flow: str):
     """(years, draws) from 03_02's BEV export, or (None, None) if absent."""
@@ -156,7 +163,7 @@ def main() -> dict:
             voltage_draws(params, segment, vintages, n_draws=n_draws, seed=404),
         )
 
-    rows, gaps = [], []
+    rows, component_rows, gaps = [], [], []
     started = time.time()
     for flow in FLOWS:
         # Opened ONCE per flow, not once per segment per year: memory-mapped,
@@ -183,10 +190,11 @@ def main() -> dict:
         year_index = {int(y): i for i, y in enumerate(flow_years)}
 
         accumulated = {
-            (scenario, chemistry): np.zeros(
-                (n_draws, len(years), len(composition.elements(file_name))),
+            (scenario, chemistry, level): np.zeros(
+                (n_draws, len(years), len(composition.names(file_name, level))),
                 dtype=np.float32)
-            for scenario in scenarios for chemistry, file_name in named.items()}
+            for scenario in scenarios for chemistry, file_name in named.items()
+            for level in LEVELS}
         vintage_mean, count_mean, clamped_reported = {}, {}, None
 
         for segment in segments:
@@ -214,39 +222,43 @@ def main() -> dict:
                 weights = None
 
             for chemistry, file_name in named.items():
-                # (n_draws, n_vintages, n_elements) -- one pack per drawn car for
-                # every year it could have been built in.
-                per_car = np.stack([
-                    composition.masses(chemistry=file_name,
-                                       capacity_kwh=capacity[:, position],
-                                       voltage_v=voltage[:, position],
-                                       year=max(int(year), composition_floor),
-                                       seed=404).astype(np.float32)
-                    for position, year in enumerate(vintages)], axis=1)
+                # The mix does not depend on the level -- the same cars carry
+                # both -- so it is drawn once for the two.
                 shares = {scenario: np.array(
                     [chemistry_share(params, scenario, group, chemistry, year)
                      for year in vintages], dtype=np.float32)
                     for scenario in scenarios}
 
-                for year_position, year in enumerate(years):
-                    count = counts[:, year_position] * 1e3  # millions of cars, kg -> t
-                    for scenario in scenarios:
-                        target = accumulated[(scenario, chemistry)]
-                        if flow == "inflow":
-                            # Built this year: this year's mix and this year's pack.
-                            built = vintage_position[year]
-                            share = float(shares[scenario][built])
-                            if share <= 0:
-                                continue
-                            target[:, year_position, :] += (
-                                per_car[:, built, :] * (count * share)[:, None])
-                        else:
-                            # Scrapped this year, built across the vintages.
-                            coefficient = (count[:, None] * shares[scenario][None, :]
-                                           * weights[:, year_position, :])
-                            target[:, year_position, :] += np.einsum(
-                                "dv,dve->de", coefficient, per_car, optimize=True)
-                del per_car
+                for level in LEVELS:
+                    # (n_draws, n_vintages, n_names) -- one pack per drawn car
+                    # for every year it could have been built in.
+                    per_car = np.stack([
+                        composition.masses(chemistry=file_name,
+                                           capacity_kwh=capacity[:, position],
+                                           voltage_v=voltage[:, position],
+                                           year=max(int(year), composition_floor),
+                                           seed=404, level=level).astype(np.float32)
+                        for position, year in enumerate(vintages)], axis=1)
+
+                    for year_position, year in enumerate(years):
+                        count = counts[:, year_position] * 1e3  # millions, kg -> t
+                        for scenario in scenarios:
+                            target = accumulated[(scenario, chemistry, level)]
+                            if flow == "inflow":
+                                # Built this year: this year's mix and pack.
+                                built = vintage_position[year]
+                                share = float(shares[scenario][built])
+                                if share <= 0:
+                                    continue
+                                target[:, year_position, :] += (
+                                    per_car[:, built, :] * (count * share)[:, None])
+                            else:
+                                # Scrapped this year, built across the vintages.
+                                coefficient = (count[:, None] * shares[scenario][None, :]
+                                               * weights[:, year_position, :])
+                                target[:, year_position, :] += np.einsum(
+                                    "dv,dve->de", coefficient, per_car, optimize=True)
+                    del per_car
             del weights
             print(f"  {flow:<8} {segment:<3} done ({time.time()-started:5.0f}s)")
 
@@ -260,28 +272,30 @@ def main() -> dict:
                   + ", ".join(f"{year} {share:.1%}" for year, share
                               in zip(years, before_composition) if share > 0.001))
 
-        for (scenario, chemistry), per_draw in accumulated.items():
-            elements = composition.elements(named[chemistry])
+        for (scenario, chemistry, level), per_draw in accumulated.items():
+            names = composition.names(named[chemistry], level)
+            stem = chemistry if level == "element" else f"{chemistry}_components"
+            label = "element" if level == "element" else "component"
             target = draws_dir / flow / scenario
             target.mkdir(parents=True, exist_ok=True)
-            np.save(target / f"{chemistry}.npy", per_draw)
-            np.save(target / f"{chemistry}_elements.npy",
-                    np.asarray(elements, dtype="U8"))
+            np.save(target / f"{stem}.npy", per_draw)
+            np.save(target / f"{stem}_names.npy", np.asarray(names, dtype="U64"))
             np.save(draws_dir / "years.npy", np.asarray(years, dtype=int))
 
             # Summary FROM the draws, so the two can never disagree.
             mean = per_draw.mean(axis=0)
             low, median, high = np.percentile(per_draw, [2.5, 50, 97.5], axis=0)
+            into = rows if level == "element" else component_rows
             for year_position, year in enumerate(years):
-                for element_position, element in enumerate(elements):
-                    rows.append({
+                for name_position, name in enumerate(names):
+                    into.append({
                         "flow_scenario": flow_scenario, "chemistry_scenario": scenario,
                         "chemistry": chemistry, "flow": flow, "year": int(year),
-                        "element": element,
-                        "mean_tonnes": float(mean[year_position, element_position]),
-                        "median_tonnes": float(median[year_position, element_position]),
-                        "p2.5": float(low[year_position, element_position]),
-                        "p97.5": float(high[year_position, element_position]),
+                        label: name,
+                        "mean_tonnes": float(mean[year_position, name_position]),
+                        "median_tonnes": float(median[year_position, name_position]),
+                        "p2.5": float(low[year_position, name_position]),
+                        "p97.5": float(high[year_position, name_position]),
                     })
         accumulated.clear()
 
@@ -325,12 +339,16 @@ def main() -> dict:
                              "share_without_composition": float(fleet[year_position])})
 
     result = pd.DataFrame(rows)
+    component_frame = pd.DataFrame(component_rows)
     gap_frame = pd.DataFrame(gaps).drop_duplicates()
     saved = save_many(battery_material_flows=result,
+                      battery_component_flows=component_frame,
                       battery_chemistry_gaps=gap_frame, root=PROJECT_ROOT)
-    print(f"\n{len(result):,} rows | saved {saved}")
+    print(f"\n{len(result):,} element rows | {len(component_frame):,} component "
+          f"rows | saved {saved}")
     figures = build_all(params, result, gap_frame)
-    return {"saved": saved, "rows": len(result), "figures": figures}
+    return {"saved": saved, "rows": len(result),
+            "component_rows": len(component_frame), "figures": figures}
 
 
 # ===========================================================================
@@ -367,6 +385,31 @@ CHEMISTRY_LABELS = {
 }
 FLOW_LABELS = {"inflow": "inflow", "outflow": "outflow",
                "collected": "collected"}
+# Short names for the twelve components, and the three the element level cannot
+# see at all -- the casing and the separator have no element rows, and the
+# electrolyte's cover 1% of its mass.
+COMPONENT_LABELS = {
+    "cathodeActiveMaterial": "cathode active", "anodeActiveMaterial": "anode active",
+    "batteryPackSupportFrame": "support frame",
+    "batteryPackThermalConductor": "thermal conductor",
+    "batteryPackModuleEnclosuresAndCoolantManifolds": "module enclosure",
+    "currentCollectorAnode": "anode collector",
+    "currentCollectorCathode": "cathode collector",
+    "batteryPackCables": "cables", "batteryPackCellTerminals": "cell terminals",
+    "batteryCellElectrolyte": "electrolyte", "batteryCellCasing": "cell casing",
+    "batteryCellSeparator": "separator",
+}
+COMPONENT_COLORS = {
+    "cathodeActiveMaterial": "#d94801", "anodeActiveMaterial": "#4a1486",
+    "batteryPackSupportFrame": "#6baed6", "batteryPackThermalConductor": "#9ecae1",
+    "batteryPackModuleEnclosuresAndCoolantManifolds": "#2171b5",
+    "currentCollectorAnode": "#fd8d3c", "currentCollectorCathode": "#fdbe85",
+    "batteryPackCables": "#41ab5d", "batteryPackCellTerminals": "#a1d99b",
+    "batteryCellElectrolyte": "#d9d9d9", "batteryCellCasing": "#969696",
+    "batteryCellSeparator": "#737373",
+}
+INVISIBLE_TO_ELEMENTS = ("batteryCellElectrolyte", "batteryCellCasing",
+                         "batteryCellSeparator")
 GROUP_TITLES = {"small": "small  (A, B, JA, JB)",
                 "medium": "medium  (C, D, JC, JD)",
                 "large": "large  (E, F, JE, JF)"}
@@ -388,50 +431,64 @@ def _style(ax) -> None:
 _LOADED: dict[tuple[str, str], tuple] = {}
 
 
-def load_elements(flow: str, scenario: str) -> tuple[np.ndarray, dict]:
+def load_elements(flow: str, scenario: str, level: str = "element"
+                  ) -> tuple[np.ndarray, dict]:
     """
-    Every element as (n_draws, n_years) tonnes, summed over the chemistries that
-    have a composition. Summed PER DRAW, so draw i stays one world.
+    Every element -- or component -- as (n_draws, n_years) tonnes, summed over
+    the chemistries that have a composition. Summed PER DRAW, so draw i stays
+    one world.
 
     One pass over the three arrays, held for the rest of the run: thirteen
     elements read one at a time would be thirteen passes over two gigabytes.
     """
-    if (flow, scenario) in _LOADED:
-        return _LOADED[(flow, scenario)]
+    if (flow, scenario, level) in _LOADED:
+        return _LOADED[(flow, scenario, level)]
     years = np.load(DRAWS_DIR / "years.npy")
     directory = DRAWS_DIR / flow / scenario
     totals: dict[str, np.ndarray] = {}
     for path in sorted(directory.glob("*.npy")):
-        if path.name.endswith("_elements.npy"):
+        if path.name.endswith("_names.npy"):
             continue
-        elements = list(np.load(directory / f"{path.stem}_elements.npy"))
+        at_component = path.stem.endswith("_components")
+        if at_component != (level == "component"):
+            continue
+        names = list(np.load(directory / f"{path.stem}_names.npy"))
         drawn = np.load(path, mmap_mode="r")
-        for column, element in enumerate(elements):
+        for column, name in enumerate(names):
             here = np.asarray(drawn[:, :, column], dtype=np.float32)
-            totals[element] = here if element not in totals else totals[element] + here
-    _LOADED[(flow, scenario)] = (years, totals)
+            totals[name] = here if name not in totals else totals[name] + here
+    if not totals:
+        raise SystemExit(f"no {level} draws in {directory}")
+    _LOADED[(flow, scenario, level)] = (years, totals)
     return years, totals
 
 
-def load_element(flow: str, scenario: str, element: str) -> tuple[np.ndarray, np.ndarray]:
-    """(n_draws, n_years) tonnes of one element."""
-    years, totals = load_elements(flow, scenario)
+def load_element(flow: str, scenario: str, element: str,
+                 level: str = "element") -> tuple[np.ndarray, np.ndarray]:
+    """(n_draws, n_years) tonnes of one element or component."""
+    years, totals = load_elements(flow, scenario, level)
     if element not in totals:
         raise SystemExit(f"{element} appears in no chemistry of {flow}/{scenario}")
     return years, totals[element]
 
 
-def elements_present(flow: str = "inflow", scenario: str = "S1") -> list[str]:
+def elements_present(flow: str = "inflow", scenario: str = "S1",
+                     level: str = "element") -> list[str]:
     """
-    The elements that actually carry mass, biggest first.
+    The names that actually carry mass, biggest first.
 
     The arrays hold the union over the chemistries, so an element only some of
     them contain -- and sulphur and vanadium, which none of the three do -- sits
-    there as a column of zeros. Plotting those would be eleven real panels and
-    two empty ones.
+    there as a column of zeros.
+
+    Oxygen is dropped from the plots. It is bound in the cathode oxides and the
+    phosphate, never leaves as oxygen, and nothing recovers it; carrying it into
+    a panel of its own only makes the real streams smaller.
     """
-    _, totals = load_elements(flow, scenario)
-    carrying = {name: float(values.max()) for name, values in totals.items()}
+    _, totals = load_elements(flow, scenario, level)
+    skipped = {"O"} if level == "element" else set()
+    carrying = {name: float(values.max()) for name, values in totals.items()
+                if name not in skipped}
     return [name for name, top in sorted(carrying.items(), key=lambda kv: -kv[1])
             if top > 0]
 
@@ -760,6 +817,56 @@ def figure_all_elements(gaps: pd.DataFrame, flow: str = "inflow") -> Path:
     return _save(fig, f"04_04_6_all_elements_{flow}.png")
 
 
+# ------------------------------------------------------------------ figure 7
+def figure_components(flow: str = "collected") -> Path:
+    """
+    What the flow is made of, component by component.
+
+    The three hatched ones are the reason this level exists: the element arrays
+    cannot see them, and they are 7-11% of every pack. They are also the part a
+    recycler has to handle rather than sell -- organic electrolyte, polymer
+    separator, plastic casing.
+    """
+    scenarios = list(SCENARIO_COLORS)
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(5.0 * len(scenarios), 6),
+                             sharey=True)
+    for ax, scenario in zip(axes, scenarios):
+        years, totals = load_elements(flow, scenario, "component")
+        order = [name for name in COMPONENT_LABELS if name in totals]
+        stack = np.array([np.median(totals[name].astype(float), axis=0) / 1e3
+                          for name in order])
+        ax.stackplot(years, stack, colors=[COMPONENT_COLORS[n] for n in order],
+                     labels=[COMPONENT_LABELS[n] for n in order],
+                     edgecolor="white", linewidth=0.4)
+        hidden = np.array([stack[position] for position, name in enumerate(order)
+                           if name in INVISIBLE_TO_ELEMENTS]).sum(axis=0)
+        ax.fill_between(years, stack.sum(axis=0) - hidden, stack.sum(axis=0),
+                        facecolor="none", edgecolor="white", hatch="///",
+                        linewidth=0.0)
+        _style(ax)
+        ax.set_xlim(years[0], years[-1])
+        ax.set_xlabel("year", fontsize=9.5)
+        ax.set_title(SCENARIO_TITLES[scenario], fontsize=11.5, fontweight="bold",
+                     color=SCENARIO_COLORS[scenario], pad=8)
+    axes[0].set_ylabel(f"{flow}  [kt / year]", fontsize=10)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    handles.append(Patch(facecolor="white", edgecolor="#999999", hatch="///",
+                         label="invisible to the element level"))
+    labels.append("invisible to the element level")
+    fig.legend(handles=handles, labels=labels, loc="lower center", ncol=5,
+               frameon=False, fontsize=9)
+    fig.suptitle(f"What the {flow} is made of, component by component",
+                 fontsize=14, fontweight="bold")
+    fig.text(0.5, 0.925,
+             "Median of 200,000 draws. The hatched top of each stack — electrolyte, "
+             "separator and cell casing — is 7–11% of a pack and does not appear in "
+             "the element figures at all.",
+             ha="center", fontsize=9, color="#555555")
+    fig.tight_layout(rect=[0, 0.13, 1, 0.90])
+    return _save(fig, f"04_04_7_components_{flow}.png")
+
+
 def _save(fig, name: str) -> Path:
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     path = FIGURE_DIR / name
@@ -783,6 +890,8 @@ def build_all(params, flows_frame: pd.DataFrame, gaps: pd.DataFrame) -> list[Pat
         figure_all_elements(gaps, "inflow"),
         figure_all_elements(gaps, "outflow"),
         figure_all_elements(gaps, "collected"),
+        figure_components("inflow"),
+        figure_components("collected"),
     ]
 
 

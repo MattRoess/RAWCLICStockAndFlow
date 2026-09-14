@@ -44,6 +44,16 @@ from pathlib import Path
 import numpy as np
 
 
+# The two levels the battery project writes, and the files each lives in.
+# The elements do NOT add up to the pack: the cell casing and the separator have
+# no element rows and the electrolyte's cover 1% of its mass, so 7-11% of a pack
+# -- plastics, separator, electrolyte -- exists only at the component level.
+LEVEL_FILES = {
+    "element": ("_mass_draws.npy", "_elements.txt"),
+    "component": ("_component_mass_draws.npy", "_components.txt"),
+}
+
+
 class CompositionError(ValueError):
     """Raised when the composition files cannot answer what is being asked."""
 
@@ -63,12 +73,18 @@ class CompositionAtCapacity:
 
     # ------------------------------------------------------------- loading
     @lru_cache(maxsize=None)
-    def _anchors(self, chemistry: str, voltage: int) -> tuple:
-        """(capacities, elements, masses) with masses (n_anchors, n_draws, n_elements)."""
-        found = sorted(self.directory.glob(f"{chemistry}_*kWh_{voltage}V_mass_draws.npy"))
+    def _anchors(self, chemistry: str, voltage: int, level: str = "element") -> tuple:
+        """(capacities, names, masses) with masses (n_anchors, n_draws, n_names)."""
+        if level not in LEVEL_FILES:
+            raise CompositionError(
+                f"unknown level {level!r}; the files carry {sorted(LEVEL_FILES)}.")
+        mass_suffix, names_suffix = LEVEL_FILES[level]
+        found = sorted(self.directory.glob(
+            f"{chemistry}_*kWh_{voltage}V{mass_suffix}"))
         if not found:
             raise CompositionError(
-                f"no mass arrays for {chemistry!r} at {voltage} V in {self.directory}. "
+                f"no {level} mass arrays for {chemistry!r} at {voltage} V in "
+                f"{self.directory}. "
                 "Sodium-ion and solid-state have none -- they have no composition of "
                 "their own, and a caller must handle that rather than be handed zeros.")
         capacities, arrays, elements = [], [], None
@@ -81,13 +97,13 @@ class CompositionAtCapacity:
                 raise CompositionError(
                     f"cannot read a capacity out of {path.name!r}.")
             capacity = float(match.group(1))
-            here = (path.parent / path.name.replace("_mass_draws.npy", "_elements.txt")
+            here = (path.parent / path.name.replace(mass_suffix, names_suffix)
                     ).read_text().split()
             if elements is None:
                 elements = here
             elif here != elements:
                 raise CompositionError(
-                    f"{chemistry} {voltage}V: element order differs between anchors "
+                    f"{chemistry} {voltage}V: {level} order differs between anchors "
                     f"({capacity} kWh). The arrays cannot be stacked.")
             capacities.append(capacity)
             arrays.append(np.load(path))
@@ -95,8 +111,13 @@ class CompositionAtCapacity:
         return (np.array(capacities)[order], tuple(elements),
                 np.stack([arrays[i] for i in order]))
 
+    def names(self, chemistry: str, level: str = "element",
+              voltage: int = 400) -> tuple:
+        """The elements, or the components, in the order the arrays carry them."""
+        return self._anchors(chemistry, voltage, level)[1]
+
     def elements(self, chemistry: str, voltage: int = 400) -> tuple:
-        return self._anchors(chemistry, voltage)[1]
+        return self.names(chemistry, "element", voltage)
 
     @lru_cache(maxsize=None)
     def _improvement_years(self) -> tuple[int, ...]:
@@ -139,9 +160,9 @@ class CompositionAtCapacity:
 
     # ------------------------------------------------------- interpolation
     def _at_capacity(self, chemistry: str, voltage: int,
-                     capacity_kwh: np.ndarray) -> np.ndarray:
+                     capacity_kwh: np.ndarray, level: str = "element") -> np.ndarray:
         """
-        (n_draws, n_elements) at each draw's own capacity.
+        (n_draws, n_names) at each draw's own capacity.
 
         Linear in capacity, between anchors and beyond the top one. Linear
         rather than shape-preserving on purpose: mass runs about a fixed
@@ -149,7 +170,7 @@ class CompositionAtCapacity:
         there is almost no curvature to preserve, and a cubic continued past the
         last anchor diverges.
         """
-        anchors, _, masses = self._anchors(chemistry, voltage)
+        anchors, _, masses = self._anchors(chemistry, voltage, level)
         capacity = np.asarray(capacity_kwh, dtype=float)
 
         # Which pair of anchors each draw sits between; the top pair carries
@@ -189,11 +210,15 @@ class CompositionAtCapacity:
 
     # -------------------------------------------------------------- public
     def masses(self, *, chemistry: str, capacity_kwh: np.ndarray,
-               voltage_v: np.ndarray, year: int, seed: int = 0) -> np.ndarray:
+               voltage_v: np.ndarray, year: int, seed: int = 0,
+               level: str = "element") -> np.ndarray:
         """
-        Element masses in kg, (n_draws, n_elements), for one chemistry and year.
+        Masses in kg, (n_draws, n_names), for one chemistry, year and level.
 
         `capacity_kwh` and `voltage_v` are per-draw arrays of the same length.
+        The two levels share the seed, so draw i's extrapolation factor is the
+        same number at both -- the elements and the components of one car have
+        to be one car.
         """
         capacity = np.asarray(capacity_kwh, dtype=float)
         voltage = np.asarray(voltage_v)
@@ -203,15 +228,15 @@ class CompositionAtCapacity:
                 f"{capacity.shape} against {voltage.shape}")
 
         out = None
-        for level in np.unique(voltage):
-            anchors, _, _ = self._anchors(chemistry, int(level))
-            here = voltage == level
-            values = self._at_capacity(chemistry, int(level), capacity[here])
+        for pack_voltage in np.unique(voltage):
+            here = voltage == pack_voltage
+            values = self._at_capacity(chemistry, int(pack_voltage),
+                                       capacity[here], level)
             if out is None:
                 out = np.zeros((capacity.size, values.shape[1]), dtype=float)
             out[here] = values
 
-        top_anchor = float(self._anchors(chemistry, int(voltage.flat[0]))[0][-1])
+        top_anchor = float(self._anchors(chemistry, int(voltage.flat[0]), level)[0][-1])
         out *= self._extrapolation_factor(capacity, top_anchor, seed)
 
         improvement = self._improvement(int(year))
