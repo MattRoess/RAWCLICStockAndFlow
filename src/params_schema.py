@@ -1590,6 +1590,84 @@ class MaterialsParams:
         "JA": 25.0, "JB": 45.0, "JC": 60.0, "JD": 80.0, "JE": 80.0, "JF": 100.0,
     })
 
+    # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
+    #
+    # A segment does not offer a continuum of pack sizes, it offers a handful.
+    # Measured from EV_details.csv at 5 kWh resolution, models introduced from
+    # 2022: the kept levels cover 66-87% of a segment, and some have one
+    # dominant size -- JC's 80 kWh holds 39% of 235 models, JD's 100 kWh 38%.
+    # So the wide capacity range inside a segment IS a mixture of a few real
+    # pack sizes, not spread around a single one.
+    #
+    # ONE LEVEL IS DRAWN PER MONTE CARLO DRAW. That keeps the range, which is
+    # the point: a draw says "we do not know which pack this car has". The
+    # alternative -- splitting the fleet across the levels -- is what a fleet
+    # physically is, but it averages the mixture away and collapses the band.
+    # Both give the same mean. See documentation/DESIGN_bev_capacity_for_04_04.md.
+    #
+    # Rule for the levels: at most five, each holding at least 10% of the
+    # segment's models, renormalised. A proportional threshold rather than an
+    # absolute count, because "at least 3 models" collapsed segment A to a
+    # single level and destroyed the very spread this exists to carry.
+    #
+    # ⚠️ A and JA are ASSUMPTIONS, not measurements. JA has two models, both
+    # Hyundai INSTER, and the 50/50 weighting is a choice; A has ten.
+    # SAFE TO CHANGE: yes -- weights must be positive and are renormalised.
+    battery_capacity_levels: dict[str, dict] = field(default_factory=lambda: {
+        "A":  {"levels_kwh": (25.0, 30.0, 35.0), "weights": (0.600, 0.200, 0.200)},
+        "B":  {"levels_kwh": (40.0, 45.0, 50.0, 55.0),
+               "weights": (0.275, 0.175, 0.200, 0.350)},
+        "C":  {"levels_kwh": (55.0, 60.0, 65.0, 80.0, 85.0),
+               "weights": (0.197, 0.268, 0.211, 0.183, 0.141)},
+        "D":  {"levels_kwh": (80.0, 85.0, 90.0, 100.0),
+               "weights": (0.400, 0.283, 0.167, 0.150)},
+        "E":  {"levels_kwh": (85.0, 90.0, 100.0), "weights": (0.246, 0.188, 0.565)},
+        "F":  {"levels_kwh": (90.0, 95.0, 105.0, 120.0),
+               "weights": (0.208, 0.250, 0.361, 0.181)},
+        "JA": {"levels_kwh": (42.0, 49.0), "weights": (0.500, 0.500)},
+        "JB": {"levels_kwh": (50.0, 55.0, 60.0, 65.0, 70.0),
+               "weights": (0.191, 0.353, 0.118, 0.132, 0.206)},
+        "JC": {"levels_kwh": (65.0, 70.0, 80.0, 85.0),
+               "weights": (0.170, 0.152, 0.538, 0.140)},
+        "JD": {"levels_kwh": (75.0, 80.0, 100.0), "weights": (0.156, 0.278, 0.567)},
+        "JE": {"levels_kwh": (100.0, 105.0, 115.0), "weights": (0.436, 0.256, 0.308)},
+        "JF": {"levels_kwh": (100.0, 110.0, 120.0, 125.0),
+               "weights": (0.306, 0.278, 0.139, 0.278)},
+    })
+
+    # The year the levels above describe. They come from models introduced 2022
+    # onward, and the fleet median has been flat at 82 kWh since 2023, so 2024
+    # is the middle of the window they were measured over.
+    # SAFE TO CHANGE: only with the levels themselves.
+    battery_capacity_levels_year: int = 2024
+
+    # HOW THE LEVELS MOVE, per decade, as a triangular drawn ONCE PER MONTE
+    # CARLO DRAW. Growth runs from battery_capacity_levels_year and stops at the
+    # plateau year below; before that year the same rate runs backwards, which
+    # is how a car scrapped in 2040 gets the capacity of its own build year.
+    # SAFE TO CHANGE: yes.
+    battery_capacity_growth_per_decade: dict[str, float] = field(
+        default_factory=lambda: {"min": 0.05, "mode": 0.10, "max": 0.20})
+
+    # ⚠️ WHEN CAPACITY STOPS GROWING, drawn per Monte Carlo draw alongside the
+    # rate. Capacity levels off because RANGE saturates, not because capacity
+    # does: once a segment reaches the range its buyers want, more kWh is dead
+    # weight and further efficiency gains show up as range at the same capacity.
+    # Fast charging removes the pressure to buy range with capacity.
+    #
+    # Measured: fleet capacity stopped at 82 kWh (68 -> 82 -> 82 by introduction
+    # period) while consumption improved 164 -> 158 Wh/km and range gained only
+    # 15 km in the last period against 100 km in the one before. C and JC have
+    # plateaued; JD and F have not.
+    #
+    # It is DRAWN rather than fitted because the record cannot settle it: six or
+    # seven usable years, 13-20 models per segment in the early periods against
+    # 106-158 now, and models rather than registrations. "Plateaued" and
+    # "paused" look identical over that span.
+    # SAFE TO CHANGE: yes.
+    battery_capacity_plateau_year: dict[str, float] = field(
+        default_factory=lambda: {"min": 2035.0, "mode": 2040.0, "max": 2050.0})
+
     # Fallback battery size used when a vehicle's segment is unknown.
     # SAFE TO CHANGE: yes. Ideally it stays near the middle of the map above.
     average_battery_capacity_kwh: float = 60.0
@@ -2032,6 +2110,39 @@ class MaterialsParams:
                 f"materials.material_level_key={self.material_level_key!r} is not one "
                 f"of {sorted(valid_levels)}."
             )
+        levels = self.battery_capacity_levels
+        missing_levels = set(self.segment_map) - set(levels)
+        if missing_levels:
+            issues.append(
+                f"materials.battery_capacity_levels is missing segments present in "
+                f"segment_map: {sorted(missing_levels)}.")
+        for segment, entry in levels.items():
+            kwh, weights = entry.get("levels_kwh", ()), entry.get("weights", ())
+            if len(kwh) != len(weights) or not kwh:
+                issues.append(
+                    f"materials.battery_capacity_levels[{segment!r}] has "
+                    f"{len(kwh)} levels and {len(weights)} weights.")
+                continue
+            if any(v <= 0 for v in kwh):
+                issues.append(
+                    f"materials.battery_capacity_levels[{segment!r}] has a "
+                    f"non-positive capacity: {kwh}")
+            if any(w <= 0 for w in weights):
+                issues.append(
+                    f"materials.battery_capacity_levels[{segment!r}] has a "
+                    f"non-positive weight: {weights}. A level nobody buys should "
+                    "be removed, not given weight zero.")
+        for name, band in (("battery_capacity_growth_per_decade",
+                            self.battery_capacity_growth_per_decade),
+                           ("battery_capacity_plateau_year",
+                            self.battery_capacity_plateau_year)):
+            missing_keys = {"min", "mode", "max"} - set(band)
+            if missing_keys:
+                issues.append(f"materials.{name} is missing {sorted(missing_keys)}.")
+            elif not band["min"] <= band["mode"] <= band["max"]:
+                issues.append(
+                    f"materials.{name} must satisfy min <= mode <= max: {band}")
+
         missing_battery_segments = set(self.segment_map) - set(self.battery_size_map)
         if missing_battery_segments:
             issues.append(

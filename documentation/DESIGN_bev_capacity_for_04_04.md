@@ -1,8 +1,8 @@
 # BEV capacity for stage 04_04 — the discussion, the evidence and the decisions
 
 How many kWh a BEV of a given segment carries, in a given year, and how that
-enters the Monte Carlo. Settled 2026-09-14. **Not yet implemented** — this file
-exists so the reasoning is not lost between now and then.
+enters the Monte Carlo. Settled 2026-09-14. Implemented 2026-09-14 in `src/battery_capacity.py`; §7 records what it
+produces.
 
 Every number below was measured from `EV_details.csv` (the EV-database scrape
 held in RAWCLICVehicleBattery), models introduced from 2022 unless stated, on
@@ -205,9 +205,43 @@ the discreteness.
 
 ---
 
-## 7. What is still open
+## 7. Implemented, 2026-09-14
 
-1. **Implementation.** None of this is in code yet.
+`src/battery_capacity.py` — `capacity_draws(params, segment, years, n_draws, seed)`
+returns `(n_draws, n_years)` in nominal kWh. Parameters are
+`materials.battery_capacity_levels`, `…_levels_year`, `…_growth_per_decade` and
+`…_plateau_year`. Run the module directly for a summary table.
+
+Verified: the drawn levels are discrete and reproduce the parameter weights to
+0.002; at the anchor year every draw equals its own level exactly; growth and
+plateau are shared across segments while the level choice is independent.
+
+Mean capacity it produces, against the map it replaces:
+
+| seg | 2020 | 2030 | 2040 | 2050+ | `battery_size_map` |
+|---|---|---|---|---|---|
+| C | 64.2 | 71.7 | 79.6 | 81.7 | 60 |
+| F | 97.8 | 109.2 | 121.2 | 124.3 | 100 |
+| JC | 73.3 | 81.9 | 90.9 | 93.3 | 60 |
+| JE | 101.3 | 113.1 | 125.6 | 128.8 | 80 |
+
+Band width grows with the year — JC 20.8 kWh in 2020 to 38.1 by 2050 — because
+the plateau date is drawn and its effect compounds.
+
+> **⚠️ This pushes the large segments past the composition files' top anchor.**
+> Those files run to 100 kWh and 04_04 must interpolate over them. Share of
+> draws above 100 kWh: JE and JF **100% from 2030**, F 74% in 2030 rising to
+> 99% by 2050, JC 15% by 2040, C 10% by 2040. So a large part of the fleet is
+> extrapolated composition, on a linear continuation past the top anchor.
+> Whether that is acceptable, or whether the workbook needs an anchor above
+> 100 kWh, is not decided.
+
+> **⚠️ The backward arm is an extrapolation.** Growth runs backwards from 2024
+> at the same drawn rate, so a car scrapped in 2040 gets its build year's
+> capacity. Measured capacity was 68 kWh in 2018–21 against 82 now — a steeper
+> rise than 10% per decade — so the early years come out somewhat too high.
+
+## 8. What is still open
 2. **Which chemistry scenario drives the run** — S1 / S2 / S3 from the battery
    project, and how it combines with 03_02's six flow scenarios. Six × three is
    eighteen runs.
