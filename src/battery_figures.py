@@ -67,6 +67,8 @@ CHEMISTRY_LABELS = {
     "Na_ion": "sodium-ion  (no composition)",
     "solid_state": "solid-state  (no composition)",
 }
+FLOW_LABELS = {"inflow": "inflow", "outflow": "outflow",
+               "collected": "collected"}
 GROUP_TITLES = {"small": "small  (A, B, JA, JB)",
                 "medium": "medium  (C, D, JC, JD)",
                 "large": "large  (E, F, JE, JF)"}
@@ -201,9 +203,10 @@ def figure_scenarios(params) -> Path:
 def figure_element_comparison(gaps: pd.DataFrame,
                               elements=("Li", "Ni", "Cu", "Co")) -> Path:
     """The comparison itself: three scenarios, key elements, inflow and outflow."""
-    flows = ("inflow", "outflow")
+    flows = ("inflow", "outflow", "collected")
     fig, axes = plt.subplots(len(flows), len(elements),
-                             figsize=(4.0 * len(elements), 8), sharex=True)
+                             figsize=(4.0 * len(elements), 3.7 * len(flows)),
+                             sharex=True)
     for row, flow in enumerate(flows):
         for column, element in enumerate(elements):
             ax = axes[row][column]
@@ -233,7 +236,7 @@ def figure_element_comparison(gaps: pd.DataFrame,
             if row == 0:
                 ax.set_title(element, fontsize=13, fontweight="bold", pad=8)
             if column == 0:
-                ax.set_ylabel(f"{flow}  [kt / year]", fontsize=10)
+                ax.set_ylabel(f"{FLOW_LABELS[flow]}  [kt / year]", fontsize=10)
             if row == len(flows) - 1:
                 ax.set_xlabel("year", fontsize=9.5)
 
@@ -347,46 +350,60 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
 # ------------------------------------------------------------------ figure 5
 def figure_secondary_supply(elements=("Li", "Ni", "Cu", "Mn")) -> Path:
     """
-    Outflow over inflow, formed per draw. The reason the draws are kept: this
+    Collected over inflow, formed per draw. The reason the draws are kept: this
     ratio cannot be built from a mean and two percentiles.
+
+    The outflow line above it is what LEAVES the fleet. Only the collected part
+    reaches a recycler -- 88% of BEVs, with 2% exported and 10% never traced --
+    so the distance between the two lines is material that exists and is lost.
     """
     fig, axes = plt.subplots(1, len(elements),
                              figsize=(3.6 * len(elements), 5.4), sharey=True)
     for ax, element in zip(np.atleast_1d(axes), elements):
         for scenario, color in SCENARIO_COLORS.items():
             years, inflow = load_element("inflow", scenario, element)
-            _, outflow = load_element("outflow", scenario, element)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                ratio = np.where(inflow > 0, outflow / inflow, np.nan) * 100
-            low, median, high = np.nanpercentile(ratio, [2.5, 50, 97.5], axis=0)
-            ax.fill_between(years, low, high, color=color, alpha=0.14, linewidth=0)
-            ax.plot(years, median, color=color, linewidth=2.2,
-                    label=SCENARIO_TITLES[scenario])
+            for flow, width, style, alpha in (("outflow", 1.1, (0, (4, 2)), 0.0),
+                                              ("collected", 2.2, "-", 0.14)):
+                _, leaving = load_element(flow, scenario, element)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    ratio = np.where(inflow > 0, leaving / inflow, np.nan) * 100
+                low, median, high = np.nanpercentile(ratio, [2.5, 50, 97.5], axis=0)
+                if alpha:
+                    ax.fill_between(years, low, high, color=color, alpha=alpha,
+                                    linewidth=0)
+                ax.plot(years, median, color=color, linewidth=width, linestyle=style,
+                        label=SCENARIO_TITLES[scenario] if flow == "collected" else None)
         _style(ax)
         ax.set_title(element, fontsize=13, fontweight="bold", pad=8)
         ax.set_xlabel("year", fontsize=9.5)
         ax.axhline(100, color="#999999", linewidth=1.0, linestyle="--")
         ax.text(years[0] + 1, 108, "returning as much as entering", fontsize=8.2,
                 color="#777777", ha="left")
-    np.atleast_1d(axes)[0].set_ylabel(
-        "end-of-life return as a share of the same year's demand  [%]", fontsize=10)
-    np.atleast_1d(axes)[0].legend(frameon=False, fontsize=9.5, loc="upper left")
+    first = np.atleast_1d(axes)[0]
+    first.set_ylabel("share of the same year's demand  [%]", fontsize=10)
+    handles = [Line2D([], [], color=c, linewidth=2.2, label=SCENARIO_TITLES[s])
+               for s, c in SCENARIO_COLORS.items()]
+    handles += [Line2D([], [], color="#666666", linewidth=2.2,
+                       label="collected — reaches a recycler"),
+                Line2D([], [], color="#666666", linewidth=1.1, linestyle=(0, (4, 2)),
+                       label="outflow — leaves the fleet, 12% of it untraceably")]
+    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
+               fontsize=9.5, bbox_to_anchor=(0.5, 0.045))
 
-    fig.suptitle("Secondary supply potential, formed draw by draw",
+    fig.suptitle("What recycling actually gets, formed draw by draw",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.925,
-             "Outflow of draw i over inflow of draw i, then the percentiles — not a "
+             "Collected of draw i over inflow of draw i, then the percentiles — not a "
              "ratio of percentiles, which would be a different and wrong number.",
              ha="center", fontsize=9, color="#555555")
-    fig.text(0.5, 0.015,
+    fig.text(0.5, 0.012,
              "Above 100% more comes back than goes in: the cars being scrapped were "
              "built when lithium chemistries still dominated, while the new ones are "
-             "not.\nThe scenarios separate only because the outflow is given its "
-             "BUILD year's chemistry and pack — see src/battery_vintage.py for what "
-             "that reconstruction can and cannot do. Cobalt is not shown: it comes "
-             "only from NMC, so its curve is nickel's to within 0.03 pp.",
+             "not. The gap between the two lines is\nexport and untraced vehicles — "
+             "material that exists and never reaches a recycler. Cobalt is not shown: "
+             "it comes only from NMC, so its curve is nickel's to within 0.03 pp.",
              ha="center", fontsize=8.5, color="#555555")
-    fig.tight_layout(rect=[0, 0.08, 1, 0.90])
+    fig.tight_layout(rect=[0, 0.12, 1, 0.90])
     return _save(fig, "04_04_5_secondary_supply.png")
 
 
@@ -467,4 +484,5 @@ def build_all(params, flows_frame: pd.DataFrame, gaps: pd.DataFrame) -> list[Pat
         figure_secondary_supply(),
         figure_all_elements(gaps, "inflow"),
         figure_all_elements(gaps, "outflow"),
+        figure_all_elements(gaps, "collected"),
     ]

@@ -1,14 +1,21 @@
 # Battery material flows (stage 04_04)
 
-How much of each element enters the European BEV fleet in a battery, and how much
-comes back out, year by year, under three assumptions about which chemistry the
-cars carry.
+How much of each element enters the European BEV fleet in a battery, how much
+comes back out, and how much is actually **collected** from it, year by year,
+under three assumptions about which chemistry the cars carry.
+
+Only the collected part reaches a recycler. Of the BEVs that leave the fleet,
+88 % are collected, 2 % are exported second-hand and 10 % are never traced — so a
+secondary-supply number built on the outflow is an upper bound, not a supply.
+03_02 draws those shares, so the collected series carries that uncertainty rather
+than being 0.88 × the outflow: measured at 87.9 % in 2070 with a 86.8–89.0 %
+band.
 
 Reported **every two years**, 2020 to 2070.
 
 ```bash
-.venv/bin/python code/04_04_batteries.py     # ~4 min at 200,000 draws, writes the figures too
-.venv/bin/python code/04_04_figures.py       # ~13 s, redraws them from the saved draws
+.venv/bin/python code/04_04_batteries.py     # ~6.5 min at 200,000 draws, writes the figures too
+.venv/bin/python code/04_04_figures.py       # ~30 s, redraws them from the saved draws
 ```
 
 The two-year grid costs one thing worth knowing: the battery project writes its
@@ -60,19 +67,20 @@ Draw *i* is one coherent world on every side, because both projects run at
 
 **The result is the draws**, in
 `data/processed/battery_draws/<flow>/<scenario>/<chemistry>.npy`, shaped
-(draws, years, elements) in tonnes — 4.3 GB at 200,000 draws on the two-year grid. The table in
+(draws, years, elements) in tonnes — three flows, 6.5 GB at 200,000 draws on
+the two-year grid. The table in
 `04_04_battery_material_flows.pkl` — mean, median, 2.5 % and 97.5 % — is computed
 from them and is for reading, never an input to further arithmetic. Recovery is a
 ratio of two of these numbers, and a ratio of percentiles is not the percentile of
 a ratio.
 
-## Inflow is built this year, outflow was built long ago
+## Inflow is built this year, what leaves was built long ago
 
 A car scrapped in 2050 was built around 2036 — measured, not assumed; the lag
 runs 9 years in 2030 and settles at 16.5 by 2070 as the fleet stops growing — and
-carries the chemistry and the pack of 2036. The outflow is therefore spread
-back over the build years that could have produced it before any composition is
-applied (`src/battery_vintage.py`):
+carries the chemistry and the pack of 2036. The outflow and the collected series
+are therefore spread back over the build years that could have produced them
+before any composition is applied (`src/battery_vintage.py`):
 
     weight(build year b → scrap year t) = inflow(b) × f(t − b)
 
@@ -81,9 +89,10 @@ and 03_02 already use, and the inflow the draw's own.
 
 This matters more than it sounds. Without it the chemistry mix multiplies both
 flows by the same factor, cancels out of every outflow-over-inflow ratio, and all
-three scenarios produce one identical curve. With it, S3 returns **174 %** of its
-own lithium demand by 2070, **175 %** of its copper and **264 %** of its nickel
-(peaking at 420 % in 2054): the cars being scrapped
+three scenarios produce one identical curve. With it, S3's **collected** material
+reaches **153 %** of its own lithium demand by 2070, **154 %** of its copper and
+**232 %** of its nickel (peaking at 369 % in 2054). The outflow behind those
+numbers is 174 %, 175 % and 264 % — the difference is what never arrives: the cars being scrapped
 were built when lithium chemistries still dominated, while the new ones are not.
 
 ![secondary supply](../data/processed/figures/04_04_5_secondary_supply.png)
@@ -116,7 +125,7 @@ the extrapolation above 100 kWh all compound.
 ### Every element
 
 Eleven elements carry mass: Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co, in that
-order of size. Sulphur and vanadium sit in the arrays as columns of zeros — the
+order of size. One overview figure per flow — inflow, outflow and collected. Sulphur and vanadium sit in the arrays as columns of zeros — the
 element axis is the union over the chemistry files, and none of these three
 contains them.
 

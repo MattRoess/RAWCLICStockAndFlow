@@ -2,9 +2,14 @@
 04_04_batteries.py
 ==================
 
-Battery material flows for BEVs: what enters the fleet and what leaves it, in
-kilograms of each element, per year, per chemistry, under each chemistry
-scenario.
+Battery material flows for BEVs: what enters the fleet, what leaves it, and
+what is actually collected from it, in tonnes of each element, per year, per
+chemistry, under each chemistry scenario.
+
+THE THIRD SERIES IS THE ONE RECYCLING SEES. Of the BEVs leaving the fleet, 88%
+are collected, 2% are exported second-hand and 10% are never traced. Only the
+collected ones reach a recycler, so a secondary-supply number built on the
+outflow is an upper bound, not a supply.
 
     .venv/bin/python code/04_04_batteries.py
 
@@ -86,7 +91,12 @@ from src.battery_figures import build_all  # noqa: E402
 from src.battery_vintage import vintage_weights  # noqa: E402
 from src.battery_voltage import voltage_draws  # noqa: E402
 
-FLOWS = ("inflow", "outflow")
+# Three series, all exported per draw by 03_02. The collected one is the only
+# one that reaches a recycler: of the BEVs that leave the fleet, 88% are
+# collected, 2% are exported and 10% are never traced -- and 03_02 draws those
+# shares, so the collected array carries that uncertainty rather than being
+# 0.88 times the outflow.
+FLOWS = ("inflow", "outflow", "collected")
 
 
 def load_flow_draws(root: Path, scenario: str, segment: str, flow: str):
@@ -156,8 +166,10 @@ def main() -> dict:
                 continue
             flow_years = segment_years
             vehicles_by_segment[segment] = drawn
-            if flow == "outflow":
+            if flow != "inflow":
                 # The draw's own build history, which decides its vintages.
+                # Collected cars are scrapped cars: same build years as the
+                # outflow they are a part of.
                 _, built = load_flow_draws(PROJECT_ROOT, flow_scenario,
                                            segment, "inflow")
                 built_by_segment[segment] = built
@@ -185,7 +197,7 @@ def main() -> dict:
                 for year in years], axis=1)
             count_mean[segment] = counts.mean(axis=0)
 
-            if flow == "outflow":
+            if flow != "inflow":
                 weights, clamped = vintage_weights(
                     built_by_segment[segment], flow_years, years, vintages,
                     lifetime.shape_k, lifetime.scale_lambda)
@@ -236,7 +248,7 @@ def main() -> dict:
 
         if clamped_reported is not None:
             before_grid, before_composition = clamped_reported
-            print(f"    outflow vintage weight before {vintages[0]}: "
+            print(f"    {flow} vintage weight before {vintages[0]}: "
                   + ", ".join(f"{year} {share:.1%}" for year, share
                               in zip(years, before_grid) if share > 0.001))
             print(f"    on build years before {composition_floor}, where the "
