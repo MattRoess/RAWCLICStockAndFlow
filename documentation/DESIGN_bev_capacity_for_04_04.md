@@ -241,6 +241,20 @@ the plateau date is drawn and its effect compounds.
 > capacity. Measured capacity was 68 kWh in 2018–21 against 82 now — a steeper
 > rise than 10% per decade — so the early years come out somewhat too high.
 
+## 7b. Discreteness, and the 5 kWh grid that was rejected
+
+Whether a capacity stays discrete once a draw runs forty years forward is its
+own question, and the answer is not simply yes: **inside a draw a segment has
+exactly its levels and nothing between them, while across draws the values
+smear** — 4 distinct capacities at the anchor, ~50,000 at 2040, which are
+guesses about what the four sizes will be rather than sizes in one market.
+
+A proposal to round each draw's grown levels to a 5 kWh grid was **refuted by
+the data**: only 25.6% of 1,068 models sit on a multiple of 5 kWh, and the
+commonest sizes are 82, 100, 84, 54, 105 and 91 kWh. Pack capacity is cell
+count times cell capacity, not a round number. Full argument in
+[`DESIGN_discrete_vehicle_states.md`](DESIGN_discrete_vehicle_states.md).
+
 ## 8. What is still open
 2. **Which chemistry scenario drives the run** — S1 / S2 / S3 from the battery
    project, and how it combines with 03_02's six flow scenarios. Six × three is

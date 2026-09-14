@@ -1668,6 +1668,61 @@ class MaterialsParams:
     battery_capacity_plateau_year: dict[str, float] = field(
         default_factory=lambda: {"min": 2035.0, "mode": 2040.0, "max": 2050.0})
 
+    # ⚠️ 800 V ADOPTION, which decides how much copper a pack carries.
+    #
+    # Same power at double the voltage is less current and less conductor: the
+    # composition files give a 400 V and an 800 V row per component, and the
+    # 800 V one carries a third less copper in the cables and cell terminals.
+    # So this driver moves a real material, not a label.
+    #
+    # WRITTEN-DOWN COPY, NOT READ ACROSS PROJECTS. The source is
+    # RAWCLICVehicleElectronics' Data/18_BEV_technology_penetration.xlsx, sheet
+    # "Penetration", Driver="Voltage", State="800V" -- the single source of
+    # truth that project validates its own sensor and wiring models against
+    # (its check V12). It is copied here so this repo runs without that one
+    # present, on the same footing as reference maps elsewhere in this file:
+    # IF THAT WORKBOOK CHANGES, THIS HAS TO BE UPDATED BY HAND.
+    #
+    # Values are (Share_Min, Share_Mode, Share_Max) of new sales. The band is
+    # real uncertainty, about +/-0.12 on the share, and a caller that uses only
+    # the mode is throwing away spread the source deliberately carries.
+    #
+    # EF leads by a wide margin -- 0.42 in 2025 against CD 0.07 and AB 0.02 --
+    # which matches where 800 V actually appears: Chinese platforms and the
+    # large segments first.
+    # SAFE TO CHANGE: only to track the source workbook.
+    pack_voltage_800v_share: dict[str, dict[int, tuple[float, float, float]]] = field(
+        default_factory=lambda: {
+        "AB": {2010: (0.0, 0.001, 0.121), 2015: (0.0, 0.003, 0.123),
+               2020: (0.0, 0.007, 0.127), 2025: (0.0, 0.019, 0.139),
+               2030: (0.0, 0.050, 0.170), 2035: (0.003, 0.123, 0.243),
+               2040: (0.153, 0.273, 0.393), 2045: (0.380, 0.500, 0.620),
+               2050: (0.607, 0.727, 0.847), 2060: (0.830, 0.950, 1.0),
+               2070: (0.873, 0.993, 1.0)},
+        "CD": {2010: (0.0, 0.0, 0.120), 2015: (0.0, 0.0, 0.120),
+               2020: (0.0, 0.005, 0.125), 2025: (0.0, 0.070, 0.190),
+               2030: (0.280, 0.400, 0.520), 2035: (0.600, 0.720, 0.840),
+               2040: (0.760, 0.880, 1.0), 2045: (0.820, 0.940, 1.0),
+               2050: (0.850, 0.970, 1.0), 2060: (0.870, 0.990, 1.0),
+               2070: (0.880, 1.0, 1.0)},
+        "EF": {2010: (0.0, 0.005, 0.125), 2015: (0.0, 0.027, 0.147),
+               2020: (0.003, 0.123, 0.243), 2025: (0.299, 0.419, 0.539),
+               2030: (0.667, 0.787, 0.907), 2035: (0.830, 0.950, 1.0),
+               2040: (0.870, 0.990, 1.0), 2045: (0.878, 0.998, 1.0),
+               2050: (0.880, 1.0, 1.0), 2060: (0.880, 1.0, 1.0),
+               2070: (0.880, 1.0, 1.0)},
+    })
+
+    # Which of the source's three groups each segment belongs to. The voltage
+    # driver is resolved at AB/CD/EF because that is the grain it was built at;
+    # capacity stays per segment, where the evidence supports it.
+    # SAFE TO CHANGE: yes, but every segment in segment_map needs an entry.
+    pack_voltage_segment_groups: dict[str, str] = field(default_factory=lambda: {
+        "A": "AB", "B": "AB", "JA": "AB", "JB": "AB",
+        "C": "CD", "D": "CD", "JC": "CD", "JD": "CD",
+        "E": "EF", "F": "EF", "JE": "EF", "JF": "EF",
+    })
+
     # Fallback battery size used when a vehicle's segment is unknown.
     # SAFE TO CHANGE: yes. Ideally it stays near the middle of the map above.
     average_battery_capacity_kwh: float = 60.0
