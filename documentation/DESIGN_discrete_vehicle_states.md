@@ -58,28 +58,27 @@ where it is visible — it is not applied twice.)*
 
 ---
 
-## OPEN: how to use the voltage band
+## The voltage band: the upper arm may not exceed the lower one
 
-The source gives Min/Mode/Max and **selects one**, running three times. This
-implementation **draws** the band per iteration.
+The source's band is a symmetric ±0.12 belief, clipped where it would cross
+zero. Drawing the clipped shape hands the surviving upper arm all the weight
+the lower one lost — AB 2020 is `(0, 0.007, 0.127)`, and a triangular through
+that puts 4.5% of A-segment cars at 800 V against a mode of 0.7%. In 2020 that
+was the Taycan, an EF car.
 
-Consequence, where the band is clipped at zero:
+**Decided 2026-09-14:** cut the upper arm back to the length of the lower one.
 
-| | mode | drawn mean |
-|---|---|---|
-| AB 2020 | 0.7% | **4.5%** |
-| CD 2020 | 0.5% | **4.3%** |
+It bites only where the floor truncated the band:
 
-Drawing gives a `Max` meant as an upper bound real weight. In 2020, 800 V was
-essentially the Taycan — an EF car. 4.5% of A-segment cars at 800 V is wrong.
+| | before | after | mode |
+|---|---|---|---|
+| AB 2020 | 4.5% | **0.7%** | 0.7% |
+| CD 2030 | 40.0% | 39.5% | 40.0% |
+| EF 2020 | 12.3% | 12.4% | 12.3% |
 
-**Mode only** — matches the source, kills the artefact, loses the spread.
-**Draw the band** — keeps spread, wrong in the early years.
-**Draw, but clipped below the mode** — keeps spread where the band is real,
-removes the upside-only inflation at the zero end.
-
-Recommendation: the third. The band is genuine from ~2030 on, and the
-distortion is confined to years when almost no BEVs existed.
+A symmetric band is untouched. A band clipped at the **top** keeps its downside
+— EF 2070 stays `(0.88, 1.0, 1.0)` and draws 96%, because a ceiling at 100% is
+real rather than an artefact, and the band genuinely allows 88%.
 
 ---
 

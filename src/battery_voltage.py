@@ -63,6 +63,22 @@ def _share_curve(params, group: str, years: np.ndarray,
     mode_y = np.interp(years, anchors, mode)
     hi_y = np.interp(years, anchors, hi)
 
+    # THE UPPER ARM MAY NOT EXCEED THE LOWER ARM.
+    #
+    # The source's band is a symmetric +/-0.12 belief that has been clipped
+    # where it would cross zero. Drawing the clipped shape gives the surviving
+    # upper arm the whole of the weight the lower one lost: AB in 2020 has
+    # (0, 0.007, 0.127) and a triangular through it means 4.5% of A-segment
+    # cars at 800 V against a mode of 0.7%. In 2020 that was the Taycan, an EF
+    # car.
+    #
+    # So the upper arm is cut back to the length of the lower one. This bites
+    # ONLY where the floor truncated the band: a symmetric band is untouched
+    # (CD 2030 stays 0.28/0.40/0.52), and a band clipped at the TOP keeps its
+    # downside (EF 2070 stays 0.88/1.0/1.0) because a ceiling at 100% is real
+    # rather than an artefact.
+    hi_y = np.minimum(hi_y, mode_y + (mode_y - lo_y))
+
     # A triangular's inverse CDF, evaluated at each draw's fixed position.
     span = np.where(hi_y > lo_y, hi_y - lo_y, 1.0)
     split = np.where(hi_y > lo_y, (mode_y - lo_y) / span, 0.0)
