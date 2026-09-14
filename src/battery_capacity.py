@@ -145,7 +145,6 @@ def main() -> int:
         index="segment", columns="year", values="w").round(1)
     print("mean:"); print(wide.to_string())
     print("\nband width (p97.5 - p2.5):"); print(band.to_string())
-    print(f"\nmap it replaces, for comparison: {params.materials.battery_size_map}")
     return 0
 
 

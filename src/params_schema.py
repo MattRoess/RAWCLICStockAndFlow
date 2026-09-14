@@ -1587,16 +1587,6 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes, once you have confirmed what the battery workbook offers.
     battery_composition_parameter_code: str = "e-m"
 
-    # Battery capacity in kWh assumed for each vehicle size segment -- a small A-segment
-    # car gets 25 kWh, a large F-segment car 100 kWh.
-    # This scales directly into how much battery material each vehicle contributes, so
-    # it matters a great deal for the material totals.
-    # SAFE TO CHANGE: yes. Values are kWh; keep them plausible for the segment.
-    battery_size_map: dict[str, float] = field(default_factory=lambda: {
-        "A": 25.0, "B": 45.0, "C": 60.0, "D": 80.0, "E": 80.0, "F": 100.0,
-        "JA": 25.0, "JB": 45.0, "JC": 60.0, "JD": 80.0, "JE": 80.0, "JF": 100.0,
-    })
-
     # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
     #
     # A segment does not offer a continuum of pack sizes, it offers a handful.
@@ -2299,12 +2289,6 @@ class MaterialsParams:
                 issues.append(
                     f"materials.{name} must satisfy min <= mode <= max: {band}")
 
-        missing_battery_segments = set(self.segment_map) - set(self.battery_size_map)
-        if missing_battery_segments:
-            issues.append(
-                f"materials.battery_size_map is missing segments present in "
-                f"segment_map: {sorted(missing_battery_segments)}."
-            )
         return issues
 
 

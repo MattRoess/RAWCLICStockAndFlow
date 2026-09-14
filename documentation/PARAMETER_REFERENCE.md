@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **145** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **156** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 34 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 45 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1071,6 +1071,13 @@ do not appear -- nothing is broken, there is just nothing to compare.
 Cost warning: each scenario is a full Monte Carlo simulation. The complete sweep
 is 11 of them and takes hours at 200,000 draws.
 
+⚠️ AND EACH ONE NOW ALSO WRITES THE PER-DRAW BEV ARRAYS that stage 04_04
+reads -- twelve extra per-segment Monte Carlo runs per scenario, and about
+2.7 GB on disk per scenario at 200,000 draws. The full sweep is therefore
+roughly 30 GB in data/processed/bev_draws/. Set
+materials.bev_electronics_export_draws to False if you want the sweep
+without them.
+
 A misspelled name is caught immediately when you run code/00_parameters.py,
 rather than hours into a run.
 SAFE TO CHANGE: yes -- this is the setting you are most likely to want to edit.
@@ -1104,7 +1111,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**34 parameters.**
+**45 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1118,7 +1125,18 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `battery_share_file_name` | `"BATTKey_xEV_shares_final.xlsx"` |
 | `battery_composition_file_name` | `"250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"` |
 | `battery_composition_parameter_code` | `"e-m"` |
-| `battery_size_map` | `{ "A": 25.0, "B": 45.0, "C": 60.0, "D": 80.0, "E": 80.0, "F": 100.0, "JA": 25.0, "JB": ...` |
+| `battery_capacity_levels` | `{ "A": {"levels_kwh": (25.0, 30.0, 35.0), "weights": (0.600, 0.200, 0.200)}, "B": {"lev...` |
+| `battery_capacity_levels_year` | `2024` |
+| `battery_capacity_growth_per_decade` | `default_factory=lambda: {"min": 0.05, "mode": 0.10, "max": 0.20}` |
+| `battery_capacity_plateau_year` | `default_factory=lambda: {"min": 2035.0, "mode": 2040.0, "max": 2050.0}` |
+| `pack_voltage_800v_share` | `default_factory=lambda: { "AB": {2010: (0.0, 0.001, 0.121), 2015: (0.0, 0.003, 0.123), ...` |
+| `pack_voltage_segment_groups` | `{ "A": "AB", "B": "AB", "JA": "AB", "JB": "AB", "C": "CD", "D": "CD", "JC": "CD", "JD":...` |
+| `battery_composition_dir` | `"/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/" "RAWCLICVehi...` |
+| `battery_extrapolation_uncertainty_per_100kwh` | `0.10` |
+| `battery_chemistry_anchor_years` | `(2025, 2035, 2050, 2070)` |
+| `battery_chemistry_segment_groups` | `{ "A": "small", "B": "small", "JA": "small", "JB": "small", "C": "medium", "D": "medium...` |
+| `battery_chemistry_scenarios` | `default_factory=lambda: { "S1": { "small": {"LFP": (70, 65, 60, 60), "LMFP": (18, 25, 3...` |
+| `battery_chemistry_file_names` | `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi", }` |
 | `average_battery_capacity_kwh` | `60.0` |
 | `composition_summary_file_name` | `"36_MonteCarlo_Summary.xlsx"` |
 | `composition_scalar_statistic` | `"mean"` |
@@ -1237,15 +1255,197 @@ reminder -- it is not an error, but the two are at different levels of detail.
 SAFE TO CHANGE: yes, once you have confirmed what the battery workbook offers.
 
 
-### `battery_size_map`
+### `battery_capacity_levels`
 
-Default: `{ "A": 25.0, "B": 45.0, "C": 60.0, "D": 80.0, "E": 80.0, "F": 100.0, "JA": 25.0, "JB": ...`
+Default: `{ "A": {"levels_kwh": (25.0, 30.0, 35.0), "weights": (0.600, 0.200, 0.200)}, "B": {"lev...`
 
-Battery capacity in kWh assumed for each vehicle size segment -- a small A-segment
-car gets 25 kWh, a large F-segment car 100 kWh.
-This scales directly into how much battery material each vehicle contributes, so
-it matters a great deal for the material totals.
-SAFE TO CHANGE: yes. Values are kWh; keep them plausible for the segment.
+⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
+
+A segment does not offer a continuum of pack sizes, it offers a handful.
+Measured from EV_details.csv at 5 kWh resolution, models introduced from
+2022: the kept levels cover 66-87% of a segment, and some have one
+dominant size -- JC's 80 kWh holds 39% of 235 models, JD's 100 kWh 38%.
+So the wide capacity range inside a segment IS a mixture of a few real
+pack sizes, not spread around a single one.
+
+ONE LEVEL IS DRAWN PER MONTE CARLO DRAW. That keeps the range, which is
+the point: a draw says "we do not know which pack this car has". The
+alternative -- splitting the fleet across the levels -- is what a fleet
+physically is, but it averages the mixture away and collapses the band.
+Both give the same mean. See documentation/DESIGN_bev_capacity_for_04_04.md.
+
+Rule for the levels: at most five, each holding at least 10% of the
+segment's models, renormalised. A proportional threshold rather than an
+absolute count, because "at least 3 models" collapsed segment A to a
+single level and destroyed the very spread this exists to carry.
+
+⚠️ A and JA are ASSUMPTIONS, not measurements. JA has two models, both
+Hyundai INSTER, and the 50/50 weighting is a choice; A has ten.
+SAFE TO CHANGE: yes -- weights must be positive and are renormalised.
+
+
+### `battery_capacity_levels_year`
+
+Default: `2024`
+
+The year the levels above describe. They come from models introduced 2022
+onward, and the fleet median has been flat at 82 kWh since 2023, so 2024
+is the middle of the window they were measured over.
+SAFE TO CHANGE: only with the levels themselves.
+
+
+### `battery_capacity_growth_per_decade`
+
+Default: `default_factory=lambda: {"min": 0.05, "mode": 0.10, "max": 0.20}`
+
+HOW THE LEVELS MOVE, per decade, as a triangular drawn ONCE PER MONTE
+CARLO DRAW. Growth runs from battery_capacity_levels_year and stops at the
+plateau year below; before that year the same rate runs backwards, which
+is how a car scrapped in 2040 gets the capacity of its own build year.
+SAFE TO CHANGE: yes.
+
+
+### `battery_capacity_plateau_year`
+
+Default: `default_factory=lambda: {"min": 2035.0, "mode": 2040.0, "max": 2050.0}`
+
+⚠️ WHEN CAPACITY STOPS GROWING, drawn per Monte Carlo draw alongside the
+rate. Capacity levels off because RANGE saturates, not because capacity
+does: once a segment reaches the range its buyers want, more kWh is dead
+weight and further efficiency gains show up as range at the same capacity.
+Fast charging removes the pressure to buy range with capacity.
+
+Measured: fleet capacity stopped at 82 kWh (68 -> 82 -> 82 by introduction
+period) while consumption improved 164 -> 158 Wh/km and range gained only
+15 km in the last period against 100 km in the one before. C and JC have
+plateaued; JD and F have not.
+
+It is DRAWN rather than fitted because the record cannot settle it: six or
+seven usable years, 13-20 models per segment in the early periods against
+106-158 now, and models rather than registrations. "Plateaued" and
+"paused" look identical over that span.
+SAFE TO CHANGE: yes.
+
+
+### `pack_voltage_800v_share`
+
+Default: `default_factory=lambda: { "AB": {2010: (0.0, 0.001, 0.121), 2015: (0.0, 0.003, 0.123), ...`
+
+⚠️ 800 V ADOPTION, which decides how much copper a pack carries.
+
+Same power at double the voltage is less current and less conductor: the
+composition files give a 400 V and an 800 V row per component, and the
+800 V one carries a third less copper in the cables and cell terminals.
+So this driver moves a real material, not a label.
+
+WRITTEN-DOWN COPY, NOT READ ACROSS PROJECTS. The source is
+RAWCLICVehicleElectronics' Data/18_BEV_technology_penetration.xlsx, sheet
+"Penetration", Driver="Voltage", State="800V" -- the single source of
+truth that project validates its own sensor and wiring models against
+(its check V12). It is copied here so this repo runs without that one
+present, on the same footing as reference maps elsewhere in this file:
+IF THAT WORKBOOK CHANGES, THIS HAS TO BE UPDATED BY HAND.
+
+Values are (Share_Min, Share_Mode, Share_Max) of new sales. The band is
+real uncertainty, about +/-0.12 on the share, and a caller that uses only
+the mode is throwing away spread the source deliberately carries.
+
+EF leads by a wide margin -- 0.42 in 2025 against CD 0.07 and AB 0.02 --
+which matches where 800 V actually appears: Chinese platforms and the
+large segments first.
+SAFE TO CHANGE: only to track the source workbook.
+
+
+### `pack_voltage_segment_groups`
+
+Default: `{ "A": "AB", "B": "AB", "JA": "AB", "JB": "AB", "C": "CD", "D": "CD", "JC": "CD", "JD":...`
+
+Which of the source's three groups each segment belongs to. The voltage
+driver is resolved at AB/CD/EF because that is the grain it was built at;
+capacity stays per segment, where the evidence supports it.
+SAFE TO CHANGE: yes, but every segment in segment_map needs an entry.
+
+
+### `battery_composition_dir`
+
+Default: `"/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/" "RAWCLICVehi...`
+
+WHERE THE BATTERY COMPOSITION FILES ARE, written by RAWCLICVehicleBattery's
+05_composition.py. Nine `consolidated_<chemistry>.csv`, their
+`<chemistry>_<capacity>kWh_<voltage>V_mass_draws.npy` arrays in kilograms,
+and `improvement_factor_draws_<year>.npy`.
+
+An absolute path, because that project is a sibling checkout and neither
+repo may assume where the other sits. Nothing under it is ever written.
+SAFE TO CHANGE: yes, when that project moves.
+
+
+### `battery_extrapolation_uncertainty_per_100kwh`
+
+Default: `0.10`
+
+⚠️ EXTRA UNCERTAINTY FOR EXTRAPOLATED CAPACITY, as a fraction of the mass,
+per 100 kWh beyond the composition files' top anchor.
+
+Those files stop at 100 kWh. The capacity rule puts JE and JF above that
+in every draw from 2030 and F in three quarters of them, so a large part
+of the fleet is read off a straight line continued past the last anchor.
+A linear continuation is the least the data can be made to say, but it is
+not as well known as an interpolation, and without this it would arrive
+carrying exactly the same band.
+
+Applied as a triangular multiplier centred on 1, widening with distance:
+at 150 kWh the half-width is half of this, at 200 kWh the whole of it.
+SAFE TO CHANGE: yes -- and it is a judgement, not a measurement.
+
+
+### `battery_chemistry_anchor_years`
+
+Default: `(2025, 2035, 2050, 2070)`
+
+⚠️ CHEMISTRY SHARES TO 2070, three scenarios. ASSUMPTION, NOT DATA --
+the observed record ends in 2026 and everything after it is judgement.
+
+WRITTEN-DOWN COPY of RAWCLICVehicleBattery's src/scenarios.py, on the same
+footing as the voltage table above: copied so this repo runs without that
+one present, and IF THAT PROJECT CHANGES ITS SCENARIOS THIS MUST BE
+UPDATED BY HAND.
+
+Values are percentages at the anchor years, interpolated between and held
+flat outside, then renormalised per group and year.
+
+S1  LFP volume, NMC premium, LMFP growing, nothing new ever arrives
+S2  sodium enters the small segments, NMC shrinks to a niche
+S3  S2 plus bipolar solid-state from 2040, large segments first
+
+⚠️ Na_ion and solid_state HAVE NO COMPOSITION. Their share is carried and
+reported as a gap rather than silently dropped -- under S3 that is most of
+the market by 2070, and a total that quietly fell would read as a collapse
+in demand rather than a hole in the data.
+SAFE TO CHANGE: yes, to track the battery project.
+
+
+### `battery_chemistry_segment_groups`
+
+Default: `{ "A": "small", "B": "small", "JA": "small", "JB": "small", "C": "medium", "D": "medium...`
+
+*Explained in the description of `MaterialsParams` at the top of this section.*
+
+
+### `battery_chemistry_scenarios`
+
+Default: `default_factory=lambda: { "S1": { "small": {"LFP": (70, 65, 60, 60), "LMFP": (18, 25, 3...`
+
+*Explained in the description of `MaterialsParams` at the top of this section.*
+
+
+### `battery_chemistry_file_names`
+
+Default: `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi", }`
+
+The scenario names above mapped onto the composition files' own chemistry
+names. A name with no entry has no composition and is reported as a gap.
+SAFE TO CHANGE: only to match the composition files.
 
 
 ### `average_battery_capacity_kwh`
