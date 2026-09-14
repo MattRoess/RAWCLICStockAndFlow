@@ -142,14 +142,13 @@ away.
 
 | | |
 |---|---|
-| `code/04_04_batteries.py` | the stage |
-| `code/04_04_figures.py` | redraws the figures alone |
+| `code/04_04_batteries.py` | the stage, and the figures it draws |
+| `code/04_04_figures.py` | redraws those figures alone, without the stage |
 | `src/battery_capacity.py` | the pack-size mixture |
 | `src/battery_voltage.py` | 400 or 800 V |
 | `src/battery_composition.py` | masses at a drawn capacity, from the battery project |
 | `src/battery_chemistry.py` | scenario shares and the uncovered share |
 | `src/battery_vintage.py` | where the scrapped cars were built |
-| `src/battery_figures.py` | the figures |
 
 Figures and draws are written under `data/`, which is not tracked in git — run the
 stage to produce them.
