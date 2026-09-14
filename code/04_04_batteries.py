@@ -1,77 +1,44 @@
 """
 04_04_batteries.py
-====================
+==================
 
-Stage 04, part 4: battery capacity (kWh/GWh) and battery-composition (material mass)
-calculations for BEVs.
+Battery material flows for BEVs: what enters the fleet and what leaves it, in
+kilograms of each element, per year, per chemistry, under each chemistry
+scenario.
 
-======================================================================
-⚠️ ESSENTIAL REQUIREMENT CONFLICT -- NOT RESOLVED, NEEDS YOUR INPUT
-======================================================================
-Battery composition is read at `parameterCode == "e-m"` -- ELEMENT level, conflicting
-with your explicit, essential requirement that composition resolve to component +
-material, not individual chemical elements. UNLIKE the main `ELV_2010_2050.xlsx` file
-(confirmed to also offer an "m-c" material-level reading, now the default everywhere
-else in stage 04), I have NOT seen the battery composition workbook and do NOT know
-whether it offers an equivalent material-level code. I have deliberately NOT guessed a
-replacement and silently substituted it -- that risks silently reading the wrong column
-of a file I've never seen. This file now PRINTS every distinct `parameterCode` value it
-finds in the real workbook at runtime (same pattern already used for the main
-composition file in 04_01/04_03) specifically so you can see what's actually available
-and tell me the right value.
+    .venv/bin/python code/04_04_batteries.py
 
-See `params_schema.py`'s `MaterialsParams.battery_composition_parameter_code` for the
-centralized setting (still `"e-m"`, unchanged, until you confirm otherwise) -- also
-flagged there, and in `PARAMS.validate()`'s output on every single run, so this can't
-silently get lost.
-======================================================================
+THREE SCENARIOS x THREE CHEMISTRIES, KEPT APART
+------------------------------------------------
+The scenario shares decide how many cars carry each chemistry. The output does
+NOT sum them: LFP, LMFP and NMC_high are reported separately within each
+scenario, so the contribution of each is visible and the totals can be formed
+by whoever needs them. Nine (scenario, chemistry) series per flow.
 
-CRITICAL FINDING (unchanged from original review): an undocumented ÷1000 factor in
-every battery composition_amount:
-    battery_capacity_kWh = capacity_GWh_subsubkey * 1e6
-    composition_amount = battery_capacity_kWh * Value / 1e3
-The original notebook's own comment states the formula WITHOUT the ÷1000. Reproduced
-identically across all versions in the original notebook -- likely a deliberate g->kg
-conversion, but NOT independently verified against the real Value column's actual
-units. Left unchanged (not a decision I can make without seeing the real data) --
-flagged loudly here and at the computation itself.
+Sodium-ion and solid-state have a share in S2 and S3 and NO COMPOSITION at all.
+Their share is reported as an explicit gap rather than dropped -- under S3 that
+is most of the market by 2070, and a total that quietly fell would read as a
+collapse in demand rather than a hole in the data.
 
-FIXES APPLIED THIS ROUND
---------------------------
-- Dataclass params access throughout.
-- Upward-searching `_find_project_root` + `SCRIPT_DIR`-anchored `input_dir` resolution.
-- `root=PROJECT_ROOT` threaded into `load_many`/`save_many`.
-- **Two hardcoded battery Excel filenames centralized** into
-  `params.materials.battery_share_file_name` / `.battery_composition_file_name`.
-- **Battery size map centralized** into `params.materials.battery_size_map` (was a
-  bare module-level dict here).
-- **Persistence cleaned up**: replaced the raw pickle-saving loop with the shared
-  `materials.save_unregistered_scenario_outputs()` helper.
-- **New integrated diagnostic plot**: total battery material mass by year (BAU,
-  inflow), stacked by material -- the direct visual for "does the battery composition
-  calculation look right", generated right after the baseline computation.
-- **`validate="many_to_many"` tested, kept as-is (correction, not a fix)**: I initially
-  tried tightening this to `"many_to_one"`, reasoning the original's `many_to_many`
-  didn't constrain anything. A synthetic test with a realistic composition structure
-  (multiple materials -- e.g. Lithium, Cobalt, Graphite -- per (Battery Subsubkey,
-  additionalSpecification) combination) immediately raised `MergeError`, proving that
-  structure is CORRECT and EXPECTED: each chemistry+size key legitimately has one
-  composition row per material component, not a data-quality duplicate. Reverted to
-  `many_to_many`, matching the original -- an honest correction based on actually
-  testing my own proposed change, not a guess shipped without verification.
+WHAT IS DRAWN AND WHAT IS NOT
+------------------------------
+  vehicles     per-draw arrays from 03_02, (n_draws, n_years) per segment
+  capacity     drawn per segment per draw -- a discrete pack size, held for life
+  voltage      drawn per draw -- 400 or 800, never blended
+  composition  per-draw element masses from RAWCLICVehicleBattery
+  shares       NOT drawn. A scenario stating 30% LFP is an assumption, and the
+               fleet of a segment really does contain that mix; drawing it would
+               turn a stated input into a spread
+
+Draw i of every one of those is the same world, because both projects run at the
+same number of draws. Nothing is averaged before the end.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
-from typing import Any
-
-import numpy as np
-import pandas as pd
-import matplotlib
-matplotlib.use("Agg")  # never opens an interactive window -- always saves to file
-import matplotlib.pyplot as plt
 
 
 def _find_project_root(start: Path) -> Path:
@@ -85,245 +52,149 @@ PROJECT_ROOT = _find_project_root(Path(__file__).resolve().parent)
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
-from src.artifacts import load_many, save_many, artifact_status  # type: ignore
-import src.materials as materials  # type: ignore
+from src.artifacts import load_many, save_many  # noqa: E402
+from src.battery_capacity import capacity_draws  # noqa: E402
+from src.battery_composition import CompositionAtCapacity, CompositionError  # noqa: E402
+from src.battery_voltage import voltage_draws  # noqa: E402
 
-save_unregistered_scenario_outputs = materials.save_unregistered_scenario_outputs
-
-
-def load_battery_shares_and_composition(input_dir: Path, p04: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Load battery-chemistry shares (`ev_share_long`) and battery composition
-    (`batt_comp_use`) from two Excel files, now sourced from
-    `params.materials.battery_share_file_name` / `.battery_composition_file_name`
-    instead of being hardcoded here.
-
-    THE MATH MODEL: chemistry-share forward-fill -- `ev_share_df` presumably has real
-    chemistry-share data up to some last reported year; every year through 2070 is
-    filled by copying that last year's shares forward unchanged.
-    """
-    share_file = input_dir / p04["battery_share_file_name"]
-    composition_file = input_dir / p04["battery_composition_file_name"]
-    battery_parameter_code = p04["battery_composition_parameter_code"]
-
-    ev_share_df = pd.read_excel(share_file, sheet_name="EV_share")
-    ev_share_df = ev_share_df[ev_share_df["Battery Subsubkey"] != "battLiCO_subsub"]
-    ev_share_df = ev_share_df.dropna()
-
-    last_year = max(int(c) for c in ev_share_df.columns if str(c).isdigit())
-    for year in range(last_year + 1, 2071):
-        ev_share_df[str(year)] = ev_share_df[str(last_year)]
-
-    ev_share_long = ev_share_df.melt(
-        id_vars=["Substance_main_parent", "additionalSpecification", "Battery Subkey", "Battery Subsubkey"],
-        var_name="Year", value_name="Share",
-    )
-
-    batt_comp_df = pd.read_excel(composition_file, sheet_name="BATT_EV_consolidated_inputForRM")
-
-    # See module docstring "ESSENTIAL REQUIREMENT CONFLICT": prints what's actually
-    # available so you can confirm/correct battery_composition_parameter_code.
-    available_codes = sorted(batt_comp_df["parameterCode"].dropna().astype(str).str.strip().unique().tolist())
-    print("Available parameterCode values in battery composition file:", available_codes)
-    print("Selected battery_composition_parameter_code:", battery_parameter_code,
-          "(⚠️ element level -- see module docstring if a material-level code is available above)")
-
-    batt_comp_df = batt_comp_df[batt_comp_df["parameterCode"] == battery_parameter_code].copy()
-
-    required_cols = ["additionalSpecification", "Layer 1", "Layer 2", "Layer 3", "Layer 4", "Value"]
-    missing_cols = [c for c in required_cols if c not in batt_comp_df.columns]
-    if missing_cols:
-        raise KeyError(f"Missing columns in batt_comp_df: {missing_cols}")
-    batt_comp_use = batt_comp_df[required_cols].copy()
-
-    return ev_share_long, batt_comp_use
+FLOWS = ("inflow", "outflow")
 
 
-def build_battery_mass_by_flow_from_tracker(
-    tracker_keyed_single: dict, *, ev_share_long: pd.DataFrame, batt_comp_use: pd.DataFrame,
-    battery_size_map: dict, region: str = "EUR", drivetrain: str = "BEV", material_col: str = "Layer 4",
-) -> dict:
-    """The battery-mass calculation: per-flow capacity -> chemistry-mix -> composition -> mass."""
-    key = (region, drivetrain)
-    if key not in tracker_keyed_single:
-        raise KeyError(f"Missing tracker key {key}")
+def load_flow_draws(root: Path, scenario: str, segment: str, flow: str):
+    """(years, draws) from 03_02's BEV export, or (None, None) if absent."""
+    directory = root / "data" / "processed" / "bev_draws" / scenario
+    path = directory / f"BEV_{segment}_{flow}.npy"
+    years_path = directory / "years.npy"
+    if not path.exists() or not years_path.exists():
+        return None, None
+    return np.load(years_path), np.load(path, mmap_mode="r")
 
-    df = tracker_keyed_single[key].copy()
-    required_cols = {"Region", "Drive Train", "flow", "scrap_year", "cohort_year", "Segment", "amount"}
-    missing = required_cols.difference(df.columns)
-    if missing:
-        raise KeyError(f"Missing required columns in tracker {key}: {sorted(missing)}")
 
-    df["scrap_year"] = pd.to_numeric(df["scrap_year"], errors="coerce")
-    df["cohort_year"] = pd.to_numeric(df["cohort_year"], errors="coerce")
-    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-    df = df.dropna(subset=["scrap_year", "cohort_year"]).copy()
-    df["scrap_year"] = df["scrap_year"].astype(int)
-    df["cohort_year"] = df["cohort_year"].astype(int)
+def chemistry_share(params, scenario: str, group: str, chemistry: str,
+                    year: float) -> float:
+    """One chemistry's share of a segment group in a year, renormalised."""
+    materials = params.materials
+    anchors = np.asarray(materials.battery_chemistry_anchor_years, dtype=float)
+    definition = materials.battery_chemistry_scenarios[scenario][group]
+    total = sum(np.interp(year, anchors, np.asarray(v, dtype=float))
+                for v in definition.values())
+    if total <= 0:
+        return 0.0
+    here = np.interp(year, anchors, np.asarray(definition[chemistry], dtype=float))
+    return float(here / total)
 
-    df["battery_kWh"] = df["Segment"].map(battery_size_map)
-    missing_seg = df.loc[df["battery_kWh"].isna(), "Segment"].dropna().unique().tolist()
-    if missing_seg:
-        raise ValueError(f"Missing battery size for segments: {missing_seg}")
 
-    df["capacity_GWh"] = df["amount"] * df["battery_kWh"]
+def main() -> dict:
+    params = load_many("params", root=PROJECT_ROOT)["params"]
+    materials = params.materials
+    flow_scenario = "BAU"
+    years = [y for y in range(2020, 2071, 5)]
+    segments = list(materials.battery_capacity_levels)
+    n_draws = params.monte_carlo.n_draws
 
-    ev_shares_in = ev_share_long.copy().rename(columns={"Year": "chem_year"})
-    ev_shares_in["chem_year"] = pd.to_numeric(ev_shares_in["chem_year"], errors="coerce")
-    ev_shares_in = ev_shares_in.dropna(subset=["chem_year"]).copy()
-    ev_shares_in["chem_year"] = ev_shares_in["chem_year"].astype(int)
-    ev_shares_out = ev_shares_in
+    composition = CompositionAtCapacity(params)
+    scenarios = list(materials.battery_chemistry_scenarios)
+    named = materials.battery_chemistry_file_names
+    groups = materials.battery_chemistry_segment_groups
 
-    out: dict = {}
-    flow_order = ["inflow", "collected", "export", "unknown_whereabouts"]
-    for flow_name in flow_order:
-        flow_df = df[df["flow"] == flow_name].copy()
-        if flow_df.empty:
+    print(f"flow scenario {flow_scenario} | {len(scenarios)} chemistry scenarios "
+          f"| years {years[0]}-{years[-1]} every 5 | {n_draws:,} draws")
+
+    # One capacity and voltage draw per segment, reused by every chemistry and
+    # scenario: a car's pack size does not change because the market's chemistry
+    # mix does, and redrawing would decorrelate things that are one vehicle.
+    per_segment = {}
+    for segment in segments:
+        per_segment[segment] = (
+            capacity_draws(params, segment, years, n_draws=n_draws, seed=404),
+            voltage_draws(params, segment, years, n_draws=n_draws, seed=404),
+        )
+
+    rows, gaps = [], []
+    started = time.time()
+    for flow in FLOWS:
+        # Opened ONCE per flow, not once per segment per year: memory-mapped,
+        # but 2,376 reopenings of the same file is still 2,376 reopenings.
+        flow_years = None
+        vehicles_by_segment = {}
+        for segment in segments:
+            segment_years, drawn = load_flow_draws(PROJECT_ROOT, flow_scenario,
+                                                   segment, flow)
+            if drawn is None:
+                continue
+            flow_years = segment_years
+            vehicles_by_segment[segment] = drawn
+        if flow_years is None:
+            print(f"  no {flow} draws for {flow_scenario} -- skipped")
             continue
+        year_index = {int(y): i for i, y in enumerate(flow_years)}
 
-        if flow_name == "inflow":
-            flow_df["chem_year"] = flow_df["scrap_year"]
-            shares = ev_shares_in
-        else:
-            flow_df["chem_year"] = flow_df["cohort_year"]
-            shares = ev_shares_out
+        for scenario in scenarios:
+            for chemistry, file_name in named.items():
+                elements = composition.elements(file_name)
+                totals = np.zeros((len(years), len(elements)))
+                bands = np.zeros((len(years), len(elements), 2))
 
-        flow_df = flow_df.merge(shares[["chem_year", "Battery Subsubkey", "Share"]], on="chem_year", how="left")
-        flow_df["capacity_GWh_subsubkey"] = flow_df["capacity_GWh"] * flow_df["Share"]
-        flow_df["additionalSpecification"] = "BATTinELV_BEV_" + flow_df["battery_kWh"].astype(int).astype(str) + "kWh"
+                for year_position, year in enumerate(years):
+                    accumulated = np.zeros((n_draws, len(elements)))
+                    for segment in segments:
+                        vehicles = vehicles_by_segment.get(segment)
+                        if vehicles is None or int(year) not in year_index:
+                            continue
+                        share = chemistry_share(params, scenario,
+                                                groups[segment], chemistry, year)
+                        if share <= 0:
+                            continue
+                        capacity, voltage = per_segment[segment]
+                        per_car = composition.masses(
+                            chemistry=file_name,
+                            capacity_kwh=capacity[:, year_position],
+                            voltage_v=voltage[:, year_position],
+                            year=int(year), seed=404)
+                        # vehicles are in MILLIONS; kg per car x 1e6 -> tonnes
+                        count = np.asarray(vehicles[:, year_index[int(year)]],
+                                           dtype=float)
+                        accumulated += per_car * (count * share * 1e6 / 1e3)[:, None]
 
-        # [REVERTED THIS ROUND -- tested and found wrong]: I initially tightened this to
-        # "many_to_one", reasoning that "many_to_many" doesn't constrain anything. A
-        # synthetic test with a realistic composition structure (multiple materials --
-        # e.g. Lithium, Cobalt, Graphite -- per (Battery Subsubkey,
-        # additionalSpecification) combination) immediately raised `MergeError`, proving
-        # that structure is CORRECT and EXPECTED, not a data-quality bug: each
-        # (chemistry, size) key legitimately has one composition row per material
-        # component. Reverted to `many_to_many`, matching the original. This is an
-        # honest correction, not a guess -- verified directly before deciding.
-        merged = flow_df.merge(
-            batt_comp_use, left_on=["Battery Subsubkey", "additionalSpecification"],
-            right_on=["Layer 1", "additionalSpecification"], how="left", validate="many_to_many",
-        )
+                    totals[year_position] = accumulated.mean(axis=0)
+                    bands[year_position, :, 0] = np.percentile(accumulated, 2.5, axis=0)
+                    bands[year_position, :, 1] = np.percentile(accumulated, 97.5, axis=0)
 
-        merged["battery_capacity_kWh"] = merged["capacity_GWh_subsubkey"] * 1e6
-        # See CRITICAL FINDING at top of file: this /1e3 is undocumented in the
-        # original's own comment, not independently verified against real units.
-        merged["mass"] = merged["battery_capacity_kWh"] * merged["Value"] / 1e3
+                for year_position, year in enumerate(years):
+                    for element_position, element in enumerate(elements):
+                        rows.append({
+                            "flow_scenario": flow_scenario, "chemistry_scenario": scenario,
+                            "chemistry": chemistry, "flow": flow, "year": int(year),
+                            "element": element,
+                            "tonnes": totals[year_position, element_position],
+                            "p2.5": bands[year_position, element_position, 0],
+                            "p97.5": bands[year_position, element_position, 1],
+                        })
+                print(f"  {flow:<8} {scenario} {chemistry:<9} done "
+                      f"({time.time()-started:5.0f}s)")
 
-        required_material_cols = {"scrap_year", material_col, "mass"}
-        missing_material_cols = required_material_cols.difference(merged.columns)
-        if missing_material_cols:
-            raise KeyError(f"Missing required battery composition columns for flow={flow_name}: {sorted(missing_material_cols)}")
+            # The share that has no composition, reported rather than dropped.
+            for year in years:
+                missing = 0.0
+                for segment in segments:
+                    group = groups[segment]
+                    for chemistry in materials.battery_chemistry_scenarios[scenario][group]:
+                        if chemistry in named:
+                            continue
+                        missing = max(missing, chemistry_share(
+                            params, scenario, group, chemistry, year))
+                gaps.append({"flow": flow, "chemistry_scenario": scenario,
+                             "year": int(year), "max_share_without_composition": missing})
 
-        grouped = (
-            merged.groupby(["scrap_year", material_col], as_index=False)["mass"]
-            .sum().sort_values(["scrap_year", material_col]).reset_index(drop=True)
-        )
-        grouped["material"] = grouped[material_col].astype(str)
-        grouped["element"] = grouped["material"]
-        out[(region, drivetrain, flow_name)] = grouped
-
-    return out
-
-
-def combine_battery_mass_by_flow(mass_by_year_materials_dict_batteries: dict, *, material_col: str = "Layer 4") -> dict:
-    """Combine per-(Region, Drive Train, flow) battery-mass frames into per-(Region, flow) views."""
-    combined: dict = {}
-    for (reg, _drv, flow), frame in mass_by_year_materials_dict_batteries.items():
-        if frame.empty:
-            continue
-        key = (reg, flow)
-        combined[key] = pd.concat([combined[key], frame], ignore_index=True) if key in combined else frame.copy()
-
-    for key, frame in combined.items():
-        combined[key] = (
-            frame.groupby(["scrap_year", material_col], as_index=False)["mass"]
-            .sum().sort_values(["scrap_year", material_col]).reset_index(drop=True)
-        )
-    return combined
-
-
-def plot_battery_mass_by_year(combined_dict: dict, region: str = "EUR", material_col: str = "Layer 4") -> tuple[plt.Figure, plt.Axes]:
-    """[NEW] Total battery material mass by year (inflow), stacked by material -- the
-    direct visual for 'does the battery composition calculation look right'."""
-    key = (region, "inflow")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    if key not in combined_dict or combined_dict[key].empty:
-        ax.text(0.5, 0.5, f"No inflow battery-mass data for region={region!r}", ha="center", va="center")
-        return fig, ax
-
-    df = combined_dict[key]
-    pivot = df.pivot_table(index="scrap_year", columns=material_col, values="mass", aggfunc="sum", fill_value=0.0)
-    ax.stackplot(pivot.index, pivot.T.values, labels=pivot.columns, alpha=0.85)
-    ax.set_title(f"Battery material mass by year, inflow ({region}, BAU)", fontsize=12)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Mass [kg] (see CRITICAL FINDING re: undocumented \u00f71000)")
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
-    plt.tight_layout(rect=[0, 0, 0.8, 1])
-    return fig, ax
-
-
-def main() -> dict[str, Any]:
-    scenario_names = ["BAU", "BEV_only", "BEV_A_F", "BEV_JA_JF", "BEV_large", "BEV_small"]
-    # Same narrower 6-scenario scope as the (excluded) 04_02_elements.py -- the 5
-    # lifetime/loss/stock sensitivity scenarios are not processed for batteries here.
-    loaded = load_many(
-        "params", "tracker_keyed", *[f"tracker_keyed_{n}" for n in scenario_names],
-        root=PROJECT_ROOT,
-    )
-    params = loaded["params"]
-    p04_dict = params.to_nested_dict()["04_materials"]
-
-    print(artifact_status(root=PROJECT_ROOT))
-
-    input_dir = SCRIPT_DIR / params.data_prep.input_dir
-    ev_share_long, batt_comp_use = load_battery_shares_and_composition(input_dir, p04_dict)
-    battery_size_map = p04_dict["battery_size_map"]
-
-    mass_by_year_materials_dict_batteries_by_scenario: dict[str, Any] = {}
-    combined_materials_batteries_by_scenario: dict[str, Any] = {}
-
-    for scenario_name in scenario_names:
-        tracker_single = loaded[f"tracker_keyed_{scenario_name}"]
-        mass_dict = build_battery_mass_by_flow_from_tracker(
-            tracker_keyed_single=tracker_single, ev_share_long=ev_share_long, batt_comp_use=batt_comp_use,
-            battery_size_map=battery_size_map, region="EUR", drivetrain="BEV", material_col="Layer 4",
-        )
-        combined_dict = combine_battery_mass_by_flow(mass_dict, material_col="Layer 4")
-        mass_by_year_materials_dict_batteries_by_scenario[scenario_name] = mass_dict
-        combined_materials_batteries_by_scenario[scenario_name] = combined_dict
-
-    # -----------------------------------------------------------------------
-    # Diagnostic plot: battery material mass by year, BAU -- integrated here.
-    # -----------------------------------------------------------------------
-    fig, _ = plot_battery_mass_by_year(combined_materials_batteries_by_scenario["BAU"], region="EUR")
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
-    fig_dir.mkdir(parents=True, exist_ok=True)
-    fig_path = fig_dir / "04_04_battery_mass_by_year.png"
-    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-    print(f"Saved diagnostic plot: {fig_path}")
-
-    # [FIXED] shared helper instead of a hand-rolled raw-pickle loop.
-    artifacts_dir = PROJECT_ROOT / "data" / "processed" / "intermediate"
-    outputs = {}
-    for scenario_name in mass_by_year_materials_dict_batteries_by_scenario:
-        outputs[f"04_mass_by_year_materials_dict_batteries_{scenario_name}.pkl"] = mass_by_year_materials_dict_batteries_by_scenario[scenario_name]
-        outputs[f"04_combined_materials_batteries_{scenario_name}.pkl"] = combined_materials_batteries_by_scenario[scenario_name]
-    saved = save_unregistered_scenario_outputs(artifacts_dir, outputs)
-
-    # ev_share_long IS a registered artifact (feeds 07_proposal per the original
-    # notebook's comments -- a stage beyond what's been reviewed so far).
-    saved_registered = save_many(ev_share_long=ev_share_long, root=PROJECT_ROOT)
-    print("Saved (registered, for 07_proposal):", saved_registered)
-    print("Saved (per-scenario, unregistered):", saved)
-
-    return {"saved": saved, "saved_registered": saved_registered}
+    result = pd.DataFrame(rows)
+    gap_frame = pd.DataFrame(gaps).drop_duplicates()
+    saved = save_many(battery_material_flows=result,
+                      battery_chemistry_gaps=gap_frame, root=PROJECT_ROOT)
+    print(f"\n{len(result):,} rows | saved {saved}")
+    return {"saved": saved, "rows": len(result)}
 
 
 if __name__ == "__main__":

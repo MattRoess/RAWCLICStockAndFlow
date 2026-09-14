@@ -145,6 +145,14 @@ ARTIFACT_FILES: dict[str, str] = {
     # by segment, plus the segment-split diagnostics. The raw draws are NOT in
     # here: they are ~1 GB and are read straight from the two .npy sources.
     "bev_electronics_summary": "04_02_bev_electronics_summary.pkl",
+    # Stage 04_04: battery material flows, one row per (chemistry scenario,
+    # chemistry, flow, year, element). The chemistries are NOT summed -- see
+    # that stage's docstring.
+    "battery_material_flows": "04_04_battery_material_flows.pkl",
+    # The share of the fleet whose chemistry has no composition at all
+    # (sodium-ion, solid-state), carried so a missing mass is visible as a gap
+    # rather than read as a fall in demand.
+    "battery_chemistry_gaps": "04_04_battery_chemistry_gaps.pkl",
     # [NEW] Same idea as mc_stage02/03_01_sensitivity, PER SCENARIO: for each of the
     # 11 scenarios, Spearman rank correlation between every entity's (drivetrain's)
     # scale_lambda/export_share/unknown_share draws (exposed via `cohort_flow_mc.py`'s

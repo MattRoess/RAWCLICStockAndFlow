@@ -1352,6 +1352,13 @@ class AdjustedFlowsParams:
     # Cost warning: each scenario is a full Monte Carlo simulation. The complete sweep
     # is 11 of them and takes hours at 200,000 draws.
     #
+    # ⚠️ AND EACH ONE NOW ALSO WRITES THE PER-DRAW BEV ARRAYS that stage 04_04
+    # reads -- twelve extra per-segment Monte Carlo runs per scenario, and about
+    # 2.7 GB on disk per scenario at 200,000 draws. The full sweep is therefore
+    # roughly 30 GB in data/processed/bev_draws/. Set
+    # materials.bev_electronics_export_draws to False if you want the sweep
+    # without them.
+    #
     # A misspelled name is caught immediately when you run code/00_parameters.py,
     # rather than hours into a run.
     # SAFE TO CHANGE: yes -- this is the setting you are most likely to want to edit.
@@ -1721,6 +1728,100 @@ class MaterialsParams:
         "A": "AB", "B": "AB", "JA": "AB", "JB": "AB",
         "C": "CD", "D": "CD", "JC": "CD", "JD": "CD",
         "E": "EF", "F": "EF", "JE": "EF", "JF": "EF",
+    })
+
+    # WHERE THE BATTERY COMPOSITION FILES ARE, written by RAWCLICVehicleBattery's
+    # 05_composition.py. Nine `consolidated_<chemistry>.csv`, their
+    # `<chemistry>_<capacity>kWh_<voltage>V_mass_draws.npy` arrays in kilograms,
+    # and `improvement_factor_draws_<year>.npy`.
+    #
+    # An absolute path, because that project is a sibling checkout and neither
+    # repo may assume where the other sits. Nothing under it is ever written.
+    # SAFE TO CHANGE: yes, when that project moves.
+    battery_composition_dir: str = (
+        "/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/"
+        "RAWCLICVehicleBattery/data/consolidated")
+
+    # ⚠️ EXTRA UNCERTAINTY FOR EXTRAPOLATED CAPACITY, as a fraction of the mass,
+    # per 100 kWh beyond the composition files' top anchor.
+    #
+    # Those files stop at 100 kWh. The capacity rule puts JE and JF above that
+    # in every draw from 2030 and F in three quarters of them, so a large part
+    # of the fleet is read off a straight line continued past the last anchor.
+    # A linear continuation is the least the data can be made to say, but it is
+    # not as well known as an interpolation, and without this it would arrive
+    # carrying exactly the same band.
+    #
+    # Applied as a triangular multiplier centred on 1, widening with distance:
+    # at 150 kWh the half-width is half of this, at 200 kWh the whole of it.
+    # SAFE TO CHANGE: yes -- and it is a judgement, not a measurement.
+    battery_extrapolation_uncertainty_per_100kwh: float = 0.10
+
+    # ⚠️ CHEMISTRY SHARES TO 2070, three scenarios. ASSUMPTION, NOT DATA --
+    # the observed record ends in 2026 and everything after it is judgement.
+    #
+    # WRITTEN-DOWN COPY of RAWCLICVehicleBattery's src/scenarios.py, on the same
+    # footing as the voltage table above: copied so this repo runs without that
+    # one present, and IF THAT PROJECT CHANGES ITS SCENARIOS THIS MUST BE
+    # UPDATED BY HAND.
+    #
+    # Values are percentages at the anchor years, interpolated between and held
+    # flat outside, then renormalised per group and year.
+    #
+    # S1  LFP volume, NMC premium, LMFP growing, nothing new ever arrives
+    # S2  sodium enters the small segments, NMC shrinks to a niche
+    # S3  S2 plus bipolar solid-state from 2040, large segments first
+    #
+    # ⚠️ Na_ion and solid_state HAVE NO COMPOSITION. Their share is carried and
+    # reported as a gap rather than silently dropped -- under S3 that is most of
+    # the market by 2070, and a total that quietly fell would read as a collapse
+    # in demand rather than a hole in the data.
+    # SAFE TO CHANGE: yes, to track the battery project.
+    battery_chemistry_anchor_years: tuple[int, ...] = (2025, 2035, 2050, 2070)
+
+    battery_chemistry_segment_groups: dict[str, str] = field(default_factory=lambda: {
+        "A": "small", "B": "small", "JA": "small", "JB": "small",
+        "C": "medium", "D": "medium", "JC": "medium", "JD": "medium",
+        "E": "large", "F": "large", "JE": "large", "JF": "large",
+    })
+
+    battery_chemistry_scenarios: dict[str, dict[str, dict[str, tuple]]] = field(
+        default_factory=lambda: {
+        "S1": {
+            "small":  {"LFP": (70, 65, 60, 60), "LMFP": (18, 25, 33, 35),
+                       "NMC_high": (12, 10, 7, 5)},
+            "medium": {"LFP": (50, 45, 42, 40), "LMFP": (22, 32, 42, 45),
+                       "NMC_high": (28, 23, 16, 15)},
+            "large":  {"LFP": (8, 10, 10, 10), "LMFP": (17, 25, 32, 35),
+                       "NMC_high": (75, 65, 58, 55)},
+        },
+        "S2": {
+            "small":  {"Na_ion": (2, 40, 60, 68), "LFP": (68, 40, 25, 20),
+                       "LMFP": (18, 15, 12, 10), "NMC_high": (12, 5, 3, 2)},
+            "medium": {"Na_ion": (0, 12, 20, 24), "LFP": (50, 48, 42, 38),
+                       "LMFP": (22, 32, 34, 35), "NMC_high": (28, 8, 4, 3)},
+            "large":  {"Na_ion": (0, 3, 8, 10), "LFP": (8, 18, 24, 25),
+                       "LMFP": (17, 49, 58, 57), "NMC_high": (75, 30, 10, 8)},
+        },
+        "S3": {
+            "small":  {"solid_state": (0, 0, 15, 35), "Na_ion": (2, 40, 52, 45),
+                       "LFP": (68, 40, 20, 12), "LMFP": (18, 15, 11, 7),
+                       "NMC_high": (12, 5, 2, 1)},
+            "medium": {"solid_state": (0, 0, 28, 50), "Na_ion": (0, 12, 15, 14),
+                       "LFP": (50, 48, 30, 18), "LMFP": (22, 32, 25, 17),
+                       "NMC_high": (28, 8, 2, 1)},
+            "large":  {"solid_state": (0, 2, 45, 70), "Na_ion": (0, 3, 5, 5),
+                       "LFP": (8, 18, 12, 6), "LMFP": (17, 49, 33, 17),
+                       "NMC_high": (75, 28, 5, 2)},
+        },
+    })
+
+    # The scenario names above mapped onto the composition files' own chemistry
+    # names. A name with no entry has no composition and is reported as a gap.
+    # SAFE TO CHANGE: only to match the composition files.
+    battery_chemistry_file_names: dict[str, str] = field(default_factory=lambda: {
+        "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub",
+        "NMC_high": "battLiNMC_highNi",
     })
 
     # Fallback battery size used when a vehicle's segment is unknown.
