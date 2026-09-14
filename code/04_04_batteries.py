@@ -103,12 +103,16 @@ def main() -> dict:
     params = load_many("params", root=PROJECT_ROOT)["params"]
     materials = params.materials
     flow_scenario = "BAU"
-    years = [y for y in range(2020, 2071, 5)]
+    # Every two years. The flows are annual and the chemistry shares move
+    # steadily, so a five-year grid was hiding real movement between its points;
+    # the composition's improvement factor is written every five years and is
+    # interpolated per draw for the years in between.
+    years = [y for y in range(2020, 2071, 2)]
     # The build years an outflow can come from. It reaches back further than the
-    # reported years because a car scrapped in 2025 was built well before 2020.
+    # reported years because a car scrapped in 2022 was built well before 2020.
     # The pack size is read at the true build year; the composition files start
     # in 2020, so only that part is clamped, and the clamp is measured below.
-    vintages = [y for y in range(2005, 2071, 5)]
+    vintages = [y for y in range(2004, 2071, 2)]
     vintage_position = {year: vintages.index(year) for year in years}
     composition_floor = 2020
     segments = list(materials.battery_capacity_levels)
@@ -122,7 +126,8 @@ def main() -> dict:
     lifetime = params.stock_flow.lifetime_by_drv["BEV"]
 
     print(f"flow scenario {flow_scenario} | {len(scenarios)} chemistry scenarios "
-          f"| years {years[0]}-{years[-1]} every 5 | {n_draws:,} draws")
+          f"| years {years[0]}-{years[-1]} every "
+          f"{years[1]-years[0]} | {n_draws:,} draws")
 
     # One capacity and voltage draw per segment, reused by every chemistry and
     # scenario: a car's pack size does not change because the market's chemistry

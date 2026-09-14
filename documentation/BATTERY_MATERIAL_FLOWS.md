@@ -4,10 +4,19 @@ How much of each element enters the European BEV fleet in a battery, and how muc
 comes back out, year by year, under three assumptions about which chemistry the
 cars carry.
 
+Reported **every two years**, 2020 to 2070.
+
 ```bash
-.venv/bin/python code/04_04_batteries.py     # ~80 s at 200,000 draws, writes the figures too
-.venv/bin/python code/04_04_figures.py       # ~4 s, redraws them from the saved draws
+.venv/bin/python code/04_04_batteries.py     # ~4 min at 200,000 draws, writes the figures too
+.venv/bin/python code/04_04_figures.py       # ~13 s, redraws them from the saved draws
 ```
+
+The two-year grid costs one thing worth knowing: the battery project writes its
+mass-improvement factor every **five** years, so 2022, 2024, 2026 … have none on
+file. `src/battery_composition.py` interpolates them **per draw** — draw *i*'s
+factor in 2022 lies between draw *i*'s own 2020 and 2025 factors. Before that
+change those years silently carried no improvement at all, which by 2070 would
+have been about 20 % too much mass in every second year.
 
 ## The three scenarios
 
@@ -51,7 +60,7 @@ Draw *i* is one coherent world on every side, because both projects run at
 
 **The result is the draws**, in
 `data/processed/battery_draws/<flow>/<scenario>/<chemistry>.npy`, shaped
-(draws, years, elements) in tonnes. The table in
+(draws, years, elements) in tonnes — 4.3 GB at 200,000 draws on the two-year grid. The table in
 `04_04_battery_material_flows.pkl` — mean, median, 2.5 % and 97.5 % — is computed
 from them and is for reading, never an input to further arithmetic. Recovery is a
 ratio of two of these numbers, and a ratio of percentiles is not the percentile of
@@ -59,7 +68,8 @@ a ratio.
 
 ## Inflow is built this year, outflow was built long ago
 
-A car scrapped in 2050 was built around 2036 — measured, not assumed — and
+A car scrapped in 2050 was built around 2036 — measured, not assumed; the lag
+runs 9 years in 2030 and settles at 16.5 by 2070 as the fleet stops growing — and
 carries the chemistry and the pack of 2036. The outflow is therefore spread
 back over the build years that could have produced it before any composition is
 applied (`src/battery_vintage.py`):
@@ -71,8 +81,9 @@ and 03_02 already use, and the inflow the draw's own.
 
 This matters more than it sounds. Without it the chemistry mix multiplies both
 flows by the same factor, cancels out of every outflow-over-inflow ratio, and all
-three scenarios produce one identical curve. With it, S3 returns **172 %** of its
-own lithium demand by 2070 and **252 %** of its nickel: the cars being scrapped
+three scenarios produce one identical curve. With it, S3 returns **174 %** of its
+own lithium demand by 2070, **175 %** of its copper and **264 %** of its nickel
+(peaking at 420 % in 2054): the cars being scrapped
 were built when lithium chemistries still dominated, while the new ones are not.
 
 ![secondary supply](../data/processed/figures/04_04_5_secondary_supply.png)
@@ -85,21 +96,38 @@ measured rather than assumed:
 - the lifetime scale is drawn per draw in 03_02, but only its central value enters
   here, so the vintage weights carry less spread than the flows they weight;
 - the composition files start in 2020, so earlier build years get 2020's
-  composition. That touches 97 % of the 2020 outflow, 68 % of 2025, 29 % of 2030,
-  7 % of 2035 and under 1 % after 2040 — the years where the outflow is small
-  anyway. The pack size is read at the true build year, so only the composition
-  is clamped.
+  composition. That touches 100 % of the 2020 outflow, 87 % of 2024, 40 % of
+  2030, 8 % of 2036 and under 1 % after 2042 — the years where the outflow is
+  small anyway. The pack size is read at the true build year, so only the
+  composition is clamped.
 
 ## Reading the comparison
 
 ![scenario comparison](../data/processed/figures/04_04_2_scenario_comparison.png)
 
-Lithium demand peaks around 2040 in every scenario; what separates them is what
-happens after. The 95 % band widens from 21 % of the median in 2020 to about 60 %
-from 2050 on — capacity growth, plateau year, voltage, the mass-improvement factor
-and the extrapolation above 100 kWh all compound with distance.
+Lithium demand peaks around 2040 in every scenario (S1: 111 kt, copper 561 kt);
+what separates them is what happens after. The 95 % band widens with distance —
+lithium from 21 % of the median in 2020 to 59 % in 2070, copper from 8 % to 51 %
+— because capacity growth, plateau year, voltage, the mass-improvement factor and
+the extrapolation above 100 kWh all compound.
 
 ![chemistry contribution](../data/processed/figures/04_04_3_chemistry_contribution.png)
+
+### Every element
+
+Eleven elements carry mass: Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co, in that
+order of size. Sulphur and vanadium sit in the arrays as columns of zeros — the
+element axis is the union over the chemistry files, and none of these three
+contains them.
+
+![all elements](../data/processed/figures/04_04_6_all_elements_inflow.png)
+
+Two pairs move together for structural reasons, not by accident. **Nickel and
+cobalt come only from NMC**, so their return ratios are identical to within
+0.03 pp — cobalt is therefore left out of the secondary-supply figure. Lithium
+and copper sit within 6 pp of each other because both scale with the pack rather
+than with the chemistry; manganese, which only LMFP and NMC carry, is 18 pp
+away.
 
 ## Where things live
 

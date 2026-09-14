@@ -99,9 +99,43 @@ class CompositionAtCapacity:
         return self._anchors(chemistry, voltage)[1]
 
     @lru_cache(maxsize=None)
-    def _improvement(self, year: int) -> np.ndarray | None:
-        path = self.directory / f"improvement_factor_draws_{int(year)}.npy"
-        return np.load(path) if path.exists() else None
+    def _improvement_years(self) -> tuple[int, ...]:
+        """The years the battery project wrote an improvement factor for."""
+        found = sorted(int(re.search(r"_(\d{4})\.npy$", path.name).group(1))
+                       for path in self.directory.glob("improvement_factor_draws_*.npy"))
+        if not found:
+            raise CompositionError(
+                f"no improvement_factor_draws_*.npy in {self.directory}. Run "
+                "RAWCLICVehicleBattery's 05_composition.py first -- carrying on "
+                "without them would quietly drop the mass improvement over time.")
+        return tuple(found)
+
+    @lru_cache(maxsize=None)
+    def _improvement(self, year: int) -> np.ndarray:
+        """
+        The per-draw mass improvement factor for any year, not only the ones on
+        file. Those are written every five years; a two-year reporting grid asks
+        for the ones in between, and returning nothing for them would silently
+        drop the improvement in every second year -- about 20% by 2070.
+
+        Interpolated PER DRAW between the surrounding years, so draw i's factor
+        in 2022 lies between draw i's own 2020 and 2025 factors rather than
+        between two population averages. Held flat outside the range.
+        """
+        year = int(year)
+        anchors = self._improvement_years()
+        path = self.directory / f"improvement_factor_draws_{year}.npy"
+        if path.exists():
+            return np.load(path)
+        if year <= anchors[0]:
+            return self._improvement(anchors[0])
+        if year >= anchors[-1]:
+            return self._improvement(anchors[-1])
+        lower = max(a for a in anchors if a < year)
+        upper = min(a for a in anchors if a > year)
+        weight = (year - lower) / (upper - lower)
+        return (self._improvement(lower) * (1.0 - weight)
+                + self._improvement(upper) * weight)
 
     # ------------------------------------------------------- interpolation
     def _at_capacity(self, chemistry: str, voltage: int,
@@ -181,11 +215,9 @@ class CompositionAtCapacity:
         out *= self._extrapolation_factor(capacity, top_anchor, seed)
 
         improvement = self._improvement(int(year))
-        if improvement is not None:
-            if improvement.size != capacity.size:
-                raise CompositionError(
-                    f"the improvement factors for {year} have {improvement.size} "
-                    f"draws against {capacity.size} here. Both sides must run at "
-                    "the same number of draws for draw i to mean one world.")
-            out *= improvement[:, None]
-        return out
+        if improvement.size != capacity.size:
+            raise CompositionError(
+                f"the improvement factors for {year} have {improvement.size} "
+                f"draws against {capacity.size} here. Both sides must run at "
+                "the same number of draws for draw i to mean one world.")
+        return out * improvement[:, None]

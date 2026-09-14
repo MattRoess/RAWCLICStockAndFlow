@@ -85,26 +85,55 @@ def _style(ax) -> None:
 
 
 # --------------------------------------------------------------------- draws
-def load_element(flow: str, scenario: str, element: str) -> tuple[np.ndarray, np.ndarray]:
+_LOADED: dict[tuple[str, str], tuple] = {}
+
+
+def load_elements(flow: str, scenario: str) -> tuple[np.ndarray, dict]:
     """
-    (n_draws, n_years) tonnes of one element, summed over the chemistries that
-    have a composition. Summed per draw, so draw i stays one world.
+    Every element as (n_draws, n_years) tonnes, summed over the chemistries that
+    have a composition. Summed PER DRAW, so draw i stays one world.
+
+    One pass over the three arrays, held for the rest of the run: thirteen
+    elements read one at a time would be thirteen passes over two gigabytes.
     """
+    if (flow, scenario) in _LOADED:
+        return _LOADED[(flow, scenario)]
     years = np.load(DRAWS_DIR / "years.npy")
     directory = DRAWS_DIR / flow / scenario
-    total = None
+    totals: dict[str, np.ndarray] = {}
     for path in sorted(directory.glob("*.npy")):
         if path.name.endswith("_elements.npy"):
             continue
         elements = list(np.load(directory / f"{path.stem}_elements.npy"))
-        if element not in elements:
-            continue
-        column = elements.index(element)
-        drawn = np.load(path, mmap_mode="r")[:, :, column]
-        total = np.asarray(drawn, dtype=np.float64) if total is None else total + drawn
-    if total is None:
+        drawn = np.load(path, mmap_mode="r")
+        for column, element in enumerate(elements):
+            here = np.asarray(drawn[:, :, column], dtype=np.float32)
+            totals[element] = here if element not in totals else totals[element] + here
+    _LOADED[(flow, scenario)] = (years, totals)
+    return years, totals
+
+
+def load_element(flow: str, scenario: str, element: str) -> tuple[np.ndarray, np.ndarray]:
+    """(n_draws, n_years) tonnes of one element."""
+    years, totals = load_elements(flow, scenario)
+    if element not in totals:
         raise SystemExit(f"{element} appears in no chemistry of {flow}/{scenario}")
-    return years, total
+    return years, totals[element]
+
+
+def elements_present(flow: str = "inflow", scenario: str = "S1") -> list[str]:
+    """
+    The elements that actually carry mass, biggest first.
+
+    The arrays hold the union over the chemistries, so an element only some of
+    them contain -- and sulphur and vanadium, which none of the three do -- sits
+    there as a column of zeros. Plotting those would be eleven real panels and
+    two empty ones.
+    """
+    _, totals = load_elements(flow, scenario)
+    carrying = {name: float(values.max()) for name, values in totals.items()}
+    return [name for name, top in sorted(carrying.items(), key=lambda kv: -kv[1])
+            if top > 0]
 
 
 def band(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -169,11 +198,12 @@ def figure_scenarios(params) -> Path:
 
 
 # ------------------------------------------------------------------ figure 2
-def figure_element_comparison(gaps: pd.DataFrame, elements=("Li", "Ni", "Co")) -> Path:
+def figure_element_comparison(gaps: pd.DataFrame,
+                              elements=("Li", "Ni", "Cu", "Co")) -> Path:
     """The comparison itself: three scenarios, key elements, inflow and outflow."""
     flows = ("inflow", "outflow")
-    fig, axes = plt.subplots(len(flows), len(elements), figsize=(14, 8),
-                             sharex=True)
+    fig, axes = plt.subplots(len(flows), len(elements),
+                             figsize=(4.0 * len(elements), 8), sharex=True)
     for row, flow in enumerate(flows):
         for column, element in enumerate(elements):
             ax = axes[row][column]
@@ -315,12 +345,13 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
 
 
 # ------------------------------------------------------------------ figure 5
-def figure_secondary_supply(elements=("Li", "Ni")) -> Path:
+def figure_secondary_supply(elements=("Li", "Ni", "Cu", "Mn")) -> Path:
     """
     Outflow over inflow, formed per draw. The reason the draws are kept: this
     ratio cannot be built from a mean and two percentiles.
     """
-    fig, axes = plt.subplots(1, len(elements), figsize=(12.5, 5.2), sharey=True)
+    fig, axes = plt.subplots(1, len(elements),
+                             figsize=(3.6 * len(elements), 5.4), sharey=True)
     for ax, element in zip(np.atleast_1d(axes), elements):
         for scenario, color in SCENARIO_COLORS.items():
             years, inflow = load_element("inflow", scenario, element)
@@ -352,10 +383,66 @@ def figure_secondary_supply(elements=("Li", "Ni")) -> Path:
              "built when lithium chemistries still dominated, while the new ones are "
              "not.\nThe scenarios separate only because the outflow is given its "
              "BUILD year's chemistry and pack — see src/battery_vintage.py for what "
-             "that reconstruction can and cannot do.",
+             "that reconstruction can and cannot do. Cobalt is not shown: it comes "
+             "only from NMC, so its curve is nickel's to within 0.03 pp.",
              ha="center", fontsize=8.5, color="#555555")
     fig.tight_layout(rect=[0, 0.08, 1, 0.90])
     return _save(fig, "04_04_5_secondary_supply.png")
+
+
+# ------------------------------------------------------------------ figure 6
+def figure_all_elements(gaps: pd.DataFrame, flow: str = "inflow") -> Path:
+    """Every element that carries mass, so nothing interesting stays hidden."""
+    elements = elements_present(flow)
+    columns = 4
+    rows = int(np.ceil(len(elements) / columns))
+    fig, axes = plt.subplots(rows, columns, figsize=(4.0 * columns, 3.1 * rows),
+                             sharex=True)
+    flat = np.ravel(axes)
+    for position, element in enumerate(elements):
+        ax = flat[position]
+        for scenario, color in SCENARIO_COLORS.items():
+            years, values = load_element(flow, scenario, element)
+            low, median, high = band(values)
+            ax.fill_between(years, low / 1e3, high / 1e3, color=color, alpha=0.13,
+                            linewidth=0)
+            ax.plot(years, median / 1e3, color=color, linewidth=1.9,
+                    label=SCENARIO_TITLES[scenario])
+        _style(ax)
+        ax.set_title(element, fontsize=12, fontweight="bold", pad=6)
+        ax.set_ylabel("kt / year", fontsize=9)
+        ax.margins(y=0.12)
+    for spare in flat[len(elements):]:
+        spare.set_visible(False)
+    # The last row is short, so the bottom panel of a column is not always in
+    # it. Label whichever one actually sits at the bottom of each column.
+    for column in range(columns):
+        lowest = max((position for position in range(len(elements))
+                      if position % columns == column), default=None)
+        if lowest is None:
+            continue
+        flat[lowest].set_xlabel("year", fontsize=9.5)
+        flat[lowest].tick_params(labelbottom=True)
+
+    handles = [Line2D([], [], color=c, linewidth=2.1, label=SCENARIO_TITLES[s])
+               for s, c in SCENARIO_COLORS.items()]
+    handles.append(Line2D([], [], color="#888888", linewidth=6, alpha=0.3,
+                          label="95% band of the draws"))
+    fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
+               fontsize=9.5, bbox_to_anchor=(0.5, 0.035))
+    fig.suptitle(f"Every element the three chemistries carry — {flow}",
+                 fontsize=14, fontweight="bold", y=0.995)
+    fig.text(0.5, 0.958,
+             "Each panel has its own scale. Sulphur and vanadium are left out — "
+             "none of the three chemistries contains them.",
+             ha="center", fontsize=9, color="#555555")
+    fig.text(0.5, 0.012,
+             "S2 and S3 fall because sodium-ion and solid-state carry no "
+             "composition and their cars leave the figure, not because the world "
+             "needs less — see the uncovered-share figure for how much is missing.",
+             ha="center", fontsize=8.5, color="#555555")
+    fig.tight_layout(rect=[0, 0.075, 1, 0.945])
+    return _save(fig, f"04_04_6_all_elements_{flow}.png")
 
 
 def _save(fig, name: str) -> Path:
@@ -378,4 +465,6 @@ def build_all(params, flows_frame: pd.DataFrame, gaps: pd.DataFrame) -> list[Pat
         figure_chemistry_contribution(flows_frame),
         figure_uncovered(gaps),
         figure_secondary_supply(),
+        figure_all_elements(gaps, "inflow"),
+        figure_all_elements(gaps, "outflow"),
     ]
