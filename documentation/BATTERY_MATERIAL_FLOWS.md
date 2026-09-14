@@ -14,8 +14,8 @@ band.
 Reported **every two years**, 2020 to 2070.
 
 ```bash
-.venv/bin/python code/04_04_batteries.py     # ~6.5 min at 200,000 draws, writes the figures too
-.venv/bin/python code/04_04_figures.py       # ~30 s, redraws them from the saved draws
+.venv/bin/python code/04_04_batteries.py     # ~12 min at 200,000 draws, writes the figures too
+.venv/bin/python code/04_04_figures.py       # ~40 s, redraws them from the saved draws
 ```
 
 The two-year grid costs one thing worth knowing: the battery project writes its
@@ -51,6 +51,30 @@ comparison figure carries the uncovered share next to the curves for that reason
 
 ![uncovered share](../data/processed/figures/04_04_4_uncovered_share.png)
 
+## Two levels, because the elements do not add up to the pack
+
+The cell casing and the separator have no element rows at all, and the
+electrolyte's cover 1 % of its mass. Measured against the component totals, the
+element arrays miss **8.3 % of a 25 kWh LFP pack, 9.8 % at 60 kWh and 10.9 % at
+100** — 7.2 to 7.7 % for NMC. Over the whole S1 inflow that is 601 kt of 5 806 kt
+in 2070.
+
+That missing tenth is plastics, polymer separator and organic electrolyte:
+precisely what a recycler has to deal with rather than sell. So the stage carries
+both levels, from the same drawn cars — same capacity, same voltage, same
+extrapolation seed — and keeps them in two frames rather than one, because they
+do not add up to each other and a single frame would invite summing them.
+
+| | |
+|---|---|
+| `battery_material_flows` | 11 elements. Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co |
+| `battery_component_flows` | 12 components. Cathode and anode active material, the two current collectors, support frame, thermal conductor, module enclosure, cables, cell terminals, electrolyte, casing, separator |
+
+![components](../data/processed/figures/04_04_7_components_collected.png)
+
+Oxygen is in the data and out of the element figures: it is bound in the cathode
+oxides and the phosphate, never leaves as oxygen, and nothing recovers it.
+
 ## What is drawn and what is not
 
 | | |
@@ -67,8 +91,8 @@ Draw *i* is one coherent world on every side, because both projects run at
 
 **The result is the draws**, in
 `data/processed/battery_draws/<flow>/<scenario>/<chemistry>.npy`, shaped
-(draws, years, elements) in tonnes — three flows, 6.5 GB at 200,000 draws on
-the two-year grid. The table in
+(draws, years, names) in tonnes, one pair of arrays per level — three flows,
+13 GB at 200,000 draws on the two-year grid. The table in
 `04_04_battery_material_flows.pkl` — mean, median, 2.5 % and 97.5 % — is computed
 from them and is for reading, never an input to further arithmetic. Recovery is a
 ratio of two of these numbers, and a ratio of percentiles is not the percentile of
@@ -125,7 +149,11 @@ the extrapolation above 100 kWh all compound.
 ### Every element
 
 Eleven elements carry mass: Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co, in that
-order of size. One overview figure per flow — inflow, outflow and collected. Sulphur and vanadium sit in the arrays as columns of zeros — the
+order of size, oxygen excluded. One overview per flow — but only for the inflow
+and the collected: measured, the collected flow is **87.9 % of the outflow for
+every element to three decimals**, because the collection share is drawn on
+vehicles and not on materials. An outflow panel would be the collected one times
+a constant. Sulphur and vanadium sit in the arrays as columns of zeros — the
 element axis is the union over the chemistry files, and none of these three
 contains them.
 

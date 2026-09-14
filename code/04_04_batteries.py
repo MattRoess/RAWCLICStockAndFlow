@@ -805,8 +805,9 @@ def figure_all_elements(gaps: pd.DataFrame, flow: str = "inflow") -> Path:
     fig.suptitle(f"Every element the three chemistries carry — {flow}",
                  fontsize=14, fontweight="bold", y=0.995)
     fig.text(0.5, 0.958,
-             "Each panel has its own scale. Sulphur and vanadium are left out — "
-             "none of the three chemistries contains them.",
+             "Each panel has its own scale. Sulphur and vanadium are left out — no "
+             "chemistry here contains them — and so is oxygen, which is bound in the "
+             "cathode and is recovered by nobody.",
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.012,
              "S2 and S3 fall because sodium-ion and solid-state carry no "
@@ -856,12 +857,12 @@ def figure_components(flow: str = "collected") -> Path:
     labels.append("invisible to the element level")
     fig.legend(handles=handles, labels=labels, loc="lower center", ncol=5,
                frameon=False, fontsize=9)
-    fig.suptitle(f"What the {flow} is made of, component by component",
+    fig.suptitle(f"What the {flow} flow is made of, component by component",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.925,
-             "Median of 200,000 draws. The hatched top of each stack — electrolyte, "
-             "separator and cell casing — is 7–11% of a pack and does not appear in "
-             "the element figures at all.",
+             "Each band is that component's own median over 200,000 draws. The "
+             "hatched top — electrolyte, separator and cell casing — is 7–11% of a "
+             "pack and appears in no element figure at all.",
              ha="center", fontsize=9, color="#555555")
     fig.tight_layout(rect=[0, 0.13, 1, 0.90])
     return _save(fig, f"04_04_7_components_{flow}.png")
@@ -888,7 +889,11 @@ def build_all(params, flows_frame: pd.DataFrame, gaps: pd.DataFrame) -> list[Pat
         figure_uncovered(gaps),
         figure_secondary_supply(),
         figure_all_elements(gaps, "inflow"),
-        figure_all_elements(gaps, "outflow"),
+        # Not for the outflow: measured, the collected flow is 87.9% of it for
+        # EVERY element to three decimals -- the share is drawn on vehicles, not
+        # on materials, so that panel would be this one times a constant. The
+        # difference between the two is shown where it means something, in the
+        # secondary-supply figure.
         figure_all_elements(gaps, "collected"),
         figure_components("inflow"),
         figure_components("collected"),
