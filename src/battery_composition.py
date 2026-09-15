@@ -51,6 +51,11 @@ import numpy as np
 LEVEL_FILES = {
     "element": ("_mass_draws.npy", "_elements.txt"),
     "component": ("_component_mass_draws.npy", "_components.txt"),
+    # The cross of the two, named "<element>|<component>": the mass of an
+    # element WITHIN a component, which neither level on its own can answer and
+    # which is what a recovery model needs -- copper in a cable is recovered by
+    # a different process from copper in an electrode foil.
+    "pair": ("_pair_mass_draws.npy", "_pairs.txt"),
 }
 
 

@@ -1828,6 +1828,35 @@ class MaterialsParams:
     battery_chemistry_active_material_unknown: tuple[str, ...] = (
         "Na_ion", "solid_state")
 
+    # WHERE 04_04 WRITES THE DRAWS THE RECOVERY MODEL READS, under
+    # data/processed/. One folder per chemistry scenario, then per flow:
+    #
+    #     <scenario>/<flow>/years.npy
+    #     <scenario>/<flow>/__component____<component>.npy   (draws, years)
+    #     <scenario>/<flow>/<element>__<component>.npy       (draws, years)
+    #
+    # In KILOTONNES, which is the unit RAWCLICRecoveryModel's `src/upstream.py`
+    # expects, and summed over the chemistries: a recycler receives the mix, not
+    # one chemistry at a time.
+    #
+    # WHY THE CROSS AND NOT THE ELEMENT TOTAL. Copper in a cable and copper in
+    # an electrode foil go through different processes and are recovered at
+    # different rates. An element total cannot be given one coefficient that is
+    # right for both, so the recovery model is handed the element WITHIN the
+    # component and decides per component.
+    # SAFE TO CHANGE: yes, it is only a folder name.
+    battery_recovery_draws_dir: str = "battery_recovery_draws"
+
+    # WHICH YEARS OF THAT EXPORT TO WRITE.
+    #
+    # Same trade as the other two stages that feed the recovery model: this
+    # stage computes every year anyway and the setting only decides which of
+    # them survive to disk. Eleven years at 200,000 draws is about 300 MB per
+    # scenario and flow; all fifty-one would be five times that for a model
+    # that reports a year or a short span.
+    # SAFE TO CHANGE: yes. An empty tuple writes nothing.
+    battery_recovery_years: tuple[int, ...] = tuple(range(2020, 2071, 5))
+
     # ⚠️ HOW WRONG THE CHEMISTRY SHARES MIGHT BE, as a multiplier on each one.
     #
     # The scenarios above are stated assumptions and the model does not argue

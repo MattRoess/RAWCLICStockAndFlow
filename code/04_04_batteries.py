@@ -113,6 +113,30 @@ FLOWS = ("inflow", "outflow", "collected")
 LEVELS = ("element", "component")
 
 
+def write_recovery_export(directory: Path, flow: str, scenario: str,
+                          recovery_years, names: list[str],
+                          totals: np.ndarray) -> int:
+    """
+    One .npy per name, in the shape and the unit RAWCLICRecoveryModel reads.
+
+    Its `src/upstream.py` takes a folder of (draws, years) arrays in KILOTONNES
+    whose file names run finest first and end with the group, so a component
+    total is `__component____<component>` and an element inside one is
+    `<element>__<component>`. Nothing here is summarised: the recovery model
+    multiplies these by drawn transfer coefficients, and a mean times a mean is
+    not the mean of the product.
+    """
+    target = directory / scenario / flow
+    target.mkdir(parents=True, exist_ok=True)
+    np.save(target / "years.npy", np.asarray(recovery_years, dtype=int))
+    for position, name in enumerate(names):
+        element, _, component = name.partition("|")
+        stem = (f"__component____{component}" if element == "__component__"
+                else f"{element}__{component}")
+        np.save(target / f"{stem}.npy", (totals[:, :, position] / 1e3).astype(np.float32))
+    return len(names)
+
+
 def refuse_stale_parameters(params) -> None:
     """
     The saved parameters must be what `src/params_schema.py` says now, or stop.
@@ -190,6 +214,7 @@ def main() -> dict:
     # in 2020, so only that part is clamped, and the clamp is measured below.
     vintages = [y for y in range(2004, 2071)]
     vintage_position = {year: vintages.index(year) for year in years}
+    recovery_years = [y for y in materials.battery_recovery_years if y in set(years)]
     composition_floor = 2020
     # A chemistry a scenario never uses is ABSENT from that scenario's share
     # dict, not present with a zero -- S1 contains no sodium at all. This is
@@ -204,6 +229,8 @@ def main() -> dict:
     scenarios = list(materials.battery_chemistry_scenarios)
     named = materials.battery_chemistry_file_names
     active_unknown = set(materials.battery_chemistry_active_material_unknown)
+    recovery_dir = (PROJECT_ROOT / "data" / "processed"
+                    / materials.battery_recovery_draws_dir)
     groups = materials.battery_chemistry_segment_groups
     lifetime = params.stock_flow.lifetime_by_drv["BEV"]
 
@@ -412,6 +439,92 @@ def main() -> dict:
                   "composition is clamped: "
                   + ", ".join(f"{year} {share:.1%}" for year, share
                               in zip(years, before_composition) if share > 0.001))
+
+        # ------------------------------------------------------------------
+        # THE EXPORT THE RECOVERY MODEL READS. Its own year grid, its own unit,
+        # and the CROSS of the two levels: copper in a cable and copper in an
+        # electrode foil go through different processes, so an element total
+        # could not be given a coefficient that is right for both.
+        #
+        # Summed over the chemistries, because a recycler receives the mix.
+        # Its own pass rather than a branch inside the ones above: it runs on
+        # eleven years instead of fifty-one, so it costs about a fifth of one.
+        # ------------------------------------------------------------------
+        if recovery_years:
+            union: dict[str, int] = {}
+            for level, prefix in (("component", "__component__"), ("pair", "")):
+                for file_name in named.values():
+                    for name in composition.names(file_name, level):
+                        union.setdefault(f"{prefix}|{name}" if prefix else name,
+                                         len(union))
+            totals = {scenario: np.zeros((n_draws, len(recovery_years), len(union)),
+                                         dtype=np.float32) for scenario in scenarios}
+
+            for segment in segments:
+                vehicles = vehicles_by_segment.get(segment)
+                if vehicles is None:
+                    continue
+                capacity, voltage = per_segment[segment]
+                group = groups[segment]
+                counts = np.stack([
+                    np.asarray(vehicles[:, year_index[int(year)]], dtype=np.float32)
+                    if int(year) in year_index else np.zeros(n_draws, dtype=np.float32)
+                    for year in recovery_years], axis=1)
+                weights = None if flow == "inflow" else vintage_weights(
+                    built_by_segment[segment], flow_years, recovery_years, vintages,
+                    lifetime.shape_k, lifetime.scale_lambda)[0]
+                group_shares = {
+                    scenario: chemistry_share_draws(params, scenario, group, vintages,
+                                                    n_draws=n_draws, seed=404)
+                    for scenario in scenarios}
+
+                for chemistry, file_name in named.items():
+                    shares = {scenario: group_shares[scenario].get(chemistry)
+                              for scenario in scenarios}
+                    if all(share is None for share in shares.values()):
+                        continue
+                    for level, prefix in (("component", "__component__"), ("pair", "")):
+                        names = composition.names(file_name, level)
+                        columns = [union[f"{prefix}|{n}" if prefix else n]
+                                   for n in names]
+                        per_car = np.stack([
+                            composition.masses(
+                                chemistry=file_name, capacity_kwh=capacity[:, position],
+                                voltage_v=voltage[:, position],
+                                year=max(int(year), composition_floor),
+                                seed=404, level=level).astype(np.float32)
+                            for position, year in enumerate(vintages)], axis=1)
+                        for year_position, year in enumerate(recovery_years):
+                            count = counts[:, year_position] * 1e3  # millions, kg -> t
+                            for scenario in scenarios:
+                                if shares[scenario] is None:
+                                    continue
+                                if flow == "inflow":
+                                    built = vintage_position[year]
+                                    share = shares[scenario][:, built]
+                                    if not share.any():
+                                        continue
+                                    piece = (per_car[:, built, :]
+                                             * (count * share)[:, None])
+                                else:
+                                    coefficient = (count[:, None] * shares[scenario]
+                                                   * weights[:, year_position, :])
+                                    piece = np.einsum("dv,dve->de", coefficient,
+                                                      per_car, optimize=True)
+                                totals[scenario][:, year_position, columns] += piece
+                        del per_car
+                del weights, group_shares
+                print(f"  {flow:<9} recovery  {segment:<3} done "
+                      f"({time.time()-started:5.0f}s)")
+
+            names = list(union)
+            for scenario in scenarios:
+                written = write_recovery_export(recovery_dir, flow, scenario,
+                                                recovery_years, names,
+                                                totals[scenario])
+            totals.clear()
+            print(f"    recovery export: {written} arrays per scenario, "
+                  f"{len(recovery_years)} years, kilotonnes")
 
         # The share whose ACTIVE MATERIAL nobody has described, reported rather
         # than dropped. Sodium-ion and solid-state now carry their packaging --

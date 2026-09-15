@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **158** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **160** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 47 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 49 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1111,7 +1111,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**47 parameters.**
+**49 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1137,6 +1137,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `battery_chemistry_scenarios` | `default_factory=lambda: { "S1": { "small": {"LFP": (70, 65, 60, 60), "LMFP": (18, 25, 3...` |
 | `battery_chemistry_file_names` | `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi",...` |
 | `battery_chemistry_active_material_unknown` | `( "Na_ion", "solid_state")` |
+| `battery_recovery_draws_dir` | `"battery_recovery_draws"` |
+| `battery_recovery_years` | `tuple(range(2020, 2071, 5))` |
 | `battery_chemistry_share_spread` | `{ "min": 0.70, "mode": 1.00, "max": 1.30, }` |
 | `battery_chemistry_share_spread_years` | `(2020, 2070)` |
 | `average_battery_capacity_kwh` | `60.0` |
@@ -1459,6 +1461,43 @@ a gap, at the same share as before they had any composition at all. What
 changed is that their steel, aluminium and copper now reach the totals.
 SAFE TO CHANGE: remove a name the day a real composition arrives for it,
 and not before.
+
+
+### `battery_recovery_draws_dir`
+
+Default: `"battery_recovery_draws"`
+
+WHERE 04_04 WRITES THE DRAWS THE RECOVERY MODEL READS, under
+data/processed/. One folder per chemistry scenario, then per flow:
+
+<scenario>/<flow>/years.npy
+<scenario>/<flow>/__component____<component>.npy   (draws, years)
+<scenario>/<flow>/<element>__<component>.npy       (draws, years)
+
+In KILOTONNES, which is the unit RAWCLICRecoveryModel's `src/upstream.py`
+expects, and summed over the chemistries: a recycler receives the mix, not
+one chemistry at a time.
+
+WHY THE CROSS AND NOT THE ELEMENT TOTAL. Copper in a cable and copper in
+an electrode foil go through different processes and are recovered at
+different rates. An element total cannot be given one coefficient that is
+right for both, so the recovery model is handed the element WITHIN the
+component and decides per component.
+SAFE TO CHANGE: yes, it is only a folder name.
+
+
+### `battery_recovery_years`
+
+Default: `tuple(range(2020, 2071, 5))`
+
+WHICH YEARS OF THAT EXPORT TO WRITE.
+
+Same trade as the other two stages that feed the recovery model: this
+stage computes every year anyway and the setting only decides which of
+them survive to disk. Eleven years at 200,000 draws is about 300 MB per
+scenario and flow; all fifty-one would be five times that for a model
+that reports a year or a short span.
+SAFE TO CHANGE: yes. An empty tuple writes nothing.
 
 
 ### `battery_chemistry_share_spread`
