@@ -125,6 +125,37 @@ otherwise be misread.
 
 ---
 
+## 3b. The two are not the same hole — decided 2026-09-15
+
+Both cells are undescribed, and only one of them matters for recovery.
+
+**Sodium-ion carries no critical or strategic raw material.** Its cell is
+sodium, iron, manganese and hard carbon. Nothing in it is on the CRM or SRM
+list, so nothing in it is a recovery target. The mass is missing; the question
+is not.
+
+**Solid-state does.** Its own note in the battery project says the anode is
+**lithium metal**, its template is built on NMC high-nickel, and it runs at
+400–500 Wh/kg on the cell — that is a lithium battery. Lithium is CRM and SRM,
+nickel and cobalt likewise. Treating its cell as CRM-free would delete the
+material this whole analysis is about, in exactly the scenario where it takes
+70 % of the large segments.
+
+Measured, S3 fleet inflow, the reported gap split in two:
+
+| year | sodium-ion | **solid-state** | together |
+|---|---|---|---|
+| 2040 | 20.4 % | **8.9 %** | 29.2 % |
+| 2050 | 23.9 % | **26.2 %** | 50.1 % |
+| 2070 | 21.4 % | **48.0 %** | 69.4 % |
+
+So for a RECOVERY question the gap is the middle column, not the total: 48 % in
+2070 and 8.9 % in 2040. For a MASS question it is still the total, because both
+cells are missing from the tonnes.
+
+The reported number remains the total. Splitting it in the output costs a
+47-minute rerun and has not been done.
+
 ## 4. What this means for reading the results
 
 - **Cell** materials under S2 and S3 — lithium, nickel, cobalt, manganese,
@@ -139,6 +170,8 @@ otherwise be misread.
   supply, collected over inflow — are sound within that part.
 - S1 is unaffected: nothing new arrives in it, and its gap is an exact zero in
   every year and every draw, not a narrow band.
+- For a **recovery** question, read §3b: only solid-state's share of the gap
+  withholds anything recoverable.
 - **Do not sum across scenarios or compare S1 totals against S3 totals** as
   though the difference were a material saving. Much of it is a reporting hole.
 
