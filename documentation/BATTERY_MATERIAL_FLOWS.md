@@ -14,7 +14,7 @@ band.
 Reported **every year**, 2020 to 2070.
 
 ```bash
-.venv/bin/python code/04_04_batteries.py     # ~31 min at 200,000 draws, writes the figures too
+.venv/bin/python code/04_04_batteries.py     # ~47 min at 200,000 draws, writes the figures too
 .venv/bin/python code/test_04_04_figures.py  # ~30 s, redraws them from the saved draws
 ```
 
@@ -50,11 +50,13 @@ So S2 and S3 curves that sink are mostly cars leaving the picture. Every
 comparison figure carries the uncovered share next to the curves for that reason,
 and says on its face that this is an open item rather than an oversight.
 
-**It is left open deliberately, and half of it need not be.** The battery project
-models the packaging and structure of both chemistries — 209.5 kg of a 60 kWh
-sodium pack, within 3 kg of LFP's own structure — and leaves only the active
-material empty. It exports no per-draw arrays for them, so this stage drops the
-whole car rather than carrying its steel, aluminium and copper. Full account:
+**Half of it was closed on 2026-09-15.** Both chemistries now carry their
+packaging — 209.5 kg of a 60 kWh sodium pack, within 3 kg of LFP's own structure
+— with the active material left at zero and still reported as the gap. Under S3
+in 2070 that recovered **+122 % iron, +216 % aluminium and +84 % copper** which
+had been falling out of the totals, and it changes the headline: the fleet's
+iron and aluminium demand does not collapse under S3, it moves away from
+lithium. Full account:
 [DESIGN_chemistries_without_composition.md](DESIGN_chemistries_without_composition.md).
 
 ![uncovered share](../data/processed/figures/04_04_4_uncovered_share.png)
@@ -100,7 +102,7 @@ Draw *i* is one coherent world on every side, because both projects run at
 **The result is the draws**, in
 `data/processed/battery_draws/<flow>/<scenario>/<chemistry>.npy`, shaped
 (draws, years, names) in tonnes, one pair of arrays per level — three flows,
-25 GB at 200,000 draws on the annual grid. The table in
+40 GB at 200,000 draws on the annual grid, five chemistries. The table in
 `04_04_battery_material_flows.pkl` — mean, median, 2.5 % and 97.5 % — is computed
 from them and is for reading, never an input to further arithmetic. Recovery is a
 ratio of two of these numbers, and a ratio of percentiles is not the percentile of

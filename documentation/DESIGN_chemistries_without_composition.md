@@ -14,9 +14,8 @@ what would close it.
 ## 1. How big it is
 
 Share of cars whose cell is not described, median with the 95 % band, 2070.
-These are the numbers from before the packaging was carried; the SHARE is
-unchanged by that — the same cars are still counted — but the run that produced
-them is superseded. Inflow is
+Unchanged by carrying the packaging, and measured again after it: the same cars
+are counted either way. Inflow is
 new cars; the collected flow lags it because the cars being scrapped were built
 before these chemistries arrived.
 
@@ -66,7 +65,7 @@ included. The model reported 69 % of S3's new cars as entirely unknown while
 roughly half of each of those cars, by mass, sat modelled in a CSV it could not
 read.
 
-**Fixed.** `05_composition.py` now writes both levels for both chemistries
+**Fixed, and run through on 2026-09-15.** `05_composition.py` now writes both levels for both chemistries
 through the same pack rules as everything else, guarded by
 `check_unknown_draws_match_workbook()`, which compares them against the CSV at
 2020 — where the improvement factor is exactly 1 in every draw — correcting for
@@ -77,9 +76,29 @@ voltages.
 In those arrays the **active materials are zero, and zero means NOT DESCRIBED**.
 `materials.battery_chemistry_active_material_unknown` is what stops that zero
 being read as a fact: the same cars are still reported as a gap, at the same
-share. What changed is that their iron, aluminium and copper now reach the
-totals, so the S2 and S3 curves fall by the cell they are missing rather than by
-the whole car.
+share — 69.3 % [63.9–74.2] under S3 in 2070, before and after. Verified in the
+output: 1,836 sodium rows under S1 and 2,295 active-material rows across both
+chemistries, every one of them exactly zero.
+
+**What it recovered**, inflow 2070, kt/year, median:
+
+| | S1 | S2 | S3 |
+|---|---|---|---|
+| Fe | 1,630 (was 1,638) | **1,695** (was 1,204) | **1,225** (was 553) |
+| Al | 886 (was 886) | **970** (was 601) | **882** (was 279) |
+| Cu | 445 (was 446) | **345** (was 311) | **267** (was 145) |
+
+Under S3 that is **+122 % iron, +216 % aluminium and +84 % copper** — material
+that exists, that a recycler will see, and that was falling out of the totals
+because the stage could not read the cars carrying it. S1 moves by a kilogram
+in a million, as it must: those chemistries do not exist in it.
+
+By 2070 the two contribute **18 % of S2's total inflow mass and 43 % of S3's**,
+all of it packaging.
+
+**And it changes the headline.** Under S3 the fleet's iron and aluminium demand
+in 2070 is not far below today's — it moves away from lithium, it does not
+disappear. Reading the old output, it did.
 
 ---
 
@@ -112,7 +131,9 @@ otherwise be misread.
   phosphorus, graphite — are **lower bounds on demand**, not forecasts. The
   curves fall because the cell of those cars is not described.
 - **Structural** materials — iron, aluminium, copper — are complete for every
-  car in every scenario, since 2026-09-15. Read them as totals.
+  car in every scenario, since 2026-09-15. Read them as totals. Under S3 in 2070
+  that is 1,225 kt of iron entering and 1,374 kt collected, against 553 kt
+  entering before the packaging was carried.
 - The **covered part is not damaged** by the gap. LFP, LMFP and NMC flows are
   complete for the cars that carry them; the ratios built on them — secondary
   supply, collected over inflow — are sound within that part.

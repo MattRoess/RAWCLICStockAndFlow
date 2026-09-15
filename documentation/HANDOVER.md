@@ -119,7 +119,7 @@ code/03_02_adjustedflows.py    ~40 min, plus ~13 min for the BEV export
 code/04_01_carcomposition.py
 code/04_02_BEVelectronics.py   needs 03_02's export and the electronics draws
 code/04_03_tractionmotors.py
-code/04_04_batteries.py        ~31 min, writes 25 GB of draws and nine figures
+code/04_04_batteries.py        ~47 min, writes 40 GB of draws and nine figures
 code/test_04_04_figures.py     ~30 s, redraws those figures without the stage
                                -- a bench tool, not part of the chain
 ```
@@ -431,7 +431,7 @@ that one.
   Do not repeat the number — point at the generated file.
 - **`RUNNING.md` still says 04_03 and 04_04 are "not part of this chain".**
   True when it was written, wrong now: 04_04 consumes 03_02's BEV export and the
-  battery project's arrays, takes half an hour and writes 25 GB.
+  battery project's arrays, takes about 47 minutes and writes 40 GB.
 
 ### 4.3 OPEN — what 04_04 cannot yet say
 
@@ -442,14 +442,16 @@ that one.
   that survives scrutiny, and inventing one would be worse than the hole. Full
   account, with the measurements and the rejected alternatives:
   `DESIGN_chemistries_without_composition.md`.
-- **Half of that gap is an export, not a data problem, and could be closed now.**
+- **Half of that gap was an export, not a data problem — CLOSED 2026-09-15.**
   The battery project DOES model these two: at 60 kWh it gives sodium-ion
   209.5 kg of casing, separator, cables, terminals, enclosure, frame, thermal
   conductor and current collectors -- within 3 kg of LFP's own structure -- and
   leaves only the ACTIVE material empty. It writes no `.npy` draw arrays for
-  them, so `src/battery_composition.py` raises and 04_04 drops the whole car,
-  structure included. Exporting those draws would move the gap from "the car" to
-  "the active material". See §2 of that document.
+  them, so `src/battery_composition.py` raised and 04_04 dropped the whole car,
+  structure included. Both now export, the gap means "the active material"
+  rather than "the car", and the share it reports is unchanged. It recovered
+  +122% iron, +216% aluminium and +84% copper under S3 in 2070. See §2 of that
+  document.
 - **The material level is empty of information.** The battery workbook's `m-c`
   rows carry a mass but no material name, and only for three components — which
   is why the COMPONENT level was built instead. A real material breakdown needs
@@ -493,7 +495,7 @@ Concretely, what that has meant in practice:
 6. **Verify against the real data, not against reasoning.** Every claim in these
    documents has a measured number behind it.
 7. **Persist the draws, not the statistics.** A ratio of two percentiles is not
-   the percentile of a ratio. 04_04 keeps 25 GB of per-draw arrays for exactly
+   the percentile of a ratio. 04_04 keeps 40 GB of per-draw arrays for exactly
    this reason: secondary supply is collected over inflow, formed draw by draw,
    and a mean with two percentiles cannot answer it.
 8. **A discrete state is drawn, never blended.** A pack is 400 V or 800 V and a

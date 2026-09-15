@@ -44,14 +44,14 @@ Times are for 200,000 Monte Carlo draws on a 16 GB machine.
 | `04_01_carcomposition.py` | Turns vehicles into materials — steel, aluminium, copper, battery chemistry. | long | high |
 | `04_02_BEVelectronics.py` | BEV electronics material flows, from both studies' real draws. | ~2 min | ~600 MB |
 | `04_03_tractionmotors.py` | Traction motor material flows. | minutes | moderate |
-| `04_04_batteries.py` | BEV battery material flows: three flows, three chemistry scenarios, elements and components, **every year**. Writes nine figures at the end. | **~31 min** | **~15.5 GB** |
+| `04_04_batteries.py` | BEV battery material flows: three flows, three chemistry scenarios, elements and components, **every year**. Writes nine figures at the end. | **~47 min** | **~13 GB** |
 
 `code/test_04_04_figures.py` redraws 04_04's figures from the draws already on
 disk in ~30 s, without rerunning the stage. It is a bench tool, not a stage, and
 not a test despite the prefix — the prefix is there because `0x_` belongs to the
 things that produce results.
 
-**04_04 writes 25 GB of per-draw arrays** to `data/processed/battery_draws/`, and
+**04_04 writes 40 GB of per-draw arrays** to `data/processed/battery_draws/`, and
 that is deliberate: secondary supply is collected over inflow formed draw by
 draw, and a mean with two percentiles cannot answer it. See
 `BATTERY_MATERIAL_FLOWS.md`.
@@ -140,12 +140,12 @@ saying so, re-run whichever side is short.
 from before a parameter was added will inherit the new default rather than fail —
 but only for simple values. Running `00_parameters.py` removes the ambiguity.
 
-**Disk.** `data/processed` holds **43 GB** (measured 2026-09-15), and per-draw
+**Disk.** `data/processed` holds **58 GB** (measured 2026-09-15), and per-draw
 arrays are all of it:
 
 | | |
 |---|---|
-| `battery_draws/` | 25 GB — 04_04, three flows x three scenarios x two levels, every year |
+| `battery_draws/` | 40 GB — 04_04, three flows x three scenarios x two levels, every year |
 | `carcomposition_draws/` | 9.0 GB — 04_01 |
 | `element_draws/` | 5.5 GB — 04_02 |
 | `bev_draws/` | 2.6 GB — 03_02's BEV export |
