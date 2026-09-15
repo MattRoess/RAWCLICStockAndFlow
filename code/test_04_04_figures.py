@@ -1,14 +1,22 @@
 """
-04_04_figures.py
-================
+test_04_04_figures.py
+=====================
 
-Redraws the battery figures from the saved draws, without rerunning the stage.
+A BENCH TOOL, NOT A PIPELINE STAGE. Redraws 04_04's figures from the draws
+already on disk, without rerunning the stage.
 
-    .venv/bin/python code/04_04_figures.py
+    .venv/bin/python code/test_04_04_figures.py
 
-The figures themselves live in `04_04_batteries.py`, which draws them at the end
-of every run. This is for changing one, which happens far more often than the
-result changes.
+Named `test_` and not `04_04_` on purpose: the numeric prefix belongs to the
+stages that produce results, and this produces none. It is here because a figure
+gets adjusted far more often than a result gets recomputed -- thirty seconds
+against the stage's half hour.
+
+WHAT IT IS NOT. It asserts nothing and checks nothing, unlike
+`test_stage03_inflow.py` and `test_stage04_02_export.py` beside it. Every figure
+lives in `04_04_batteries.py` and is drawn at the end of every run of it; this
+file holds no plotting code of its own and cannot drift from the stage, because
+it calls the stage's own `build_all`.
 """
 
 from __future__ import annotations

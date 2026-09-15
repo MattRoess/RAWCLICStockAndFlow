@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **155** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **157** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 44 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 46 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1111,7 +1111,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**44 parameters.**
+**46 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1136,6 +1136,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `battery_chemistry_segment_groups` | `{ "A": "small", "B": "small", "JA": "small", "JB": "small", "C": "medium", "D": "medium...` |
 | `battery_chemistry_scenarios` | `default_factory=lambda: { "S1": { "small": {"LFP": (70, 65, 60, 60), "LMFP": (18, 25, 3...` |
 | `battery_chemistry_file_names` | `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi", }` |
+| `battery_chemistry_share_spread` | `{ "min": 0.70, "mode": 1.00, "max": 1.30, }` |
+| `battery_chemistry_share_spread_years` | `(2020, 2070)` |
 | `average_battery_capacity_kwh` | `60.0` |
 | `composition_summary_file_name` | `"36_MonteCarlo_Summary.xlsx"` |
 | `composition_scalar_statistic` | `"mean"` |
@@ -1433,6 +1435,46 @@ Default: `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "b
 The scenario names above mapped onto the composition files' own chemistry
 names. A name with no entry has no composition and is reported as a gap.
 SAFE TO CHANGE: only to match the composition files.
+
+
+### `battery_chemistry_share_spread`
+
+Default: `{ "min": 0.70, "mode": 1.00, "max": 1.30, }`
+
+⚠️ HOW WRONG THE CHEMISTRY SHARES MIGHT BE, as a multiplier on each one.
+
+The scenarios above are stated assumptions and the model does not argue
+with them. What it does say is that a share stated for 2070 is a guess made
+forty-five years early, and a share stated for 2021 is nearly a
+measurement. This is that distance, as a TRIANGULAR multiplier on each
+chemistry's stated share.
+
+EVERY CHEMISTRY IS DRAWN AND THE GROUP IS THEN RENORMALISED TO ONE. None of
+them is a residual that absorbs whatever the others left over -- that would
+give one chemistry all the uncertainty and the rest none, and which one got
+it would depend on the order they were written in. The renormalisation is
+what makes them correlated: in a draw where sodium runs ahead, the others
+give way.
+
+ONE DRAW PER CHEMISTRY, shared across the segment groups and held across
+every year. Sodium beating expectations is one event, not twelve.
+
+0.70 / 1.00 / 1.30 means: at full width, a chemistry's share can be 30%
+below or above what the scenario states -- RELATIVE to that share, so a
+stated 40% runs 28-52% and a stated 4% runs 2.8-5.2%. Make it asymmetric by
+moving `mode` off 1.00, which is a statement that the scenario is more
+likely wrong in one direction.
+SAFE TO CHANGE: yes. min <= mode <= max, and all three positive.
+
+
+### `battery_chemistry_share_spread_years`
+
+Default: `(2020, 2070)`
+
+Where that width ramps from nothing to its full value. At the first year
+the shares are exactly what the scenario states; at the second and beyond,
+the full spread above. Linear between.
+SAFE TO CHANGE: yes. The first year is "what we can see now".
 
 
 ### `average_battery_capacity_kwh`

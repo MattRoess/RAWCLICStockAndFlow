@@ -8,7 +8,7 @@ result is trustworthy.
 ## 1. The short version
 
 ```bash
-cd /Users/rm/Documents/GitHub/RAWCLICStockAndFlow
+cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/Documents/GitHub/RAWCLICStockAndFlow
 .venv/bin/python code/00_parameters.py          # always first
 .venv/bin/python code/01_data_prep.py
 .venv/bin/python code/02_stockdriven.py
@@ -16,7 +16,13 @@ cd /Users/rm/Documents/GitHub/RAWCLICStockAndFlow
 .venv/bin/python code/03_02_adjustedflows.py
 .venv/bin/python code/04_01_carcomposition.py
 .venv/bin/python code/04_02_BEVelectronics.py
+.venv/bin/python code/04_03_tractionmotors.py
+.venv/bin/python code/04_04_batteries.py
 ```
+
+The repository lives in iCloud Drive. That is where the path above comes from,
+and it is also why a `.git` can end up split across two folders and a `.venv` can
+come back as evicted placeholders — both have happened.
 
 Each stage reads what the previous ones wrote, so the order matters. You can stop
 anywhere; later stages simply have nothing to read and say so clearly rather than
@@ -37,9 +43,18 @@ Times are for 200,000 Monte Carlo draws on a 16 GB machine.
 | `03_02_adjustedflows.py` | Re-simulates the fleet under each scenario. **The long one.** | **~40 min**, plus ~13 min for the BEV export | high |
 | `04_01_carcomposition.py` | Turns vehicles into materials — steel, aluminium, copper, battery chemistry. | long | high |
 | `04_02_BEVelectronics.py` | BEV electronics material flows, from both studies' real draws. | ~2 min | ~600 MB |
+| `04_03_tractionmotors.py` | Traction motor material flows. | minutes | moderate |
+| `04_04_batteries.py` | BEV battery material flows: three flows, three chemistry scenarios, elements and components, **every year**. Writes nine figures at the end. | **~31 min** | **~15.5 GB** |
 
-Two more stages exist and are not part of this chain: `04_03_tractionmotors.py` and
-`04_04_batteries.py`.
+`code/test_04_04_figures.py` redraws 04_04's figures from the draws already on
+disk in ~30 s, without rerunning the stage. It is a bench tool, not a stage, and
+not a test despite the prefix — the prefix is there because `0x_` belongs to the
+things that produce results.
+
+**04_04 writes 25 GB of per-draw arrays** to `data/processed/battery_draws/`, and
+that is deliberate: secondary supply is collected over inflow formed draw by
+draw, and a mean with two percentiles cannot answer it. See
+`BATTERY_MATERIAL_FLOWS.md`.
 
 ### Turning the cost down
 
@@ -82,7 +97,9 @@ If you changed a parameter's documentation, regenerate the reference too:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Full list of all 137 parameters: `PARAMETER_REFERENCE.md`.
+Full list of every parameter: `PARAMETER_REFERENCE.md`. It is generated and
+states its own count — do not copy that number into another document, which is
+how three of them came to disagree.
 
 ---
 
@@ -105,23 +122,47 @@ scenario to get them.
 
 If either is missing, `04_02` stops with a message saying exactly which.
 
+**Stage 04_04 needs two things that are not in this repository.**
+
+- `03_02`'s per-draw BEV export, in `data/processed/bev_draws/BAU/` — the same
+  export `04_02` uses.
+- The composition arrays written by the sibling battery project:
+  ```bash
+  cd ../RAWCLICVehicleBattery && .venv/bin/python 05_composition.py
+  ```
+  found through `materials.battery_composition_dir`.
+
+**Both sides must run at the same number of draws.** 04_04 raises rather than
+pairing draw *i* on one side with a different world on the other. If it stops
+saying so, re-run whichever side is short.
+
 **Old parameter files still load, but regenerate anyway.** A saved `00_params.pkl`
 from before a parameter was added will inherit the new default rather than fail —
 but only for simple values. Running `00_parameters.py` removes the ambiguity.
 
-**Disk.** `data/processed/intermediate/` holds **724 MB** and
-`data/processed` **4.0 GB** in total (measured 2026-09-02). It once held 71 GB,
-mostly 04_01 mass-draw files, plus roughly 25 GB of accidental iCloud duplicates
-with a trailing " 2" in the filename; both are gone, and `find data/processed -name
-"* 2.*"` now returns nothing. Persisting per-draw mass arrays is what fills it, so
-watch it again if `materials.persist_mc_mass_draws` is switched on.
+**Disk.** `data/processed` holds **43 GB** (measured 2026-09-15), and per-draw
+arrays are all of it:
+
+| | |
+|---|---|
+| `battery_draws/` | 25 GB — 04_04, three flows x three scenarios x two levels, every year |
+| `carcomposition_draws/` | 9.0 GB — 04_01 |
+| `element_draws/` | 5.5 GB — 04_02 |
+| `bev_draws/` | 2.6 GB — 03_02's BEV export |
+| `intermediate/` | 724 MB — every summary the pipeline reads back |
+
+It once held 71 GB, plus roughly 25 GB of accidental iCloud duplicates with a
+trailing " 2" in the filename; both are gone, and `find data/processed -name
+"* 2.*"` still returns nothing. Watch it again if
+`materials.persist_mc_mass_draws` is switched on — that one adds tens of GB and
+nothing reads it back.
 
 
 Figures land in `data/processed/figures/`.
 
 ---
 
-## 6. Is the result trustworthy?
+## 5. Is the result trustworthy?
 
 Check these before believing a number.
 
@@ -142,19 +183,20 @@ is not reaching that quantity. That is exactly how the inflow defect was found.
 
 ---
 
-## 7. The other documents
+## 6. The other documents
 
 | document | what it is for |
 |---|---|
-| `PARAMETER_REFERENCE.md` | All 137 parameters. **Generated — do not edit by hand.** |
+| `PARAMETER_REFERENCE.md` | Every parameter, with its explanation. **Generated — do not edit by hand.** |
 | `MODEL_DESCRIPTION.md` | How the model works: cohort mechanics, special cases, Monte Carlo methodology. |
 | `UNCERTAINTY_MAP.md` | Where uncertainty enters, travels, and stops. Read this before trusting a band. |
 | `DESIGN_inflow_uncertainty_propagation.md` | Why the inflow propagation is built the way it is, including two rejected designs. |
+| `BATTERY_MATERIAL_FLOWS.md` | Stage 04_04 in full: the three chemistry scenarios, why there are two levels of detail, and what the figures do and do not say. |
 | `HANDOVER.md` | Current state: what is tested, at what draw count, and what is open. |
 
 ---
 
-## 8. The standard this project runs on
+## 7. The standard this project runs on
 
 **Correct Monte Carlo, or nothing.** In practice:
 

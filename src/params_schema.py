@@ -1806,6 +1806,40 @@ class MaterialsParams:
         "NMC_high": "battLiNMC_highNi",
     })
 
+    # ⚠️ HOW WRONG THE CHEMISTRY SHARES MIGHT BE, as a multiplier on each one.
+    #
+    # The scenarios above are stated assumptions and the model does not argue
+    # with them. What it does say is that a share stated for 2070 is a guess made
+    # forty-five years early, and a share stated for 2021 is nearly a
+    # measurement. This is that distance, as a TRIANGULAR multiplier on each
+    # chemistry's stated share.
+    #
+    # EVERY CHEMISTRY IS DRAWN AND THE GROUP IS THEN RENORMALISED TO ONE. None of
+    # them is a residual that absorbs whatever the others left over -- that would
+    # give one chemistry all the uncertainty and the rest none, and which one got
+    # it would depend on the order they were written in. The renormalisation is
+    # what makes them correlated: in a draw where sodium runs ahead, the others
+    # give way.
+    #
+    # ONE DRAW PER CHEMISTRY, shared across the segment groups and held across
+    # every year. Sodium beating expectations is one event, not twelve.
+    #
+    # 0.70 / 1.00 / 1.30 means: at full width, a chemistry's share can be 30%
+    # below or above what the scenario states -- RELATIVE to that share, so a
+    # stated 40% runs 28-52% and a stated 4% runs 2.8-5.2%. Make it asymmetric by
+    # moving `mode` off 1.00, which is a statement that the scenario is more
+    # likely wrong in one direction.
+    # SAFE TO CHANGE: yes. min <= mode <= max, and all three positive.
+    battery_chemistry_share_spread: dict[str, float] = field(default_factory=lambda: {
+        "min": 0.70, "mode": 1.00, "max": 1.30,
+    })
+
+    # Where that width ramps from nothing to its full value. At the first year
+    # the shares are exactly what the scenario states; at the second and beyond,
+    # the full spread above. Linear between.
+    # SAFE TO CHANGE: yes. The first year is "what we can see now".
+    battery_chemistry_share_spread_years: tuple[int, int] = (2020, 2070)
+
     # Fallback battery size used when a vehicle's segment is unknown.
     # SAFE TO CHANGE: yes. Ideally it stays near the middle of the map above.
     average_battery_capacity_kwh: float = 60.0
@@ -2273,6 +2307,20 @@ class MaterialsParams:
                 issues.append(
                     f"materials.{name} must satisfy min <= mode <= max: {band}")
 
+        spread = self.battery_chemistry_share_spread
+        missing = {"min", "mode", "max"} - set(spread)
+        if missing:
+            issues.append(
+                f"materials.battery_chemistry_share_spread is missing {sorted(missing)}.")
+        elif not 0 < spread["min"] <= spread["mode"] <= spread["max"]:
+            issues.append(
+                "materials.battery_chemistry_share_spread must satisfy "
+                f"0 < min <= mode <= max: {spread}")
+        first, last = self.battery_chemistry_share_spread_years
+        if first >= last:
+            issues.append(
+                "materials.battery_chemistry_share_spread_years must rise: "
+                f"{(first, last)}")
         return issues
 
 

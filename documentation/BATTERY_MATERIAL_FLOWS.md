@@ -11,19 +11,19 @@ secondary-supply number built on the outflow is an upper bound, not a supply.
 than being 0.88 × the outflow: measured at 87.9 % in 2070 with a 86.8–89.0 %
 band.
 
-Reported **every two years**, 2020 to 2070.
+Reported **every year**, 2020 to 2070.
 
 ```bash
-.venv/bin/python code/04_04_batteries.py     # ~12 min at 200,000 draws, writes the figures too
-.venv/bin/python code/04_04_figures.py       # ~40 s, redraws them from the saved draws
+.venv/bin/python code/04_04_batteries.py     # ~31 min at 200,000 draws, writes the figures too
+.venv/bin/python code/test_04_04_figures.py  # ~30 s, redraws them from the saved draws
 ```
 
-The two-year grid costs one thing worth knowing: the battery project writes its
-mass-improvement factor every **five** years, so 2022, 2024, 2026 … have none on
+The annual grid costs one thing worth knowing: the battery project writes its
+mass-improvement factor every **five** years, so four years in five have none on
 file. `src/battery_composition.py` interpolates them **per draw** — draw *i*'s
 factor in 2022 lies between draw *i*'s own 2020 and 2025 factors. Before that
 change those years silently carried no improvement at all, which by 2070 would
-have been about 20 % too much mass in every second year.
+have been about 20 % too much mass in most years.
 
 ## The three scenarios
 
@@ -84,7 +84,7 @@ oxides and the phosphate, never leaves as oxygen, and nothing recovers it.
 | voltage | drawn per draw, 400 or 800 V, never blended |
 | composition | per-draw element masses from `RAWCLICVehicleBattery`, interpolated in capacity |
 | vintages | per draw, from that draw's own build history and the lifetime curve |
-| **chemistry shares** | **not drawn.** A scenario saying 30 % LFP is an assumption about a real fleet mix; drawing it would turn a stated input into a spread it never had |
+| chemistry shares | drawn — see below |
 
 Draw *i* is one coherent world on every side, because both projects run at
 200,000 draws. Nothing is averaged before the end.
@@ -92,11 +92,49 @@ Draw *i* is one coherent world on every side, because both projects run at
 **The result is the draws**, in
 `data/processed/battery_draws/<flow>/<scenario>/<chemistry>.npy`, shaped
 (draws, years, names) in tonnes, one pair of arrays per level — three flows,
-13 GB at 200,000 draws on the two-year grid. The table in
+25 GB at 200,000 draws on the annual grid. The table in
 `04_04_battery_material_flows.pkl` — mean, median, 2.5 % and 97.5 % — is computed
 from them and is for reading, never an input to further arithmetic. Recovery is a
 ratio of two of these numbers, and a ratio of percentiles is not the percentile of
 a ratio.
+
+## The scenarios are assumptions; how wrong they might be is not
+
+A scenario is a stated assumption and the model does not argue with it. But a
+share stated for 2070 is a guess made forty-five years early, and a share stated
+for 2021 is nearly a measurement. That distance is drawn: a **triangular
+multiplier on each chemistry's own share**, 0.70 / 1.00 / 1.30 at full width,
+ramping from nothing in 2020 to the full width in 2070. Relative, so a stated
+40 % runs ±12 pp and a stated 4 % runs ±1.2 pp.
+
+**Nothing is a residual.** Every chemistry is perturbed and the group is then
+renormalised to one. The renormalisation IS the correlation — in a draw where
+sodium runs ahead, the others give way — rather than a bookkeeping trick that
+dumps the imbalance on whichever chemistry happened to be listed last. One draw
+per chemistry, shared across the segment groups and held across every year:
+sodium beating expectations is one event, not twelve.
+
+Measured on the drawn shares themselves, 200,000 draws: the group sums to
+**1.000000** in every draw and every year; the 2020 band is exactly zero; and
+renormalising moves each chemistry's mean **+0.01 % to +0.78 %** off its stated
+value, which is small but is not nothing.
+
+**Where this lands, and where it does not.** Band as a share of the median,
+inflow 2070:
+
+| | S1 | S2 | S3 | carried by |
+|---|---|---|---|---|
+| Li | 59 % | 62 % | 70 % | all three chemistries |
+| Cu | 51 % | 55 % | 63 % | all three |
+| **Ni, Co** | **73 %** | **81 %** | **82 %** | NMC only |
+| Mn | 70 % | 71 % | 79 % | LMFP and NMC |
+
+Lithium's total band is unchanged by drawing the shares, and that is the
+mechanism rather than a bug. Measured on the same draws: each chemistry's OWN
+lithium carries a 70–73 % band while their sum carries 59 %. The drawn mix moves
+lithium between chemistries, and all three contain it, so it largely cancels in
+the total. Nickel and cobalt come only from NMC and cannot cancel — there the
+share uncertainty arrives in full.
 
 ## Inflow is built this year, what leaves was built long ago
 
@@ -171,7 +209,7 @@ away.
 | | |
 |---|---|
 | `code/04_04_batteries.py` | the stage, and the figures it draws |
-| `code/04_04_figures.py` | redraws those figures alone, without the stage |
+| `code/test_04_04_figures.py` | bench tool: redraws those figures alone, without the stage |
 | `src/battery_capacity.py` | the pack-size mixture |
 | `src/battery_voltage.py` | 400 or 800 V |
 | `src/battery_composition.py` | masses at a drawn capacity, from the battery project |

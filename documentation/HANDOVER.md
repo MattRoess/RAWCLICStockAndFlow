@@ -15,13 +15,14 @@ This file records what changed around it.
 
 04_04 was rewritten from nothing usable into a per-draw battery material flow:
 three flows, three chemistry scenarios, three chemistries, two levels of detail,
-every two years from 2020 to 2070, at 200,000 draws. `RAWCLICVehicleBattery`
+every year from 2020 to 2070, at 200,000 draws, with the chemistry shares
+themselves drawn. `RAWCLICVehicleBattery`
 supplies the composition and was changed to match.
 
 | file | change |
 |---|---|
 | `code/04_04_batteries.py` | the stage, and the nine figures it draws at the end of every run |
-| `code/04_04_figures.py` | redraws those figures alone from the saved draws, ~30 s |
+| `code/test_04_04_figures.py` | bench tool, not a stage and not a test: redraws those figures alone from the saved draws, ~30 s |
 | `src/battery_capacity.py` | **new** — the pack a segment carries, as a five-level discrete mixture drawn per car and held for its life |
 | `src/battery_voltage.py` | **new** — 400 or 800 V, drawn per car, never blended |
 | `src/battery_composition.py` | **new** — element and component masses at a drawn capacity, read from the battery project |
@@ -118,8 +119,9 @@ code/03_02_adjustedflows.py    ~40 min, plus ~13 min for the BEV export
 code/04_01_carcomposition.py
 code/04_02_BEVelectronics.py   needs 03_02's export and the electronics draws
 code/04_03_tractionmotors.py
-code/04_04_batteries.py        ~12 min, writes 13 GB of draws and nine figures
-code/04_04_figures.py          ~30 s, redraws those figures without the stage
+code/04_04_batteries.py        ~31 min, writes 25 GB of draws and nine figures
+code/test_04_04_figures.py     ~30 s, redraws those figures without the stage
+                               -- a bench tool, not part of the chain
 ```
 
 **04_04 needs two things that are not in this repository.** 03_02's per-draw BEV
@@ -420,7 +422,7 @@ that one.
   Do not repeat the number — point at the generated file.
 - **`RUNNING.md` still says 04_03 and 04_04 are "not part of this chain".**
   True when it was written, wrong now: 04_04 consumes 03_02's BEV export and the
-  battery project's arrays, takes 12 minutes and writes 13 GB.
+  battery project's arrays, takes half an hour and writes 25 GB.
 
 ### 4.3 OPEN — what 04_04 cannot yet say
 
@@ -470,7 +472,7 @@ Concretely, what that has meant in practice:
 6. **Verify against the real data, not against reasoning.** Every claim in these
    documents has a measured number behind it.
 7. **Persist the draws, not the statistics.** A ratio of two percentiles is not
-   the percentile of a ratio. 04_04 keeps 13 GB of per-draw arrays for exactly
+   the percentile of a ratio. 04_04 keeps 25 GB of per-draw arrays for exactly
    this reason: secondary supply is collected over inflow, formed draw by draw,
    and a mean with two percentiles cannot answer it.
 8. **A discrete state is drawn, never blended.** A pack is 400 V or 800 V and a

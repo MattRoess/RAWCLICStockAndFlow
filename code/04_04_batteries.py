@@ -33,9 +33,11 @@ WHAT IS DRAWN AND WHAT IS NOT
   composition  per-draw element masses from RAWCLICVehicleBattery
   vintages     per draw, from that draw's own inflow history and the lifetime
                curve -- see src/battery_vintage.py
-  shares       NOT drawn. A scenario stating 30% LFP is an assumption, and the
-               fleet of a segment really does contain that mix; drawing it would
-               turn a stated input into a spread
+  shares       drawn -- not because the scenario is uncertain, but because a
+               share stated for 2070 is a guess made forty-five years early. A
+               triangular multiplier per chemistry, nothing in 2020 widening to
+               the parameter's full value in 2070, then the group renormalised
+               to one. No chemistry is a residual
 
 INFLOW IS BUILT THIS YEAR, OUTFLOW WAS BUILT LONG AGO
 ------------------------------------------------------
@@ -90,7 +92,8 @@ from matplotlib.patches import Patch  # noqa: E402
 
 from src.artifacts import load_many, save_many  # noqa: E402
 from src.battery_capacity import capacity_draws  # noqa: E402
-from src.battery_chemistry import chemistry_share  # noqa: E402
+from src.battery_chemistry import (chemistry_share,  # noqa: E402
+                                   chemistry_share_draws)
 from src.battery_composition import CompositionAtCapacity, CompositionError  # noqa: E402
 from src.battery_vintage import vintage_weights  # noqa: E402
 from src.battery_voltage import voltage_draws  # noqa: E402
@@ -124,16 +127,21 @@ def main() -> dict:
     params = load_many("params", root=PROJECT_ROOT)["params"]
     materials = params.materials
     flow_scenario = "BAU"
-    # Every two years. The flows are annual and the chemistry shares move
-    # steadily, so a five-year grid was hiding real movement between its points;
-    # the composition's improvement factor is written every five years and is
-    # interpolated per draw for the years in between.
-    years = [y for y in range(2020, 2071, 2)]
+    # EVERY YEAR. The flows are annual, so anything coarser is this stage
+    # throwing away resolution the fleet model already has. It costs: the
+    # vintage sum is over every build year for every reported year, which is
+    # what makes this the long stage, and the draws it writes are tens of GB.
+    #
+    # The composition's improvement factor is written every FIVE years, so four
+    # years in five are interpolated per draw -- see `_improvement` in
+    # src/battery_composition.py. Without that interpolation those years would
+    # silently carry no improvement at all.
+    years = [y for y in range(2020, 2071)]
     # The build years an outflow can come from. It reaches back further than the
-    # reported years because a car scrapped in 2022 was built well before 2020.
+    # reported years because a car scrapped in 2021 was built well before 2020.
     # The pack size is read at the true build year; the composition files start
     # in 2020, so only that part is clamped, and the clamp is measured below.
-    vintages = [y for y in range(2004, 2071, 2)]
+    vintages = [y for y in range(2004, 2071)]
     vintage_position = {year: vintages.index(year) for year in years}
     composition_floor = 2020
     segments = list(materials.battery_capacity_levels)
@@ -195,7 +203,15 @@ def main() -> dict:
                 dtype=np.float32)
             for scenario in scenarios for chemistry, file_name in named.items()
             for level in LEVELS}
-        vintage_mean, count_mean, clamped_reported = {}, {}, None
+        count_mean, clamped_reported = {}, None
+        # The uncovered share is now a DISTRIBUTION, because the shares that
+        # make it are drawn. Accumulated as a vehicle-weighted numerator and
+        # denominator per draw, so the percentiles at the end are percentiles of
+        # a share and not a ratio of two percentiles.
+        gap_top = {(scenario, group): np.zeros((n_draws, len(years)), dtype=np.float32)
+                   for scenario in scenarios for group in set(groups.values())}
+        gap_bottom = {group: np.zeros((n_draws, len(years)), dtype=np.float32)
+                      for group in set(groups.values())}
 
         for segment in segments:
             vehicles = vehicles_by_segment.get(segment)
@@ -213,7 +229,6 @@ def main() -> dict:
                 weights, clamped = vintage_weights(
                     built_by_segment[segment], flow_years, years, vintages,
                     lifetime.shape_k, lifetime.scale_lambda)
-                vintage_mean[segment] = weights.mean(axis=0)
                 if clamped_reported is None:
                     below = vintages.index(composition_floor)
                     clamped_reported = (clamped,
@@ -221,13 +236,46 @@ def main() -> dict:
             else:
                 weights = None
 
+            # THE SHARES ARE DRAWN, per group, once for the whole segment: the
+            # mix does not depend on the chemistry being accumulated or on the
+            # level, and every chemistry of the group has to be in hand at once
+            # because the renormalisation decides what gives way.
+            group_shares = {
+                scenario: chemistry_share_draws(params, scenario, group, vintages,
+                                                n_draws=n_draws, seed=404)
+                for scenario in scenarios}
+            # Started from zeros, not from nothing: under S1 every chemistry has
+            # a composition, the sum is over an empty set, and a bare sum()
+            # would hand back the integer 0 where an array is expected.
+            uncovered = {
+                scenario: sum((share for chemistry, share in group_shares[scenario].items()
+                               if chemistry not in named),
+                              np.zeros((n_draws, len(vintages)), dtype=np.float32))
+                for scenario in scenarios}
+            for scenario in scenarios:
+                # 482 MB of shares survive the segment; the chemistries with no
+                # composition are already summed into `uncovered` and are not
+                # needed again.
+                for chemistry in [c for c in group_shares[scenario] if c not in named]:
+                    del group_shares[scenario][chemistry]
+
+            # The share of THESE cars whose battery has no composition, weighted
+            # by how many of them there are. On a retirement flow it follows the
+            # same vintage weights as the material, because it is a property of
+            # the year the car was built.
+            for scenario in scenarios:
+                if flow == "inflow":
+                    here = uncovered[scenario][:, [vintage_position[y] for y in years]]
+                else:
+                    here = np.einsum("dv,dtv->dt", uncovered[scenario], weights,
+                                     optimize=True)
+                gap_top[(scenario, group)] += counts * here
+            gap_bottom[group] += counts
+            del uncovered
+
             for chemistry, file_name in named.items():
-                # The mix does not depend on the level -- the same cars carry
-                # both -- so it is drawn once for the two.
-                shares = {scenario: np.array(
-                    [chemistry_share(params, scenario, group, chemistry, year)
-                     for year in vintages], dtype=np.float32)
-                    for scenario in scenarios}
+                shares = {scenario: group_shares[scenario][chemistry]
+                          for scenario in scenarios}
 
                 for level in LEVELS:
                     # (n_draws, n_vintages, n_names) -- one pack per drawn car
@@ -247,19 +295,19 @@ def main() -> dict:
                             if flow == "inflow":
                                 # Built this year: this year's mix and pack.
                                 built = vintage_position[year]
-                                share = float(shares[scenario][built])
-                                if share <= 0:
+                                share = shares[scenario][:, built]
+                                if not share.any():
                                     continue
                                 target[:, year_position, :] += (
                                     per_car[:, built, :] * (count * share)[:, None])
                             else:
                                 # Scrapped this year, built across the vintages.
-                                coefficient = (count[:, None] * shares[scenario][None, :]
+                                coefficient = (count[:, None] * shares[scenario]
                                                * weights[:, year_position, :])
                                 target[:, year_position, :] += np.einsum(
                                     "dv,dve->de", coefficient, per_car, optimize=True)
                     del per_car
-            del weights
+            del weights, group_shares
             print(f"  {flow:<8} {segment:<3} done ({time.time()-started:5.0f}s)")
 
         if clamped_reported is not None:
@@ -302,41 +350,33 @@ def main() -> dict:
         # The share that has no composition, reported rather than dropped.
         # SUMMED over the chemistries that lack one, not maxed: sodium-ion and
         # solid-state are both missing in S3, and the hole they leave is the two
-        # together. On the outflow it is the share of the cars' BUILD years,
-        # carried forward by the same vintage weights as the material.
-        for scenario in scenarios:
-            uncovered = {
-                group: np.array([
-                    sum(chemistry_share(params, scenario, group, chemistry, year)
-                        for chemistry in materials.battery_chemistry_scenarios[scenario][group]
-                        if chemistry not in named)
-                    for year in (years if flow == "inflow" else vintages)])
-                for group in set(groups.values())}
-
-            by_group, group_weight = {}, {}
-            for segment in count_mean:
-                group = groups[segment]
-                here = (uncovered[group] if flow == "inflow"
-                        else vintage_mean[segment] @ uncovered[group])
-                by_group[group] = by_group.get(group, 0.0) + count_mean[segment] * here
-                group_weight[group] = group_weight.get(group, 0.0) + count_mean[segment]
-
-            fleet_top = sum(by_group.values())
-            fleet_bottom = sum(group_weight.values())
-            for group, weighted in by_group.items():
-                share = np.divide(weighted, group_weight[group],
-                                  out=np.zeros_like(weighted),
-                                  where=group_weight[group] > 0)
-                for year_position, year in enumerate(years):
-                    gaps.append({"flow": flow, "chemistry_scenario": scenario,
-                                 "year": int(year), "segment_group": group,
-                                 "share_without_composition": float(share[year_position])})
-            fleet = np.divide(fleet_top, fleet_bottom, out=np.zeros_like(fleet_top),
-                              where=fleet_bottom > 0)
+        # together. On a retirement flow it is the share of the cars' BUILD
+        # years, carried forward by the same vintage weights as the material.
+        #
+        # It is now a BAND, because the shares behind it are drawn. The
+        # percentiles are taken of the share itself, per draw, never of a
+        # numerator over a denominator that were summarised separately.
+        def record(scenario: str, label: str, top: np.ndarray,
+                   bottom: np.ndarray) -> None:
+            share = np.divide(top, bottom, out=np.zeros_like(top), where=bottom > 0)
+            mean = share.mean(axis=0)
+            low, median, high = np.percentile(share, [2.5, 50, 97.5], axis=0)
             for year_position, year in enumerate(years):
-                gaps.append({"flow": flow, "chemistry_scenario": scenario,
-                             "year": int(year), "segment_group": "fleet",
-                             "share_without_composition": float(fleet[year_position])})
+                gaps.append({
+                    "flow": flow, "chemistry_scenario": scenario,
+                    "year": int(year), "segment_group": label,
+                    "share_without_composition": float(mean[year_position]),
+                    "median": float(median[year_position]),
+                    "p2.5": float(low[year_position]),
+                    "p97.5": float(high[year_position])})
+
+        for scenario in scenarios:
+            for group in sorted(gap_bottom):
+                record(scenario, group, gap_top[(scenario, group)], gap_bottom[group])
+            record(scenario, "fleet",
+                   sum(gap_top[(scenario, g)] for g in gap_bottom),
+                   sum(gap_bottom.values()))
+        gap_top.clear(), gap_bottom.clear()
 
     result = pd.DataFrame(rows)
     component_frame = pd.DataFrame(component_rows)
@@ -354,10 +394,11 @@ def main() -> dict:
 # ===========================================================================
 # THE FIGURES
 #
-# Part of the stage, and drawn at the end of every run. `code/04_04_figures.py`
-# imports this file to redraw them alone, which takes half a minute against the
-# stage's six and a half minutes -- a figure is changed far more often than a
-# result is recomputed.
+# Part of the stage, and drawn at the end of every run.
+# `code/test_04_04_figures.py` imports this file to redraw them alone, which
+# takes half a minute against the stage's half hour -- a figure is changed far
+# more often than a result is recomputed. That file is a bench tool, marked
+# `test_` because the numeric prefix belongs to stages that produce results.
 # ===========================================================================
 FIGURE_DIR = PROJECT_ROOT / "data" / "processed" / "figures"
 DRAWS_DIR = PROJECT_ROOT / "data" / "processed" / "battery_draws"
@@ -518,6 +559,22 @@ def figure_scenarios(params) -> Path:
             ax.stackplot(years, stack,
                          colors=[CHEMISTRY_COLORS[c] for c in order],
                          edgecolor="white", linewidth=0.4)
+            # The boundaries between the bands are drawn, so they are not lines.
+            # Each one is a CUMULATIVE share, which is what a boundary is, and
+            # its 95% band is how far that boundary can sit from where the
+            # scenario puts it. 5,000 draws: this is a picture, not a result.
+            drawn = chemistry_share_draws(params, scenario, group, years,
+                                          n_draws=5_000, seed=404)
+            running = 0.0
+            for chemistry in order[:-1]:
+                running = running + drawn[chemistry] * 100
+                low, high = np.percentile(running, [2.5, 97.5], axis=0)
+                # Two thin dashed lines, NOT a filled band. A pale wash over a
+                # coloured area reads as another chemistry, which is the one
+                # thing this figure must not say.
+                for edge in (low, high):
+                    ax.plot(years, edge, color="white", linewidth=0.9,
+                            linestyle=(0, (3, 2)), alpha=0.95)
             # the part of the stack with no composition, marked in place
             uncovered = stack[[i for i, c in enumerate(order) if c not in named]]
             if len(uncovered):
@@ -542,12 +599,19 @@ def figure_scenarios(params) -> Path:
                for c in ("LFP", "LMFP", "NMC_high", "Na_ion", "solid_state")]
     handles.append(Patch(facecolor="white", edgecolor="#999999", hatch="///",
                          label="no composition — reported as a gap"))
+    handles.append(Line2D([], [], color="#999999", linewidth=0.9,
+                          linestyle=(0, (3, 2)), label="95% range of the boundary"))
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
                fontsize=9.5, bbox_to_anchor=(0.55, -0.01))
     fig.suptitle("Chemistry shares assumed by each scenario, 2025–2070",
                  fontsize=14, fontweight="bold", x=0.55)
-    fig.text(0.55, 0.925, "Assumption, not data: the observed record ends in 2026.",
+    fig.text(0.55, 0.93, "Assumption, not data: the observed record ends in 2026.",
              ha="center", fontsize=9.5, color="#555555")
+    fig.text(0.55, 0.905,
+             "Each boundary is drawn, not fixed: the dashed pair around it is the 95% "
+             "range it moves over — nothing in 2020, ±30% of each chemistry's own "
+             "share by 2070.",
+             ha="center", fontsize=8.8, color="#777777")
     fig.tight_layout(rect=[0.10, 0.07, 1, 0.92])
     return _save(fig, "04_04_1_chemistry_scenarios.png")
 
@@ -574,7 +638,7 @@ def figure_element_comparison(gaps: pd.DataFrame,
             twin = ax.twinx()
             for scenario, color in SCENARIO_COLORS.items():
                 here = gap[gap.chemistry_scenario == scenario].sort_values("year")
-                twin.plot(here["year"], here["share_without_composition"] * 100,
+                twin.plot(here["year"], here["median"] * 100,
                           color=color, linewidth=1.0, linestyle=":", alpha=0.8)
             twin.set_ylim(0, 100)
             twin.set_yticks([0, 50, 100])
@@ -664,10 +728,10 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
     for scenario, color in SCENARIO_COLORS.items():
         here = gaps[(gaps.flow == "inflow") & (gaps.segment_group == "fleet")
                     & (gaps.chemistry_scenario == scenario)].sort_values("year")
-        ax.plot(here["year"], here["share_without_composition"] * 100, color=color,
+        ax.plot(here["year"], here["median"] * 100, color=color,
                 linewidth=2.4, label=SCENARIO_TITLES[scenario])
-        ax.fill_between(here["year"], 0, here["share_without_composition"] * 100,
-                        color=color, alpha=0.10, linewidth=0)
+        ax.fill_between(here["year"], here["p2.5"] * 100, here["p97.5"] * 100,
+                        color=color, alpha=0.16, linewidth=0)
     _style(ax)
     ax.set_title("whole fleet, weighted by cars sold", fontsize=11, pad=8)
     ax.set_ylabel("cars whose battery has no composition  [%]", fontsize=10)
@@ -680,7 +744,7 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
         for group in groups:
             here = gaps[(gaps.flow == "inflow") & (gaps.segment_group == group)
                         & (gaps.chemistry_scenario == scenario)].sort_values("year")
-            ax.plot(here["year"], here["share_without_composition"] * 100, color=color,
+            ax.plot(here["year"], here["median"] * 100, color=color,
                     linewidth=1.6, linestyle=styles[group], alpha=0.9)
     _style(ax)
     ax.set_title("by segment group", fontsize=11, pad=8)
@@ -693,8 +757,9 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
     fig.suptitle("The hole in the picture: share of cars with no battery composition",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.915,
-             "Sodium-ion and solid-state summed. S1 stays at zero because nothing new "
-             "arrives in it; S3 reaches three quarters of the large segments.",
+             "Sodium-ion and solid-state summed, median with the 95% band. S1 stays at "
+             "zero because nothing new arrives in it — and that zero is exact, not a "
+             "narrow band, because there is nothing there to be uncertain about.",
              ha="center", fontsize=9, color="#555555")
     fig.tight_layout(rect=[0, 0, 1, 0.90])
     return _save(fig, "04_04_4_uncovered_share.png")
@@ -879,6 +944,13 @@ def build_all(params, flows_frame: pd.DataFrame, gaps: pd.DataFrame) -> list[Pat
     """Every figure, in the order they are meant to be read."""
     if not (DRAWS_DIR / "years.npy").exists():
         raise SystemExit("no battery draws -- run code/04_04_batteries.py first")
+    missing = {"median", "p2.5", "p97.5"} - set(gaps.columns)
+    if missing:
+        raise SystemExit(
+            f"the gap frame has no {sorted(missing)} -- it predates the chemistry "
+            "shares becoming drawn, when the uncovered share was one number rather "
+            "than a band. Re-run code/04_04_batteries.py; redrawing cannot invent "
+            "a band that was never computed.")
     print("figures:")
     return [
         figure_scenarios(params),
