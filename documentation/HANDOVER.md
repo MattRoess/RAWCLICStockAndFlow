@@ -60,6 +60,47 @@ without a composition rather than the sum, understating S3's large segments as
 supply, when only the **collected** part reaches a recycler — 88% of BEVs, with
 2% exported and 10% never traced.
 
+### Since that, on 2026-09-15 — the recovery model gets a battery case
+
+`RAWCLICRecoveryModel` had two cases, both fed by 04_02. It now has a third,
+`data_folder/battery`, fed by 04_04. **Its network is built and not one of its
+66 coefficients is written** -- every value, min and max is empty and every
+source cell says so. That is deliberate: the other two cases carry invented
+numbers and that project's own handover calls filling them the only thing left
+in it, so a third case of placeholders would make the problem bigger.
+
+| | |
+|---|---|
+| dismantling | the pack housing with the cables and terminals one way, the cells the other. Every component has a row to both, so an incomplete dismantling is expressible rather than assumed away |
+| pack housing | a shredder, yielding `fealloy`, `alalloy` and `cu` |
+| cells | their own liquid route, yielding Li, Ni, Co, Mn and their own Cu, Al and Fe |
+
+**Three elements arrive on BOTH routes and are kept apart**, because one
+coefficient would be right for neither. Measured on a 60 kWh pack: copper 16.1 kg
+in cables and terminals against 21.6 in the anode collector foil; iron 55.3 kg in
+the support frame against 40.5 in LFP's cathode, which is iron phosphate;
+aluminium 36.5 kg in the thermal conductor against 9.1 in the cathode collector,
+which is an electrode foil and not a structural alloy.
+
+**What that needed upstream.** The recovery model reads the mass of an element
+WITHIN a component, and neither level answered that: 04_04 summed to elements or
+to components, never both. `05_composition.py` now writes the cross as
+`<stem>_pair_mass_draws.npy`, and 04_04 writes the recovery export --
+`<scenario>/<flow>/<element>__<component>.npy`, (draws, years) in kilotonnes,
+2020-2070 every five years, summed over the chemistries because a recycler
+receives the mix.
+
+**A defect of mine, caught by the guard written for it.** The cross level first
+carried a remainder row per component, `clip(component - elements, 0, None)`.
+That difference fluctuates around zero draw by draw; clipping kept the positive
+excursions and turned Monte Carlo noise into 1.37 kg of anode mass. There is no
+remainder row: a residual is derived by whoever needs it, not stored.
+
+**And one that is not mine, left visible.** NMC high-Ni's anode: its element rows
+sum to 41.89 kg against a component row of 40.36, +3.8%. The workbook disagrees
+with itself there and anyone deriving a remainder gets a negative one. Reported
+with the number on every anchor rather than smoothed away.
+
 ### Earlier work, to 2026-09-02
 
 | file | change | tested |
@@ -123,6 +164,13 @@ code/04_04_batteries.py        ~47 min, writes 40 GB of draws and nine figures
 code/test_04_04_figures.py     ~30 s, redraws those figures without the stage
                                -- a bench tool, not part of the chain
 ```
+
+**04_04 also writes what RAWCLICRecoveryModel reads**, into
+`data/processed/battery_recovery_draws/<scenario>/<flow>/`. Check that folder
+holds exactly three scenarios x three flows after a run: that model reads a
+folder as a whole, and on 2026-08-31 it silently read the union of four runs at
+once because upstream wrote file by file and never cleared. It refuses now, but
+only if the widths differ.
 
 **04_04 needs two things that are not in this repository.** 03_02's per-draw BEV
 export (`data/processed/bev_draws/BAU/`), and the composition arrays written by
@@ -468,6 +516,18 @@ that one.
 - The figure loaders in 04_04 raise `SystemExit` where the rest of the codebase
   raises a typed error. Cosmetic, but inconsistent.
 
+### 4.4 OPEN — the recovery case has no numbers
+
+**66 transfer coefficients, all empty, and they are Matthias's to provide.** The
+network is built and checked; nothing can run until they exist. The battery
+project's own handover has the same open item for the other two cases.
+
+Also open there: which recovery rate applies to a chemistry whose cell nobody has
+described. Sodium-ion's cell holds no CRM or SRM, so its absence costs the
+recovery answer nothing. Solid-state's holds lithium, and there is no coefficient
+to write for a composition that does not exist. See
+`DESIGN_chemistries_without_composition.md` §3b.
+
 ---
 
 ## 5. The rule this project runs on
@@ -519,6 +579,13 @@ Written down because it was learned the hard way in this session.
 - **Render figures and look at them.** An audit that greps for `set_ylabel` passes a
   chart whose unit label is rotated 90° and clipped off the page. That happened.
 - **Keep answers short.** State the finding, the evidence, the recommendation.
+- **WORK ON `main`, AND PUSH AFTER EVERY COMMIT.** No feature branches unless
+  someone else is in the same code at the same time. Set 2026-09-15, after 61
+  commits of this work sat on `carcomposition-draw-export` while `main` -- which
+  is what collaborators see on GitHub -- stayed months old, reported as "pushed"
+  every time. Every RAWCLIC repository is now on `main` with no feature branches;
+  the electronics repo's two older lines are kept as `archive/2026-05-22` and
+  `archive/2026-08-12`.
 - **A file of its own is a waiting room, not a home.** Cut code may sit in its
   own runnable file while a decision is open. When the decision is made, the
   file goes — `06_segment_capacity.py` sat there for four days and was deleted
