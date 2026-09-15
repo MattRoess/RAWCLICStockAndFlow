@@ -1804,7 +1804,29 @@ class MaterialsParams:
     battery_chemistry_file_names: dict[str, str] = field(default_factory=lambda: {
         "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub",
         "NMC_high": "battLiNMC_highNi",
+        # Packaging only -- see battery_chemistry_active_material_unknown.
+        "Na_ion": "Na_ion", "solid_state": "solid_state",
     })
+
+    # ⚠️ CHEMISTRIES WHOSE ACTIVE MATERIAL NOBODY HAS DESCRIBED.
+    #
+    # These two DO have a composition file, and it is real: the casing, the
+    # separator, the cables, the terminals, the enclosure, the frame, the
+    # thermal conductor and both current collectors, at the mass of the pack
+    # they are modelled on. What it does not have is the cathode, the anode and
+    # the electrolyte -- the cell itself -- because nobody has published one
+    # that survives scrutiny, and a plausible number borrowed from a lithium
+    # chemistry would be a claim nobody made.
+    #
+    # In their arrays the active materials are ZERO, and zero there means NOT
+    # DESCRIBED rather than none present. This list is what stops that zero
+    # being read as a fact: the cars carrying these chemistries are reported as
+    # a gap, at the same share as before they had any composition at all. What
+    # changed is that their steel, aluminium and copper now reach the totals.
+    # SAFE TO CHANGE: remove a name the day a real composition arrives for it,
+    # and not before.
+    battery_chemistry_active_material_unknown: tuple[str, ...] = (
+        "Na_ion", "solid_state")
 
     # ⚠️ HOW WRONG THE CHEMISTRY SHARES MIGHT BE, as a multiplier on each one.
     #

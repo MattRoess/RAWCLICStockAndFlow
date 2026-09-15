@@ -151,6 +151,7 @@ def main() -> dict:
     draws_dir = PROJECT_ROOT / "data" / "processed" / "battery_draws"
     scenarios = list(materials.battery_chemistry_scenarios)
     named = materials.battery_chemistry_file_names
+    active_unknown = set(materials.battery_chemistry_active_material_unknown)
     groups = materials.battery_chemistry_segment_groups
     lifetime = params.stock_flow.lifetime_by_drv["BEV"]
 
@@ -197,87 +198,91 @@ def main() -> dict:
             continue
         year_index = {int(y): i for i, y in enumerate(flow_years)}
 
-        accumulated = {
-            (scenario, chemistry, level): np.zeros(
-                (n_draws, len(years), len(composition.names(file_name, level))),
-                dtype=np.float32)
-            for scenario in scenarios for chemistry, file_name in named.items()
-            for level in LEVELS}
         count_mean, clamped_reported = {}, None
-        # The uncovered share is now a DISTRIBUTION, because the shares that
-        # make it are drawn. Accumulated as a vehicle-weighted numerator and
-        # denominator per draw, so the percentiles at the end are percentiles of
-        # a share and not a ratio of two percentiles.
+        # The uncovered share is a DISTRIBUTION, because the shares that make it
+        # are drawn. Accumulated as a vehicle-weighted numerator and denominator
+        # per draw, so the percentiles at the end are percentiles of a share and
+        # not a ratio of two percentiles.
         gap_top = {(scenario, group): np.zeros((n_draws, len(years)), dtype=np.float32)
                    for scenario in scenarios for group in set(groups.values())}
         gap_bottom = {group: np.zeros((n_draws, len(years)), dtype=np.float32)
                       for group in set(groups.values())}
 
-        for segment in segments:
-            vehicles = vehicles_by_segment.get(segment)
-            if vehicles is None:
-                continue
-            capacity, voltage = per_segment[segment]
-            group = groups[segment]
-            counts = np.stack([
-                np.asarray(vehicles[:, year_index[int(year)]], dtype=np.float32)
-                if int(year) in year_index else np.zeros(n_draws, dtype=np.float32)
-                for year in years], axis=1)
-            count_mean[segment] = counts.mean(axis=0)
+        # ONE LEVEL AT A TIME, and that is a memory decision rather than a
+        # modelling one. Five chemistries at two levels, 51 years and 200,000
+        # draws is 14 GB of accumulators live at once; one level at a time is
+        # half of that. The only work paid twice is the vintage weighting, which
+        # is one matmul per segment and takes seconds.
+        for level in LEVELS:
+            accumulated = {
+                (scenario, chemistry): np.zeros(
+                    (n_draws, len(years), len(composition.names(file_name, level))),
+                    dtype=np.float32)
+                for scenario in scenarios for chemistry, file_name in named.items()}
+            first_pass = level == LEVELS[0]
 
-            if flow != "inflow":
-                weights, clamped = vintage_weights(
-                    built_by_segment[segment], flow_years, years, vintages,
-                    lifetime.shape_k, lifetime.scale_lambda)
-                if clamped_reported is None:
-                    below = vintages.index(composition_floor)
-                    clamped_reported = (clamped,
-                                        weights[:, :, :below].sum(axis=2).mean(axis=0))
-            else:
-                weights = None
+            for segment in segments:
+                vehicles = vehicles_by_segment.get(segment)
+                if vehicles is None:
+                    continue
+                capacity, voltage = per_segment[segment]
+                group = groups[segment]
+                counts = np.stack([
+                    np.asarray(vehicles[:, year_index[int(year)]], dtype=np.float32)
+                    if int(year) in year_index else np.zeros(n_draws, dtype=np.float32)
+                    for year in years], axis=1)
+                if first_pass:
+                    count_mean[segment] = counts.mean(axis=0)
 
-            # THE SHARES ARE DRAWN, per group, once for the whole segment: the
-            # mix does not depend on the chemistry being accumulated or on the
-            # level, and every chemistry of the group has to be in hand at once
-            # because the renormalisation decides what gives way.
-            group_shares = {
-                scenario: chemistry_share_draws(params, scenario, group, vintages,
-                                                n_draws=n_draws, seed=404)
-                for scenario in scenarios}
-            # Started from zeros, not from nothing: under S1 every chemistry has
-            # a composition, the sum is over an empty set, and a bare sum()
-            # would hand back the integer 0 where an array is expected.
-            uncovered = {
-                scenario: sum((share for chemistry, share in group_shares[scenario].items()
-                               if chemistry not in named),
-                              np.zeros((n_draws, len(vintages)), dtype=np.float32))
-                for scenario in scenarios}
-            for scenario in scenarios:
-                # 482 MB of shares survive the segment; the chemistries with no
-                # composition are already summed into `uncovered` and are not
-                # needed again.
-                for chemistry in [c for c in group_shares[scenario] if c not in named]:
-                    del group_shares[scenario][chemistry]
-
-            # The share of THESE cars whose battery has no composition, weighted
-            # by how many of them there are. On a retirement flow it follows the
-            # same vintage weights as the material, because it is a property of
-            # the year the car was built.
-            for scenario in scenarios:
-                if flow == "inflow":
-                    here = uncovered[scenario][:, [vintage_position[y] for y in years]]
+                if flow != "inflow":
+                    weights, clamped = vintage_weights(
+                        built_by_segment[segment], flow_years, years, vintages,
+                        lifetime.shape_k, lifetime.scale_lambda)
+                    if clamped_reported is None:
+                        below = vintages.index(composition_floor)
+                        clamped_reported = (
+                            clamped, weights[:, :, :below].sum(axis=2).mean(axis=0))
                 else:
-                    here = np.einsum("dv,dtv->dt", uncovered[scenario], weights,
-                                     optimize=True)
-                gap_top[(scenario, group)] += counts * here
-            gap_bottom[group] += counts
-            del uncovered
+                    weights = None
 
-            for chemistry, file_name in named.items():
-                shares = {scenario: group_shares[scenario][chemistry]
-                          for scenario in scenarios}
+                # THE SHARES ARE DRAWN, per group, once for the whole segment:
+                # the mix does not depend on the chemistry being accumulated or
+                # on the level, and every chemistry of the group has to be in
+                # hand at once because the renormalisation decides what gives
+                # way.
+                group_shares = {
+                    scenario: chemistry_share_draws(params, scenario, group, vintages,
+                                                    n_draws=n_draws, seed=404)
+                    for scenario in scenarios}
 
-                for level in LEVELS:
+                if first_pass:
+                    # The share of THESE cars whose ACTIVE MATERIAL nobody has
+                    # described, weighted by how many of them there are. On a
+                    # retirement flow it follows the same vintage weights as the
+                    # material, because it is a property of the year the car was
+                    # built. Started from zeros and not from nothing: under S1
+                    # the sum is over an empty set, and a bare sum() would hand
+                    # back the integer 0 where an array is expected.
+                    uncovered = {
+                        scenario: sum(
+                            (share for chemistry, share in group_shares[scenario].items()
+                             if chemistry in active_unknown),
+                            np.zeros((n_draws, len(vintages)), dtype=np.float32))
+                        for scenario in scenarios}
+                    for scenario in scenarios:
+                        if flow == "inflow":
+                            here = uncovered[scenario][
+                                :, [vintage_position[y] for y in years]]
+                        else:
+                            here = np.einsum("dv,dtv->dt", uncovered[scenario],
+                                             weights, optimize=True)
+                        gap_top[(scenario, group)] += counts * here
+                    gap_bottom[group] += counts
+                    del uncovered
+
+                for chemistry, file_name in named.items():
+                    shares = {scenario: group_shares[scenario][chemistry]
+                              for scenario in scenarios}
                     # (n_draws, n_vintages, n_names) -- one pack per drawn car
                     # for every year it could have been built in.
                     per_car = np.stack([
@@ -291,7 +296,7 @@ def main() -> dict:
                     for year_position, year in enumerate(years):
                         count = counts[:, year_position] * 1e3  # millions, kg -> t
                         for scenario in scenarios:
-                            target = accumulated[(scenario, chemistry, level)]
+                            target = accumulated[(scenario, chemistry)]
                             if flow == "inflow":
                                 # Built this year: this year's mix and pack.
                                 built = vintage_position[year]
@@ -307,8 +312,37 @@ def main() -> dict:
                                 target[:, year_position, :] += np.einsum(
                                     "dv,dve->de", coefficient, per_car, optimize=True)
                     del per_car
-            del weights, group_shares
-            print(f"  {flow:<8} {segment:<3} done ({time.time()-started:5.0f}s)")
+                del weights, group_shares
+                print(f"  {flow:<9} {level:<9} {segment:<3} done "
+                      f"({time.time()-started:5.0f}s)")
+
+            for (scenario, chemistry), per_draw in accumulated.items():
+                names = composition.names(named[chemistry], level)
+                stem = chemistry if level == "element" else f"{chemistry}_components"
+                label = "element" if level == "element" else "component"
+                target = draws_dir / flow / scenario
+                target.mkdir(parents=True, exist_ok=True)
+                np.save(target / f"{stem}.npy", per_draw)
+                np.save(target / f"{stem}_names.npy", np.asarray(names, dtype="U64"))
+                np.save(draws_dir / "years.npy", np.asarray(years, dtype=int))
+
+                # Summary FROM the draws, so the two can never disagree.
+                mean = per_draw.mean(axis=0)
+                low, median, high = np.percentile(per_draw, [2.5, 50, 97.5], axis=0)
+                into = rows if level == "element" else component_rows
+                for year_position, year in enumerate(years):
+                    for name_position, name in enumerate(names):
+                        into.append({
+                            "flow_scenario": flow_scenario,
+                            "chemistry_scenario": scenario,
+                            "chemistry": chemistry, "flow": flow, "year": int(year),
+                            label: name,
+                            "mean_tonnes": float(mean[year_position, name_position]),
+                            "median_tonnes": float(median[year_position, name_position]),
+                            "p2.5": float(low[year_position, name_position]),
+                            "p97.5": float(high[year_position, name_position]),
+                        })
+            accumulated.clear()
 
         if clamped_reported is not None:
             before_grid, before_composition = clamped_reported
@@ -320,38 +354,17 @@ def main() -> dict:
                   + ", ".join(f"{year} {share:.1%}" for year, share
                               in zip(years, before_composition) if share > 0.001))
 
-        for (scenario, chemistry, level), per_draw in accumulated.items():
-            names = composition.names(named[chemistry], level)
-            stem = chemistry if level == "element" else f"{chemistry}_components"
-            label = "element" if level == "element" else "component"
-            target = draws_dir / flow / scenario
-            target.mkdir(parents=True, exist_ok=True)
-            np.save(target / f"{stem}.npy", per_draw)
-            np.save(target / f"{stem}_names.npy", np.asarray(names, dtype="U64"))
-            np.save(draws_dir / "years.npy", np.asarray(years, dtype=int))
-
-            # Summary FROM the draws, so the two can never disagree.
-            mean = per_draw.mean(axis=0)
-            low, median, high = np.percentile(per_draw, [2.5, 50, 97.5], axis=0)
-            into = rows if level == "element" else component_rows
-            for year_position, year in enumerate(years):
-                for name_position, name in enumerate(names):
-                    into.append({
-                        "flow_scenario": flow_scenario, "chemistry_scenario": scenario,
-                        "chemistry": chemistry, "flow": flow, "year": int(year),
-                        label: name,
-                        "mean_tonnes": float(mean[year_position, name_position]),
-                        "median_tonnes": float(median[year_position, name_position]),
-                        "p2.5": float(low[year_position, name_position]),
-                        "p97.5": float(high[year_position, name_position]),
-                    })
-        accumulated.clear()
-
-        # The share that has no composition, reported rather than dropped.
-        # SUMMED over the chemistries that lack one, not maxed: sodium-ion and
-        # solid-state are both missing in S3, and the hole they leave is the two
-        # together. On a retirement flow it is the share of the cars' BUILD
-        # years, carried forward by the same vintage weights as the material.
+        # The share whose ACTIVE MATERIAL nobody has described, reported rather
+        # than dropped. Sodium-ion and solid-state now carry their packaging --
+        # frame, enclosure, cables, collectors, at the mass of the pack they are
+        # modelled on -- so their steel, aluminium and copper reach the totals.
+        # Their cathode, anode and electrolyte are zero in those arrays, and a
+        # zero there means NOT DESCRIBED. This is what keeps that readable.
+        #
+        # SUMMED over the chemistries that lack one, not maxed: both are missing
+        # under S3 and the hole they leave is the two together. On a retirement
+        # flow it is the share of the cars' BUILD years, carried forward by the
+        # same vintage weights as the material.
         #
         # It is now a BAND, because the shares behind it are drawn. The
         # percentiles are taken of the share itself, per draw, never of a
@@ -421,8 +434,8 @@ CHEMISTRY_COLORS = {
 }
 CHEMISTRY_LABELS = {
     "LFP": "LFP", "LMFP": "LMFP", "NMC_high": "NMC high-Ni",
-    "Na_ion": "sodium-ion  (no composition)",
-    "solid_state": "solid-state  (no composition)",
+    "Na_ion": "sodium-ion  (packaging only)",
+    "solid_state": "solid-state  (packaging only)",
 }
 # Short names for the twelve components, and the three the element level cannot
 # see at all -- the casing and the separator have no element rows, and the
@@ -453,14 +466,16 @@ GROUP_TITLES = {"small": "small  (A, B, JA, JB)",
                 "medium": "medium  (C, D, JC, JD)",
                 "large": "large  (E, F, JE, JF)"}
 
-OPEN_ITEM = ("Open item, not an oversight: no composition for sodium-ion or "
+OPEN_ITEM = ("Open item, not an oversight: no CELL composition for sodium-ion or "
              "solid-state has been published that survives scrutiny, and inventing "
-             "one would be worse than the hole.\nSee "
+             "one would be worse than the hole.\nTheir packaging is carried; their "
+             "cathode, anode and electrolyte are not. See "
              "documentation/DESIGN_chemistries_without_composition.md.")
 
-GAP_NOTE = ("Sodium-ion and solid-state carry no composition: under S2 and S3 their "
-            "material leaves the figure.\nThe dotted line, right axis, is the share of "
-            "cars whose battery is not accounted for — read each curve against its own.")
+GAP_NOTE = ("Sodium-ion and solid-state carry their packaging but no active material: "
+            "under S2 and S3 their cathode, anode and electrolyte leave the figure.\n"
+            "The dotted line, right axis, is the share of cars whose cell is not "
+            "described — read each curve against its own.")
 
 
 def _style(ax) -> None:
@@ -549,7 +564,7 @@ def figure_scenarios(params) -> Path:
     scenarios = list(materials.battery_chemistry_scenarios)
     groups = ["small", "medium", "large"]
     years = np.arange(2025, 2071)
-    named = materials.battery_chemistry_file_names
+    active_unknown = set(materials.battery_chemistry_active_material_unknown)
 
     fig, axes = plt.subplots(len(scenarios), len(groups), figsize=(13.5, 9.5),
                              sharex=True, sharey=True)
@@ -581,7 +596,7 @@ def figure_scenarios(params) -> Path:
                     ax.plot(years, edge, color="white", linewidth=0.9,
                             linestyle=(0, (3, 2)), alpha=0.95)
             # the part of the stack with no composition, marked in place
-            uncovered = stack[[i for i, c in enumerate(order) if c not in named]]
+            uncovered = stack[[i for i, c in enumerate(order) if c in active_unknown]]
             if len(uncovered):
                 ax.fill_between(years, 100 - uncovered.sum(axis=0), 100,
                                 facecolor="none", edgecolor="white",
@@ -603,7 +618,7 @@ def figure_scenarios(params) -> Path:
     handles = [Patch(facecolor=CHEMISTRY_COLORS[c], label=CHEMISTRY_LABELS[c])
                for c in ("LFP", "LMFP", "NMC_high", "Na_ion", "solid_state")]
     handles.append(Patch(facecolor="white", edgecolor="#999999", hatch="///",
-                         label="no composition — reported as a gap"))
+                         label="active material not described — reported as a gap"))
     handles.append(Line2D([], [], color="#999999", linewidth=0.9,
                           linestyle=(0, (3, 2)), label="95% range of the boundary"))
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
@@ -650,7 +665,7 @@ def figure_element_comparison(gaps: pd.DataFrame,
             twin.tick_params(labelsize=8, colors="#888888")
             twin.spines["top"].set_visible(False)
             if column == len(elements) - 1:
-                twin.set_ylabel("cars without composition  [%]", fontsize=8.5,
+                twin.set_ylabel("cell not described  [%]", fontsize=8.5,
                                 color="#888888")
             else:
                 twin.set_yticklabels([])
@@ -667,7 +682,7 @@ def figure_element_comparison(gaps: pd.DataFrame,
     handles += [Line2D([], [], color="#888888", linewidth=2.1, alpha=0.3,
                        label="95% band of the draws"),
                 Line2D([], [], color="#888888", linewidth=1.0, linestyle=":",
-                       label="share of cars without composition (right axis)")]
+                       label="share of cars whose cell is not described (right axis)")]
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=9.5)
     fig.suptitle("Battery material demand and return under the three chemistry scenarios",
                  fontsize=14, fontweight="bold")
@@ -715,9 +730,9 @@ def figure_chemistry_contribution(flows_frame: pd.DataFrame, element: str = "Li"
     fig.suptitle(f"Where the {element} demand sits, and what the scenarios take out of view",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.915,
-             "Only the three chemistries with a composition are shown. The falling "
-             "totals in S2 and S3 are cars moving to sodium-ion and solid-state, "
-             "not a falling demand.",
+             "Only the three chemistries with a described cell are shown — sodium-ion "
+             "and solid-state carry no lithium that anyone has counted. The falling "
+             "totals in S2 and S3 are cars moving to them, not a falling demand.",
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.02, OPEN_ITEM, ha="center", fontsize=8, color="#888888")
     fig.tight_layout(rect=[0, 0.16, 1, 0.90])
@@ -741,7 +756,7 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
                         color=color, alpha=0.16, linewidth=0)
     _style(ax)
     ax.set_title("whole fleet, weighted by cars sold", fontsize=11, pad=8)
-    ax.set_ylabel("cars whose battery has no composition  [%]", fontsize=10)
+    ax.set_ylabel("cars whose cell is not described  [%]", fontsize=10)
     ax.set_xlabel("year", fontsize=9.5)
     ax.set_ylim(0, 100)
     ax.legend(frameon=False, fontsize=9.5, loc="upper left")
@@ -761,12 +776,12 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
                               linewidth=1.6, label=GROUP_TITLES[g]) for g in groups],
               frameon=False, fontsize=9, loc="upper left")
 
-    fig.suptitle("The hole in the picture: share of cars with no battery composition",
+    fig.suptitle("The hole in the picture: share of cars whose cell is not described",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.915,
-             "Sodium-ion and solid-state summed, median with the 95% band. S1 stays at "
-             "zero because nothing new arrives in it — and that zero is exact, not a "
-             "narrow band, because there is nothing there to be uncertain about.",
+             "Sodium-ion and solid-state summed, median with the 95% band. Their "
+             "packaging IS counted; this is the cathode, anode and electrolyte that "
+             "is not. S1 stays at an exact zero, not a narrow band.",
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.02, OPEN_ITEM, ha="center", fontsize=8, color="#888888")
     fig.tight_layout(rect=[0, 0.10, 1, 0.90])
@@ -881,9 +896,9 @@ def figure_all_elements(flow: str = "inflow") -> Path:
              "cathode and is recovered by nobody.",
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.022,
-             "S2 and S3 fall because sodium-ion and solid-state carry no "
-             "composition and their cars leave the figure, not because the world "
-             "needs less — see the uncovered-share figure for how much is missing.",
+             "S2 and S3 fall because sodium-ion and solid-state carry no described "
+             "cell, so their cathode and anode leave the figure — not because the "
+             "world needs less. Their packaging is in these totals.",
              ha="center", fontsize=8.5, color="#555555")
     fig.text(0.5, 0.004, OPEN_ITEM.replace(chr(10), " "), ha="center", fontsize=8,
              color="#888888")

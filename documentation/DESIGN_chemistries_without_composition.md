@@ -1,16 +1,22 @@
-# Sodium-ion and solid-state carry no composition — and that stays open
+# Sodium-ion and solid-state have no described CELL — and that stays open
 
-Recorded 2026-09-15, deliberately and not as an oversight.
+Recorded 2026-09-15, deliberately and not as an oversight. **Updated the same
+day: the packaging half of this hole is closed.**
 
-Stage 04_04 reports the share of cars whose battery it cannot describe. Under S3
-that is most of the market. This document says exactly how big the hole is, why
-it is not filled, what was rejected, and what would close it.
+Stage 04_04 reports the share of cars whose CELL it cannot describe — their
+cathode, anode and electrolyte. Under S3 that is most of the market. Their
+packaging it does describe, and since 2026-09-15 it carries it. This document
+says how big the remaining hole is, why it is not filled, what was rejected, and
+what would close it.
 
 ---
 
 ## 1. How big it is
 
-Share of cars with no composition, median with the 95 % band, 2070. Inflow is
+Share of cars whose cell is not described, median with the 95 % band, 2070.
+These are the numbers from before the packaging was carried; the SHARE is
+unchanged by that — the same cars are still counted — but the run that produced
+them is superseded. Inflow is
 new cars; the collected flow lags it because the cars being scrapped were built
 before these chemistries arrived.
 
@@ -33,9 +39,10 @@ of the hole is itself uncertain.
 
 ---
 
-## 2. The gap in the MODEL is bigger than the gap in the DATA
+## 2. The packaging half — CLOSED 2026-09-15
 
-This is the part worth acting on.
+This used to say the gap in the model was bigger than the gap in the data. It
+was, and it is not any more.
 
 The battery project does model these two chemistries. What it leaves empty is the
 **active material**, not the whole pack. At 60 kWh, 400 V, 2030:
@@ -52,26 +59,31 @@ within 3 kg of LFP's own structure — scaled by cell mass and carrying a drawn
 packaging-trust factor (0.9/1.0/1.3 for sodium, 0.7/0.8/1.1 for solid-state)
 that says how much that scaling is believed.
 
-**04_04 cannot read any of it.** The battery project writes per-draw `.npy` mass
-arrays for the seven lithium chemistries — twenty arrays each — and **none for
-these two**. `src/battery_composition.py` raises rather than hand back zeros, so
-04_04 drops the whole car, structure included.
+**04_04 could not read any of it.** The battery project wrote per-draw `.npy`
+mass arrays for the seven lithium chemistries and none for these two, so
+`src/battery_composition.py` raised and 04_04 dropped the whole car, structure
+included. The model reported 69 % of S3's new cars as entirely unknown while
+roughly half of each of those cars, by mass, sat modelled in a CSV it could not
+read.
 
-So the model reports 69 % of S3's new cars as entirely unknown when roughly half
-of each of those cars, by mass, is modelled and sitting in a CSV. Their iron,
-aluminium and copper are missing from every total in this stage for no reason
-other than the export.
+**Fixed.** `05_composition.py` now writes both levels for both chemistries
+through the same pack rules as everything else, guarded by
+`check_unknown_draws_match_workbook()`, which compares them against the CSV at
+2020 — where the improvement factor is exactly 1 in every draw — correcting for
+`build_unknown_rows` writing the packaging trust's MODE into the central column
+while the draws carry the factor itself. Verified at all five anchors and both
+voltages.
 
-**What would close this half:** `05_composition.py` writes
-`<chemistry>_<capacity>kWh_<voltage>V_mass_draws.npy` and its component twin for
-Na_ion and solid_state as well. 04_04 then carries their structure and reports
-only the **active materials** as the gap. That is a change in the battery
-project, not here, and it needs the draws to go through the same pack rules and
-the same `check_draws_match_workbook()` guard as the rest.
+In those arrays the **active materials are zero, and zero means NOT DESCRIBED**.
+`materials.battery_chemistry_active_material_unknown` is what stops that zero
+being read as a fact: the same cars are still reported as a gap, at the same
+share. What changed is that their iron, aluminium and copper now reach the
+totals, so the S2 and S3 curves fall by the cell they are missing rather than by
+the whole car.
 
 ---
 
-## 3. Why the active materials are not filled
+## 3. Why the active materials are still not filled
 
 Because nobody has published a composition for either that survives scrutiny,
 and inventing one would be worse than the hole.
@@ -96,8 +108,11 @@ otherwise be misread.
 
 ## 4. What this means for reading the results
 
-- Element flows under S2 and S3 are **lower bounds on demand**, not forecasts.
-  The curves fall because cars leave the picture.
+- **Cell** materials under S2 and S3 — lithium, nickel, cobalt, manganese,
+  phosphorus, graphite — are **lower bounds on demand**, not forecasts. The
+  curves fall because the cell of those cars is not described.
+- **Structural** materials — iron, aluminium, copper — are complete for every
+  car in every scenario, since 2026-09-15. Read them as totals.
 - The **covered part is not damaged** by the gap. LFP, LMFP and NMC flows are
   complete for the cars that carry them; the ratios built on them — secondary
   supply, collected over inflow — are sound within that part.
@@ -108,12 +123,13 @@ otherwise be misread.
 
 ---
 
-## 5. What would close it
+## 5. What would close what is left
 
-Data, not modelling. A composition for sodium-ion and for bipolar solid-state at
-the workbook's own levels — component, material, element — from a source that can
-be cited. Until that exists, the honest thing is the gap, drawn next to every
-curve it affects.
+Data, not modelling. A CELL composition for sodium-ion and for bipolar
+solid-state — cathode, anode, electrolyte — from a source that can be cited.
+Until that exists, the honest thing is the gap, drawn next to every curve it
+affects.
 
-Half of it, the structure, could be closed now by exporting draws that already
-exist. See §2.
+The day one arrives: fill it in the battery project, take the name out of
+`materials.battery_chemistry_active_material_unknown`, and the gap closes itself
+without another line of code here.

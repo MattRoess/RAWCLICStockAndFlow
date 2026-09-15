@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **157** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **158** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 46 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 47 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1111,7 +1111,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**46 parameters.**
+**47 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1135,7 +1135,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `battery_chemistry_anchor_years` | `(2025, 2035, 2050, 2070)` |
 | `battery_chemistry_segment_groups` | `{ "A": "small", "B": "small", "JA": "small", "JB": "small", "C": "medium", "D": "medium...` |
 | `battery_chemistry_scenarios` | `default_factory=lambda: { "S1": { "small": {"LFP": (70, 65, 60, 60), "LMFP": (18, 25, 3...` |
-| `battery_chemistry_file_names` | `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi", }` |
+| `battery_chemistry_file_names` | `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi",...` |
+| `battery_chemistry_active_material_unknown` | `( "Na_ion", "solid_state")` |
 | `battery_chemistry_share_spread` | `{ "min": 0.70, "mode": 1.00, "max": 1.30, }` |
 | `battery_chemistry_share_spread_years` | `(2020, 2070)` |
 | `average_battery_capacity_kwh` | `60.0` |
@@ -1430,11 +1431,34 @@ Default: `default_factory=lambda: { "S1": { "small": {"LFP": (70, 65, 60, 60), "
 
 ### `battery_chemistry_file_names`
 
-Default: `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi", }`
+Default: `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi",...`
 
 The scenario names above mapped onto the composition files' own chemistry
 names. A name with no entry has no composition and is reported as a gap.
 SAFE TO CHANGE: only to match the composition files.
+
+
+### `battery_chemistry_active_material_unknown`
+
+Default: `( "Na_ion", "solid_state")`
+
+⚠️ CHEMISTRIES WHOSE ACTIVE MATERIAL NOBODY HAS DESCRIBED.
+
+These two DO have a composition file, and it is real: the casing, the
+separator, the cables, the terminals, the enclosure, the frame, the
+thermal conductor and both current collectors, at the mass of the pack
+they are modelled on. What it does not have is the cathode, the anode and
+the electrolyte -- the cell itself -- because nobody has published one
+that survives scrutiny, and a plausible number borrowed from a lithium
+chemistry would be a claim nobody made.
+
+In their arrays the active materials are ZERO, and zero there means NOT
+DESCRIBED rather than none present. This list is what stops that zero
+being read as a fact: the cars carrying these chemistries are reported as
+a gap, at the same share as before they had any composition at all. What
+changed is that their steel, aluminium and copper now reach the totals.
+SAFE TO CHANGE: remove a name the day a real composition arrives for it,
+and not before.
 
 
 ### `battery_chemistry_share_spread`
