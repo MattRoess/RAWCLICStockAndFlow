@@ -1,12 +1,65 @@
-# Handover — updated 2026-08-31
+# Handover — updated 2026-09-15
 
 Where the work stands, what is safe, what is not, and what to do next.
+
+The newest work is stage **04_04**, the battery material flow, built on 14–15
+September on top of battery-side work from the 9th. It has its own document —
+**`BATTERY_MATERIAL_FLOWS.md`** — which is the one to read before touching it.
+This file records what changed around it.
 
 ---
 
 ## 1. State of the repositories
 
-### RAWCLICStockAndFlow
+### Since 2026-09-02 — stage 04_04, and what it dragged in with it
+
+04_04 was rewritten from nothing usable into a per-draw battery material flow:
+three flows, three chemistry scenarios, three chemistries, two levels of detail,
+every two years from 2020 to 2070, at 200,000 draws. `RAWCLICVehicleBattery`
+supplies the composition and was changed to match.
+
+| file | change |
+|---|---|
+| `code/04_04_batteries.py` | the stage, and the nine figures it draws at the end of every run |
+| `code/04_04_figures.py` | redraws those figures alone from the saved draws, ~30 s |
+| `src/battery_capacity.py` | **new** — the pack a segment carries, as a five-level discrete mixture drawn per car and held for its life |
+| `src/battery_voltage.py` | **new** — 400 or 800 V, drawn per car, never blended |
+| `src/battery_composition.py` | **new** — element and component masses at a drawn capacity, read from the battery project |
+| `src/battery_chemistry.py` | **new** — the scenario shares, and the share with no composition behind it |
+| `src/battery_vintage.py` | **new** — where the cars leaving the fleet were built |
+| `src/params_schema.py` | the battery block: capacity levels, voltage shares, three chemistry scenarios, the composition directory; `battery_size_map` and `battery_composition_parameter_code` deleted |
+| `src/artifacts.py` | registers `battery_material_flows`, `battery_component_flows`, `battery_chemistry_gaps` |
+| `RAWCLICVehicleBattery/05_composition.py` | writes the component level beside the elements, and `check_draws_match_workbook()` — which its own docstring had claimed existed since 10 September and did not |
+| `RAWCLICVehicleBattery/06_segment_capacity.py` | **deleted**, with the eleven parameters only it read |
+
+**Three defects were found by building it, each of which produced numbers that
+looked fine:**
+
+1. **The outflow carried the scrap year's chemistry and pack.** A car scrapped
+   in 2050 was built around 2036 and carries 2036's mix. Giving it 2050's meant
+   the mix multiplied inflow and outflow by the same factor, cancelled out of
+   every ratio between them, and **all three scenarios produced one identical
+   curve**. `src/battery_vintage.py` now spreads each year's outflow back over
+   the build years that could have produced it, weighted by the draw's own
+   inflow history and the Weibull scrapping density stage 02 already uses.
+2. **The elements do not add up to the pack.** The cell casing and the separator
+   have no element rows and the electrolyte's cover 1% of its mass, so the
+   element arrays miss **7–11% of every pack** — the plastics, the separator and
+   the organic electrolyte, which is the part a recycler has to dispose of
+   rather than sell. Both levels are now carried, in two frames that are
+   deliberately not stacked into one.
+3. **The mass-improvement factor is written every five years.** On the two-year
+   grid, 2022, 2024, 2026 … silently had none — about 20% too much mass in every
+   second year by 2070. `battery_composition.py` now interpolates it **per
+   draw**.
+
+Two smaller ones: the gap metric took the **maximum** over the chemistries
+without a composition rather than the sum, understating S3's large segments as
+70% against a measured 75%; and the outflow was being reported as secondary
+supply, when only the **collected** part reaches a recycler — 88% of BEVs, with
+2% exported and 10% never traced.
+
+### Earlier work, to 2026-09-02
 
 | file | change | tested |
 |---|---|---|
@@ -58,17 +111,30 @@ Work continued on branch `carcomposition-draw-export` (the earlier work is on
 ## 2. To run the pipeline
 
 ```
-code/00_parameters.py          FIRST — there are new settings
+code/00_parameters.py          FIRST — always, and especially after a schema edit
 code/02_stockdriven.py         ~68 s at 200,000 draws, 6.6 GB peak
 code/03_01_flowdriven.py
 code/03_02_adjustedflows.py    ~40 min, plus ~13 min for the BEV export
 code/04_01_carcomposition.py
 code/04_02_BEVelectronics.py   needs 03_02's export and the electronics draws
+code/04_03_tractionmotors.py
+code/04_04_batteries.py        ~12 min, writes 13 GB of draws and nine figures
+code/04_04_figures.py          ~30 s, redraws those figures without the stage
 ```
+
+**04_04 needs two things that are not in this repository.** 03_02's per-draw BEV
+export (`data/processed/bev_draws/BAU/`), and the composition arrays written by
+`RAWCLICVehicleBattery/05_composition.py`, found through
+`materials.battery_composition_dir`. Both sides must run at the same number of
+draws or 04_04 raises rather than pairing draw *i* with a different world.
 
 Run `00_parameters.py` first. Old saved parameter files do still load — the
 `default_factory` trap that would have broken them was found and fixed — but
-regenerating is cleaner.
+regenerating is cleaner, and on 2026-09-14 it was not: `00_params.pkl` was
+written at 12:07 against a schema last edited at 13:16, and the 04_04 run of
+15:28 read the older object. Checked field by field afterwards, the only
+difference was a deleted parameter nothing reads, so those results stand. **That
+was luck, not process.**
 
 ---
 
@@ -85,6 +151,24 @@ regenerating is cleaner.
 - **Segment split in 04_02.** Reproduces the published AB distribution to **0.007%**
   at 200,000 draws.
 - **04_01 and 04_02 figures.** Rendered and inspected.
+- **04_04's summary table against its own draws.** 108 spot checks across every
+  flow, scenario and chemistry: worst relative difference **1.7e-5**, which is
+  float32 storage and nothing else. The table is computed from the draws, so the
+  two cannot disagree by construction — this measures that they do not.
+- **The component arrays against the consolidated CSVs.** 0.0000%, checked in
+  the battery project on every anchor by `check_draws_match_workbook()`, and
+  independently here afterwards. The guard was tested by breaking each level in
+  turn: it caught 2% at the component level and 1% at the element level.
+- **The elements against the components.** They miss 9.0% of the pack in 2020
+  rising to 10.1% in 2070, against 7.2–10.9% measured per anchor in the battery
+  project. Consistent.
+- **Collected against outflow.** 87.9% in 2070, identical for every element to
+  three decimals — the collection share is drawn on vehicles, not on materials.
+  That is why there is no all-elements figure for the outflow: it would be the
+  collected one times a constant.
+- **04_04's nine figures.** Rendered and inspected, several of them more than
+  once; two were redrawn because looking at them showed the argument was wrong,
+  not the code.
 
 Draw counts as actually run, from the output files themselves:
 
@@ -95,6 +179,9 @@ Draw counts as actually run, from the output files themselves:
 | `mc_composition` (electronics) | 2026-08-31 14:56 | 200,000 |
 | `ElectricMotorMC` / `ElectricMotorElementMC` | 2026-08-31 12:43 / 14:09 | 200,000 |
 | 04_02 | 2026-08-31 15:43 | **200,000** |
+| 03_02 + BEV export (re-run) | 2026-09-14 12:24–12:25 | 200,000 |
+| 04_04 | 2026-09-14 15:28 | **200,000** |
+| `05_composition` (battery) | 2026-09-14 14:51 | 200,000 |
 
 04_02 pairs draw *i* with draw *i* across independent samples and discards the
 surplus rather than resampling, so its run size is the SMALLEST of its inputs. It
@@ -312,8 +399,12 @@ that one.
   `powerElectronics`, `actuators`, `controllers`, `cableLike`. It is a DISPLAY
   preference, inert at the current settings (`top_n` is None), and it names materials
   the composition data does not contain. It is not a second electronics account.
-- `KG_PER_TONNE` in `04_01_carcomposition.py` is still there and still unused
-  (checked 31 Aug).
+- `KG_PER_TONNE` in `04_01_carcomposition.py` — **DELETED 2026-09-15**, along
+  with `battery_composition_parameter_code` (no reader but its own validation,
+  and its value `"e-m"` is not one of the codes the battery workbook carries),
+  an unused `gaps` argument and a label map that mapped every key to itself.
+  `Params().validate()` now returns nothing at all, which is what makes a real
+  complaint visible.
 - Two functions vanished from `04_01` on 2026-07-09 (`plot_material_mass_by_year`,
   `quantify_and_aggregate`). Successors appear to exist; not confirmed.
 - **`data/processed/intermediate/` is now 724 MB**, and `find` reports **zero**
@@ -321,7 +412,36 @@ that one.
   of accidental copies are gone. `data/processed` as a whole is 3.6 GB.
 - Scenario-comparison figures need two or more entries in `scenarios_to_run`;
   it is currently `("BAU",)`.
-- `materials_mc_n_draws` is now **50,000**, down from 200,000.
+- `materials_mc_n_draws` is **200,000** (this entry said 50,000 until
+  2026-09-15; it was wrong).
+- **The parameter count belongs in one place.** `PARAMETER_REFERENCE.md` is
+  generated and says **155**; this file used to say 145 and `README.md` says 140,
+  and `00_parameters.py` prints 536 because it counts every dictionary entry.
+  Do not repeat the number — point at the generated file.
+- **`RUNNING.md` still says 04_03 and 04_04 are "not part of this chain".**
+  True when it was written, wrong now: 04_04 consumes 03_02's BEV export and the
+  battery project's arrays, takes 12 minutes and writes 13 GB.
+
+### 4.3 OPEN — what 04_04 cannot yet say
+
+- **Sodium-ion and solid-state have no composition at all.** Their share is
+  reported as an explicit gap rather than dropped, but under S3 that gap is 69%
+  of new cars by 2070. Nothing in this model knows what those cars are made of.
+- **The material level is empty of information.** The battery workbook's `m-c`
+  rows carry a mass but no material name, and only for three components — which
+  is why the COMPONENT level was built instead. A real material breakdown needs
+  the workbook to supply one.
+- **The composition is clamped before 2020**, because that is where the battery
+  project's improvement factors start. It touches 100% of the 2020 outflow, 40%
+  of 2030, 8% of 2036 and under 1% after 2042. The pack size is read at the true
+  build year, so only the composition is clamped.
+- **The vintage weights use the central lifetime, not the drawn one.** 03_02
+  reports a year's outflow as one number rather than a matrix by build year, so
+  the mixture is reconstructed. The weights therefore carry less spread than the
+  flows they weight. Fixing it properly means exporting a cohort-resolved
+  outflow from 03_02.
+- The figure loaders in 04_04 raise `SystemExit` where the rest of the codebase
+  raises a typed error. Cosmetic, but inconsistent.
 
 ---
 
@@ -349,6 +469,14 @@ Concretely, what that has meant in practice:
    that it makes the band slightly narrow rather than wide.
 6. **Verify against the real data, not against reasoning.** Every claim in these
    documents has a measured number behind it.
+7. **Persist the draws, not the statistics.** A ratio of two percentiles is not
+   the percentile of a ratio. 04_04 keeps 13 GB of per-draw arrays for exactly
+   this reason: secondary supply is collected over inflow, formed draw by draw,
+   and a mean with two percentiles cannot answer it.
+8. **A discrete state is drawn, never blended.** A pack is 400 V or 800 V and a
+   segment offers a handful of pack sizes, not a continuum. Share-weighting a
+   bimodal mixture collapses it onto its own mean and destroys the band — which
+   is the failure this rule exists to prevent, not a hypothetical one.
 
 ---
 
@@ -366,6 +494,16 @@ Written down because it was learned the hard way in this session.
 - **Render figures and look at them.** An audit that greps for `set_ylabel` passes a
   chart whose unit label is rotated 90° and clipped off the page. That happened.
 - **Keep answers short.** State the finding, the evidence, the recommendation.
+- **A file of its own is a waiting room, not a home.** Cut code may sit in its
+  own runnable file while a decision is open. When the decision is made, the
+  file goes — `06_segment_capacity.py` sat there for four days and was deleted
+  on 2026-09-14, because by then the question it answered was answered better
+  elsewhere. Leaving it was not neutral: it was runnable and wrote plausible
+  files with two defects stated in its own docstring.
+- **When a docstring claims a check exists, check that it exists.**
+  `apply_pack_rules_to_draws` said `check_draws_match_workbook()` guarded it on
+  every run. That function did not exist for four days. It does now, and it was
+  tested by breaking the thing it guards.
 
 ---
 
@@ -378,7 +516,7 @@ now Markdown, one of them generated, and moved to `superseded/`.
 |---|---|
 | `README.md` | index — start here |
 | `RUNNING.md` | how to run everything, what it costs, what catches people out |
-| `PARAMETER_REFERENCE.md` | all **145** parameters, **generated** from `src/params_schema.py` |
+| `PARAMETER_REFERENCE.md` | every parameter, **generated** from `src/params_schema.py`. It states its own count; do not copy that number anywhere else |
 | `MODEL_DESCRIPTION.md` | converted from the `.docx`, plus section 7 for everything since 13 July |
 | `UNCERTAINTY_MAP.md` | where uncertainty enters, travels and stops |
 | `DESIGN_inflow_uncertainty_propagation.md` | the propagation design and two rejected alternatives |
@@ -386,6 +524,9 @@ now Markdown, one of them generated, and moved to `superseded/`.
 | `DESIGN_hev_carve_from_liquids.md` | why HEV is carved out of Liquids (§4.1c) |
 | `DESIGN_element_resolution.md` | how 04_02 resolves elements, and the two defects found doing it (§4.2, §8) |
 | `DESIGN_inflow_parent_split.md` | which stage-02 parent each fine drivetrain draws its uncertainty from |
+| `BATTERY_MATERIAL_FLOWS.md` | **stage 04_04** — the three scenarios, the two levels, the vintage rule, and what the figures do and do not say. Read this one first for anything battery |
+| `DESIGN_bev_capacity_for_04_04.md` | why the pack a segment carries is a drawn five-level mixture and not a map |
+| `DESIGN_discrete_vehicle_states.md` | why voltage and pack size are drawn per car and never share-weighted |
 
 Regenerate the parameter reference after any parameter change:
 
@@ -421,8 +562,11 @@ is what `resolve_elements` now does and it is the pattern to copy.
 The distinction that matters: this applies to **name lists** (which elements, which
 materials). It does **not** apply to **structural** checks — a missing column, a
 missing draws file, a domain absent from the series list. Those stay fatal, and
-several of them are (`load_element_draws`, `materials.py:200`, `04_04:136`,
-`04_03:207`). A shorter list is a legitimate input; a broken file is not.
+several of them are (`load_element_draws`, `materials.py`, `04_03`, and in
+`04_04` both `src/battery_composition.py`'s `CompositionError` and the "no draws
+in this directory" check). A shorter list is a legitimate input; a broken file is
+not. Line numbers are deliberately not quoted here — the ones this section used
+to carry pointed into a file that has since been rewritten twice.
 
 ### What the survey found
 
