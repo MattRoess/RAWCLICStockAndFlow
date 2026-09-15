@@ -47,7 +47,15 @@ share is reported as an explicit gap instead of being dropped, because a total
 that quietly fell would read as falling demand rather than as a hole in the data.
 
 So S2 and S3 curves that sink are mostly cars leaving the picture. Every
-comparison figure carries the uncovered share next to the curves for that reason.
+comparison figure carries the uncovered share next to the curves for that reason,
+and says on its face that this is an open item rather than an oversight.
+
+**It is left open deliberately, and half of it need not be.** The battery project
+models the packaging and structure of both chemistries — 209.5 kg of a 60 kWh
+sodium pack, within 3 kg of LFP's own structure — and leaves only the active
+material empty. It exports no per-draw arrays for them, so this stage drops the
+whole car rather than carrying its steel, aluminium and copper. Full account:
+[DESIGN_chemistries_without_composition.md](DESIGN_chemistries_without_composition.md).
 
 ![uncovered share](../data/processed/figures/04_04_4_uncovered_share.png)
 
@@ -215,6 +223,7 @@ away.
 | `src/battery_composition.py` | masses at a drawn capacity, from the battery project |
 | `src/battery_chemistry.py` | scenario shares and the uncovered share |
 | `src/battery_vintage.py` | where the scrapped cars were built |
+| `DESIGN_chemistries_without_composition.md` | the gap, why it stays open, and how to halve it |
 
 Figures and draws are written under `data/`, which is not tracked in git — run the
 stage to produce them.

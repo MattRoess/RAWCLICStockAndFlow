@@ -5,7 +5,7 @@ Start here.
 | I want to… | read |
 |---|---|
 | run the model | **[RUNNING.md](RUNNING.md)** |
-| change a parameter | **[PARAMETER_REFERENCE.md](PARAMETER_REFERENCE.md)** — all 140, generated from the code |
+| change a parameter | **[PARAMETER_REFERENCE.md](PARAMETER_REFERENCE.md)** — generated from the code, and it states its own count |
 | understand how the model works | **[MODEL_DESCRIPTION.md](MODEL_DESCRIPTION.md)** |
 | know whether a band can be trusted | **[UNCERTAINTY_MAP.md](UNCERTAINTY_MAP.md)** |
 | pick up where the last session stopped | **[HANDOVER.md](HANDOVER.md)** |
@@ -22,6 +22,7 @@ Design records, for decisions that need their reasoning kept:
 - [DESIGN_collected_flow_definition.md](DESIGN_collected_flow_definition.md)
   — what "collected" means, the four implementations that disagreed, and the
   invariant now asserted so the same class of defect fails loudly.
+- [DESIGN_chemistries_without_composition.md](DESIGN_chemistries_without_composition.md)
 - [DESIGN_element_resolution.md](DESIGN_element_resolution.md)
   — how 04_02 resolves elements across the four domains, and the two defects that
   had to be fixed to make it correct (motor denominator, sensor mode-vs-mean).

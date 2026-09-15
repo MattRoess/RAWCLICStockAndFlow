@@ -453,6 +453,11 @@ GROUP_TITLES = {"small": "small  (A, B, JA, JB)",
                 "medium": "medium  (C, D, JC, JD)",
                 "large": "large  (E, F, JE, JF)"}
 
+OPEN_ITEM = ("Open item, not an oversight: no composition for sodium-ion or "
+             "solid-state has been published that survives scrutiny, and inventing "
+             "one would be worse than the hole.\nSee "
+             "documentation/DESIGN_chemistries_without_composition.md.")
+
 GAP_NOTE = ("Sodium-ion and solid-state carry no composition: under S2 and S3 their "
             "material leaves the figure.\nThe dotted line, right axis, is the share of "
             "cars whose battery is not accounted for — read each curve against its own.")
@@ -668,8 +673,9 @@ def figure_element_comparison(gaps: pd.DataFrame,
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.925, "median of 200,000 draws, 95% band shaded",
              ha="center", fontsize=9.5, color="#555555")
-    fig.text(0.5, 0.085, GAP_NOTE, ha="center", fontsize=8.5, color="#555555")
-    fig.tight_layout(rect=[0, 0.155, 1, 0.92])
+    fig.text(0.5, 0.095, GAP_NOTE, ha="center", fontsize=8.5, color="#555555")
+    fig.text(0.5, 0.055, OPEN_ITEM, ha="center", fontsize=8, color="#888888")
+    fig.tight_layout(rect=[0, 0.20, 1, 0.92])
     return _save(fig, "04_04_2_scenario_comparison.png")
 
 
@@ -713,7 +719,8 @@ def figure_chemistry_contribution(flows_frame: pd.DataFrame, element: str = "Li"
              "totals in S2 and S3 are cars moving to sodium-ion and solid-state, "
              "not a falling demand.",
              ha="center", fontsize=9, color="#555555")
-    fig.tight_layout(rect=[0, 0.07, 1, 0.90])
+    fig.text(0.5, 0.02, OPEN_ITEM, ha="center", fontsize=8, color="#888888")
+    fig.tight_layout(rect=[0, 0.16, 1, 0.90])
     return _save(fig, "04_04_3_chemistry_contribution.png")
 
 
@@ -761,7 +768,8 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
              "zero because nothing new arrives in it — and that zero is exact, not a "
              "narrow band, because there is nothing there to be uncertain about.",
              ha="center", fontsize=9, color="#555555")
-    fig.tight_layout(rect=[0, 0, 1, 0.90])
+    fig.text(0.5, 0.02, OPEN_ITEM, ha="center", fontsize=8, color="#888888")
+    fig.tight_layout(rect=[0, 0.10, 1, 0.90])
     return _save(fig, "04_04_4_uncovered_share.png")
 
 
@@ -872,12 +880,14 @@ def figure_all_elements(flow: str = "inflow") -> Path:
              "chemistry here contains them — and so is oxygen, which is bound in the "
              "cathode and is recovered by nobody.",
              ha="center", fontsize=9, color="#555555")
-    fig.text(0.5, 0.012,
+    fig.text(0.5, 0.022,
              "S2 and S3 fall because sodium-ion and solid-state carry no "
              "composition and their cars leave the figure, not because the world "
              "needs less — see the uncovered-share figure for how much is missing.",
              ha="center", fontsize=8.5, color="#555555")
-    fig.tight_layout(rect=[0, 0.075, 1, 0.945])
+    fig.text(0.5, 0.004, OPEN_ITEM.replace(chr(10), " "), ha="center", fontsize=8,
+             color="#888888")
+    fig.tight_layout(rect=[0, 0.095, 1, 0.945])
     return _save(fig, f"04_04_6_all_elements_{flow}.png")
 
 

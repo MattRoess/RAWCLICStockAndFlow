@@ -427,8 +427,20 @@ that one.
 ### 4.3 OPEN — what 04_04 cannot yet say
 
 - **Sodium-ion and solid-state have no composition at all.** Their share is
-  reported as an explicit gap rather than dropped, but under S3 that gap is 69%
-  of new cars by 2070. Nothing in this model knows what those cars are made of.
+  reported as an explicit gap rather than dropped, but under S3 that gap is
+  69.3% [63.9-74.2] of new cars by 2070, and it passes 10% of the fleet in 2031.
+  **Left open deliberately** -- nobody has published a composition for either
+  that survives scrutiny, and inventing one would be worse than the hole. Full
+  account, with the measurements and the rejected alternatives:
+  `DESIGN_chemistries_without_composition.md`.
+- **Half of that gap is an export, not a data problem, and could be closed now.**
+  The battery project DOES model these two: at 60 kWh it gives sodium-ion
+  209.5 kg of casing, separator, cables, terminals, enclosure, frame, thermal
+  conductor and current collectors -- within 3 kg of LFP's own structure -- and
+  leaves only the ACTIVE material empty. It writes no `.npy` draw arrays for
+  them, so `src/battery_composition.py` raises and 04_04 drops the whole car,
+  structure included. Exporting those draws would move the gap from "the car" to
+  "the active material". See §2 of that document.
 - **The material level is empty of information.** The battery workbook's `m-c`
   rows carry a mass but no material name, and only for three components — which
   is why the COMPONENT level was built instead. A real material breakdown needs
@@ -529,6 +541,7 @@ now Markdown, one of them generated, and moved to `superseded/`.
 | `BATTERY_MATERIAL_FLOWS.md` | **stage 04_04** — the three scenarios, the two levels, the vintage rule, and what the figures do and do not say. Read this one first for anything battery |
 | `DESIGN_bev_capacity_for_04_04.md` | why the pack a segment carries is a drawn five-level mixture and not a map |
 | `DESIGN_discrete_vehicle_states.md` | why voltage and pack size are drawn per car and never share-weighted |
+| `DESIGN_chemistries_without_composition.md` | the sodium-ion and solid-state gap: how big, why it stays open, and the half of it that is only an export away |
 
 Regenerate the parameter reference after any parameter change:
 

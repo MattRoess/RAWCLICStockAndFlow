@@ -191,6 +191,7 @@ is not reaching that quantity. That is exactly how the inflow defect was found.
 | `MODEL_DESCRIPTION.md` | How the model works: cohort mechanics, special cases, Monte Carlo methodology. |
 | `UNCERTAINTY_MAP.md` | Where uncertainty enters, travels, and stops. Read this before trusting a band. |
 | `DESIGN_inflow_uncertainty_propagation.md` | Why the inflow propagation is built the way it is, including two rejected designs. |
+| `DESIGN_chemistries_without_composition.md` | Why 04_04 cannot describe sodium-ion or solid-state cars, how big that hole is, and why it stays open. |
 | `BATTERY_MATERIAL_FLOWS.md` | Stage 04_04 in full: the three chemistry scenarios, why there are two levels of detail, and what the figures do and do not say. |
 | `HANDOVER.md` | Current state: what is tested, at what draw count, and what is open. |
 
