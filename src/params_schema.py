@@ -1579,14 +1579,6 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes, when a newer version arrives.
     battery_composition_file_name: str = "250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"
 
-    # Which level of detail to read from the BATTERY composition file. Same meaning as
-    # `composition_parameter_code` above.
-    # NOTE: this is currently "e-m" (elements) while the car composition uses "m-c"
-    # (materials per component). The parameter check flags this every run as a standing
-    # reminder -- it is not an error, but the two are at different levels of detail.
-    # SAFE TO CHANGE: yes, once you have confirmed what the battery workbook offers.
-    battery_composition_parameter_code: str = "e-m"
-
     # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
     #
     # A segment does not offer a continuum of pack sizes, it offers a handful.
@@ -2238,14 +2230,6 @@ class MaterialsParams:
             issues.append(
                 f"materials.composition_parameter_code={self.composition_parameter_code!r} "
                 f"is not one of ['m-c', 'e-m']."
-            )
-        if self.battery_composition_parameter_code == "e-m":
-            issues.append(
-                "materials.battery_composition_parameter_code='e-m' -- element level, "
-                "conflicts with your essential component+material-only requirement. "
-                "Not an error (the pipeline still runs), but surfaced here as a "
-                "standing reminder until you confirm the battery workbook's "
-                "material-level parameterCode value."
             )
         valid_levels = {
             "materialKeyLevel0", "materialKeyLevel1", "materialKeyLevel2",

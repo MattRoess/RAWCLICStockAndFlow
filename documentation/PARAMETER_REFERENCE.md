@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **156** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **155** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 45 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 44 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1111,7 +1111,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**45 parameters.**
+**44 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1124,7 +1124,6 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `traction_composition_file_name` | `"20260309-Traction_motors_consolidated.xlsx"` |
 | `battery_share_file_name` | `"BATTKey_xEV_shares_final.xlsx"` |
 | `battery_composition_file_name` | `"250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"` |
-| `battery_composition_parameter_code` | `"e-m"` |
 | `battery_capacity_levels` | `{ "A": {"levels_kwh": (25.0, 30.0, 35.0), "weights": (0.600, 0.200, 0.200)}, "B": {"lev...` |
 | `battery_capacity_levels_year` | `2024` |
 | `battery_capacity_growth_per_decade` | `default_factory=lambda: {"min": 0.05, "mode": 0.10, "max": 0.20}` |
@@ -1241,18 +1240,6 @@ Default: `"250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"`
 
 The workbook describing what those batteries are made of.
 SAFE TO CHANGE: yes, when a newer version arrives.
-
-
-### `battery_composition_parameter_code`
-
-Default: `"e-m"`
-
-Which level of detail to read from the BATTERY composition file. Same meaning as
-`composition_parameter_code` above.
-NOTE: this is currently "e-m" (elements) while the car composition uses "m-c"
-(materials per component). The parameter check flags this every run as a standing
-reminder -- it is not an error, but the two are at different levels of detail.
-SAFE TO CHANGE: yes, once you have confirmed what the battery workbook offers.
 
 
 ### `battery_capacity_levels`

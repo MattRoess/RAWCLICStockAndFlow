@@ -383,8 +383,6 @@ CHEMISTRY_LABELS = {
     "Na_ion": "sodium-ion  (no composition)",
     "solid_state": "solid-state  (no composition)",
 }
-FLOW_LABELS = {"inflow": "inflow", "outflow": "outflow",
-               "collected": "collected"}
 # Short names for the twelve components, and the three the element level cannot
 # see at all -- the casing and the separator have no element rows, and the
 # electrolyte's cover 1% of its mass.
@@ -591,7 +589,7 @@ def figure_element_comparison(gaps: pd.DataFrame,
             if row == 0:
                 ax.set_title(element, fontsize=13, fontweight="bold", pad=8)
             if column == 0:
-                ax.set_ylabel(f"{FLOW_LABELS[flow]}  [kt / year]", fontsize=10)
+                ax.set_ylabel(f"{flow}  [kt / year]", fontsize=10)
             if row == len(flows) - 1:
                 ax.set_xlabel("year", fontsize=9.5)
 
@@ -763,7 +761,7 @@ def figure_secondary_supply(elements=("Li", "Ni", "Cu", "Mn")) -> Path:
 
 
 # ------------------------------------------------------------------ figure 6
-def figure_all_elements(gaps: pd.DataFrame, flow: str = "inflow") -> Path:
+def figure_all_elements(flow: str = "inflow") -> Path:
     """Every element that carries mass, so nothing interesting stays hidden."""
     elements = elements_present(flow)
     columns = 4
@@ -888,13 +886,13 @@ def build_all(params, flows_frame: pd.DataFrame, gaps: pd.DataFrame) -> list[Pat
         figure_chemistry_contribution(flows_frame),
         figure_uncovered(gaps),
         figure_secondary_supply(),
-        figure_all_elements(gaps, "inflow"),
+        figure_all_elements("inflow"),
         # Not for the outflow: measured, the collected flow is 87.9% of it for
         # EVERY element to three decimals -- the share is drawn on vehicles, not
         # on materials, so that panel would be this one times a constant. The
         # difference between the two is shown where it means something, in the
         # secondary-supply figure.
-        figure_all_elements(gaps, "collected"),
+        figure_all_elements("collected"),
         figure_components("inflow"),
         figure_components("collected"),
     ]

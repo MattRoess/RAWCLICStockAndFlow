@@ -912,12 +912,6 @@ FLOW_TO_MC_METRIC = {v: k for k, v in FLOW_TO_TRACKER_VALUE.items()}
 # still in millions-of-vehicles units instead of raw vehicle count.
 # -----------------------------------------------------------------------------------
 VEHICLE_COUNT_UNIT_SCALE = 1_000_000.0
-
-# All mass CALCULATIONS stay in kg throughout (mass_by_year tables, MC draws, saved
-# pickles) -- this constant is used ONLY at plot-render time, to display tonnes instead
-# of kg on the mass-by-year figures (per the user's request), without touching any
-# upstream numbers other code might depend on.
-KG_PER_TONNE = 1_000.0
 # kg -> Mt. The standard-vs-segments totals are ~1e8 t, which made matplotlib add a
 # "1e8" offset label that collided with the figure title; in Mt they read as ~100-800.
 KG_PER_MEGATONNE = 1_000_000_000.0
