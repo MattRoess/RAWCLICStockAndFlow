@@ -191,6 +191,11 @@ def main() -> dict:
     vintages = [y for y in range(2004, 2071)]
     vintage_position = {year: vintages.index(year) for year in years}
     composition_floor = 2020
+    # A chemistry a scenario never uses is ABSENT from that scenario's share
+    # dict, not present with a zero -- S1 contains no sodium at all. This is
+    # what such a chemistry gets there, and its identity is the test for
+    # "this scenario does not use it" below.
+    no_share = None
     segments = list(materials.battery_capacity_levels)
     n_draws = params.monte_carlo.n_draws
 
@@ -328,8 +333,13 @@ def main() -> dict:
                     del uncovered
 
                 for chemistry, file_name in named.items():
-                    shares = {scenario: group_shares[scenario][chemistry]
+                    shares = {scenario: group_shares[scenario].get(chemistry, no_share)
                               for scenario in scenarios}
+                    if all(share is no_share for share in shares.values()):
+                        # In no scenario of this group. Its accumulator stays at
+                        # zero and is still written, which is the truth: no car
+                        # here carries it.
+                        continue
                     # (n_draws, n_vintages, n_names) -- one pack per drawn car
                     # for every year it could have been built in.
                     per_car = np.stack([
@@ -344,6 +354,8 @@ def main() -> dict:
                         count = counts[:, year_position] * 1e3  # millions, kg -> t
                         for scenario in scenarios:
                             target = accumulated[(scenario, chemistry)]
+                            if shares[scenario] is no_share:
+                                continue
                             if flow == "inflow":
                                 # Built this year: this year's mix and pack.
                                 built = vintage_position[year]
