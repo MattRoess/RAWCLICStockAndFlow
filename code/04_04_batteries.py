@@ -113,6 +113,52 @@ FLOWS = ("inflow", "outflow", "collected")
 LEVELS = ("element", "component")
 
 
+def refuse_stale_parameters(params) -> None:
+    """
+    The saved parameters must be what `src/params_schema.py` says now, or stop.
+
+    `00_parameters.py` builds `Params()` and saves it, so the two can differ for
+    exactly one reason: the file predates an edit to the schema. That is not a
+    harmless difference. A field declared with `default_factory` lives in the
+    PICKLED INSTANCE, so an old file quietly wins over the new default, while a
+    field with a plain default is a class attribute and picks the new one up --
+    so a stale file does not fail, it half-updates.
+
+    On 2026-09-15 that cost fifty minutes: 04_04 ran to completion, wrote every
+    artifact and every figure, and carried three chemistries where the schema
+    said five. Nothing anywhere said so. A run that takes most of an hour must
+    not be able to answer yesterday's question.
+    """
+    from dataclasses import fields, is_dataclass
+    from src.params_schema import Params
+
+    differences = []
+
+    def walk(saved, fresh, path=""):
+        for field in fields(fresh):
+            here = f"{path}.{field.name}".lstrip(".")
+            new = getattr(fresh, field.name)
+            if not hasattr(saved, field.name):
+                differences.append(f"{here} (absent from the saved file)")
+                continue
+            old = getattr(saved, field.name)
+            if is_dataclass(new) and not isinstance(new, type):
+                walk(old, new, here)
+            elif repr(old) != repr(new):
+                differences.append(here)
+
+    walk(params, Params())
+    if differences:
+        shown = "\n  ".join(differences[:8])
+        more = "" if len(differences) <= 8 else f"\n  ... and {len(differences)-8} more"
+        raise SystemExit(
+            "The saved parameters are not what src/params_schema.py says:\n  "
+            + shown + more
+            + "\n\nRun code/00_parameters.py first. A saved file wins over a new "
+              "default for any field with a default_factory, so this stage would "
+              "otherwise compute the older answer and say nothing about it.")
+
+
 def load_flow_draws(root: Path, scenario: str, segment: str, flow: str):
     """(years, draws) from 03_02's BEV export, or (None, None) if absent."""
     directory = root / "data" / "processed" / "bev_draws" / scenario
@@ -125,6 +171,7 @@ def load_flow_draws(root: Path, scenario: str, segment: str, flow: str):
 
 def main() -> dict:
     params = load_many("params", root=PROJECT_ROOT)["params"]
+    refuse_stale_parameters(params)
     materials = params.materials
     flow_scenario = "BAU"
     # EVERY YEAR. The flows are annual, so anything coarser is this stage

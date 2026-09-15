@@ -130,13 +130,22 @@ export (`data/processed/bev_draws/BAU/`), and the composition arrays written by
 `materials.battery_composition_dir`. Both sides must run at the same number of
 draws or 04_04 raises rather than pairing draw *i* with a different world.
 
-Run `00_parameters.py` first. Old saved parameter files do still load — the
-`default_factory` trap that would have broken them was found and fixed — but
-regenerating is cleaner, and on 2026-09-14 it was not: `00_params.pkl` was
-written at 12:07 against a schema last edited at 13:16, and the 04_04 run of
-15:28 read the older object. Checked field by field afterwards, the only
-difference was a deleted parameter nothing reads, so those results stand. **That
-was luck, not process.**
+Run `00_parameters.py` first, and 04_04 now refuses to start if you did not.
+
+**Why it is now fatal there.** A field declared with `default_factory` lives in
+the pickled instance, so an old file quietly wins over a new default, while a
+field with a plain default is a class attribute and picks the new one up. A
+stale file therefore does not fail — it HALF-UPDATES. It happened twice in two
+days. On 2026-09-14 the only difference was a deleted parameter nothing reads,
+so those results stood, which was luck rather than process. On 2026-09-15 it
+cost fifty minutes: 04_04 ran to completion, wrote every artifact and every
+figure, and carried three chemistries where the schema said five, with nothing
+anywhere saying so.
+
+`refuse_stale_parameters()` in 04_04 compares the saved object against a fresh
+`Params()` field by field and stops with the difference named. **Only 04_04 has
+it.** Putting it in `src/artifacts.py` so every stage gets it is the obvious
+next step and has not been done.
 
 ---
 
