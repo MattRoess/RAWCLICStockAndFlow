@@ -18,6 +18,10 @@ FIXES APPLIED THIS ROUND
 - **Traction composition filename centralized**: was hardcoded directly in this file
   (`"20260309-Traction_motors_consolidated.xlsx"`, a date-stamped name) -- now read
   from `params.materials.traction_composition_file_name`.
+- **Read from the traction project, not from data/raw** (2026-09-21): the workbook is
+  `RAWCLICVehicleTractionMotor/data/consolidated/TractionMotor_for_stockandflow.xlsx`,
+  reached through `params.materials.traction_composition_dir`. Traction motor
+  information lives in that project and nowhere else; this model keeps no copy.
 - **Persistence cleaned up**: replaced the raw, ad hoc pickle-saving loops with the
   shared `materials.save_unregistered_scenario_outputs()` helper (new this round, also
   used by `04_01_materials.py`/`04_04_batteries.py`).
@@ -86,17 +90,22 @@ def load_composition(p01, p04, tracker_keyed: dict) -> pd.DataFrame:
     THE MATH MODEL: single-anchor-year, bidirectional extension -- see module docstring
     "STILL OPEN" for why this is a stronger assumption than 04_01's forward-only one.
     """
-    input_dir = SCRIPT_DIR / p01.input_dir
-    composition_file = input_dir / p04["traction_composition_file_name"]
+    # READ WHERE IT LIES, in the traction-motor project's own folder. Not copied
+    # into data/raw: that holds what this model consumes and no sibling
+    # produces. Same arrangement as the battery, via `battery_composition_dir`.
+    composition_dir = Path(p04["traction_composition_dir"])
+    composition_file = composition_dir / p04["traction_composition_file_name"]
     composition_extend_from_year = int(p01.composition_extend_from_year)
     material_parameter_code = p04["composition_parameter_code"]
 
     if not composition_file.exists():
         raise FileNotFoundError(
             f"04_03_tractionmotors.py: expected the traction-motor composition "
-            f"workbook at {composition_file}, but it doesn't exist. Set "
-            f"params.materials.traction_composition_file_name if your real filename "
-            f"differs, or place the file at this path."
+            f"workbook at {composition_file}, but it doesn't exist. That folder "
+            f"belongs to RAWCLICVehicleTractionMotor and is written by its "
+            f"01_composition.py -- run that project first, or set "
+            f"params.materials.traction_composition_dir if it has moved. Do NOT "
+            f"copy the workbook into this project's data/raw."
         )
     print("Using traction composition file:", composition_file)
 

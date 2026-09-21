@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **160** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **159** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 49 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 48 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1111,7 +1111,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**49 parameters.**
+**48 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1121,9 +1121,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `drivetrains` | `("BEV", "HEV", "PHEV", "Diesel", "Petrol")` |
 | `composition_parameter_code` | `"m-c"` |
 | `material_level_key` | `"materialKeyLevel_highest"` |
-| `traction_composition_file_name` | `"20260309-Traction_motors_consolidated.xlsx"` |
-| `battery_share_file_name` | `"BATTKey_xEV_shares_final.xlsx"` |
-| `battery_composition_file_name` | `"250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"` |
+| `traction_composition_dir` | `"/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/" "RAWCLICVehi...` |
+| `traction_composition_file_name` | `"TractionMotor_for_stockandflow.xlsx"` |
 | `battery_capacity_levels` | `{ "A": {"levels_kwh": (25.0, 30.0, 35.0), "weights": (0.600, 0.200, 0.200)}, "B": {"lev...` |
 | `battery_capacity_levels_year` | `2024` |
 | `battery_capacity_growth_per_decade` | `default_factory=lambda: {"min": 0.05, "mode": 0.10, "max": 0.20}` |
@@ -1221,30 +1220,36 @@ Which column in the composition file holds the material name to group by.
 SAFE TO CHANGE: no, unless the file's own column naming changes.
 
 
+### `traction_composition_dir`
+
+Default: `"/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/" "RAWCLICVehi...`
+
+⚠️ WHERE THE TRACTION-MOTOR PROJECT KEEPS WHAT IT PRODUCES, read where it
+lies. Matthias 2026-09-21: traction motor information lives in
+RAWCLICVehicleTractionMotor and nowhere else, so this model is pointed at
+that folder rather than keeping a copy of the workbook beside its own
+inputs. Only what THIS model consumes and no sibling produces belongs in
+data/raw -- the EEA registrations, the used-vehicle trade file, REMIND.
+
+An absolute path, for the same reason `battery_composition_dir` is one:
+that project is a sibling checkout and neither repo may assume where the
+other sits. Nothing under it is ever written.
+
+⚠️ IT MUST BE THE `data/consolidated` FOLDER AND NOT `data`. The traction
+project writes a great deal for its own use -- the trajectory by segment,
+the audit, the corrections log -- and exactly one pair of files for this
+model. Pointing at the wrong folder would make every one of those look
+like an interface nobody may change.
+SAFE TO CHANGE: yes, when that project moves.
+
+
 ### `traction_composition_file_name`
 
-Default: `"20260309-Traction_motors_consolidated.xlsx"`
+Default: `"TractionMotor_for_stockandflow.xlsx"`
 
-The workbook describing what electric traction motors are made of.
-SAFE TO CHANGE: yes, when a newer version of the file arrives. The file must sit
-in the raw-composition data folder.
-
-
-### `battery_share_file_name`
-
-Default: `"BATTKey_xEV_shares_final.xlsx"`
-
-The workbook giving which battery chemistries (NMC, LFP, ...) hold what market
-share over time.
-SAFE TO CHANGE: yes, when a newer version arrives.
-
-
-### `battery_composition_file_name`
-
-Default: `"250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"`
-
-The workbook describing what those batteries are made of.
-SAFE TO CHANGE: yes, when a newer version arrives.
+The file in there that 04_03 reads. Written by that project's
+`01_composition.py`; the sheet is "Consolidated data".
+SAFE TO CHANGE: yes, if that project renames what it writes.
 
 
 ### `battery_capacity_levels`

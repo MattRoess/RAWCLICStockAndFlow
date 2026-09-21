@@ -1565,19 +1565,31 @@ class MaterialsParams:
     # SAFE TO CHANGE: no, unless the file's own column naming changes.
     material_level_key: str = "materialKeyLevel_highest"
 
-    # The workbook describing what electric traction motors are made of.
-    # SAFE TO CHANGE: yes, when a newer version of the file arrives. The file must sit
-    # in the raw-composition data folder.
-    traction_composition_file_name: str = "20260309-Traction_motors_consolidated.xlsx"
+    # ⚠️ WHERE THE TRACTION-MOTOR PROJECT KEEPS WHAT IT PRODUCES, read where it
+    # lies. Matthias 2026-09-21: traction motor information lives in
+    # RAWCLICVehicleTractionMotor and nowhere else, so this model is pointed at
+    # that folder rather than keeping a copy of the workbook beside its own
+    # inputs. Only what THIS model consumes and no sibling produces belongs in
+    # data/raw -- the EEA registrations, the used-vehicle trade file, REMIND.
+    #
+    # An absolute path, for the same reason `battery_composition_dir` is one:
+    # that project is a sibling checkout and neither repo may assume where the
+    # other sits. Nothing under it is ever written.
+    #
+    # ⚠️ IT MUST BE THE `data/consolidated` FOLDER AND NOT `data`. The traction
+    # project writes a great deal for its own use -- the trajectory by segment,
+    # the audit, the corrections log -- and exactly one pair of files for this
+    # model. Pointing at the wrong folder would make every one of those look
+    # like an interface nobody may change.
+    # SAFE TO CHANGE: yes, when that project moves.
+    traction_composition_dir: str = (
+        "/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/"
+        "RAWCLICVehicleTractionMotor/data/consolidated")
 
-    # The workbook giving which battery chemistries (NMC, LFP, ...) hold what market
-    # share over time.
-    # SAFE TO CHANGE: yes, when a newer version arrives.
-    battery_share_file_name: str = "BATTKey_xEV_shares_final.xlsx"
-
-    # The workbook describing what those batteries are made of.
-    # SAFE TO CHANGE: yes, when a newer version arrives.
-    battery_composition_file_name: str = "250318_WP3_MS23_consolidatedComposition_BATT_EV_v7_editable.xlsx"
+    # The file in there that 04_03 reads. Written by that project's
+    # `01_composition.py`; the sheet is "Consolidated data".
+    # SAFE TO CHANGE: yes, if that project renames what it writes.
+    traction_composition_file_name: str = "TractionMotor_for_stockandflow.xlsx"
 
     # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
     #
