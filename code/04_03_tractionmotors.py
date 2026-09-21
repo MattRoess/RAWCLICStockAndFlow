@@ -340,8 +340,9 @@ def element_flows(magnet_mass: pd.DataFrame, elements: pd.DataFrame,
     wanted = ["Nd", "Pr", "Dy", "Tb"]
     shares = elements[elements["element"].isin(wanted)][
         ["grade_scenario", "is_base", "componentKeyLevel1", "element",
-         "meanValue", "TmaxOperating_C"]].rename(
-        columns={"meanValue": "element_share"})
+         "meanValue", "p025", "p975", "TmaxOperating_C"]].rename(
+        columns={"meanValue": "element_share", "p025": "share_low",
+                 "p975": "share_high"})
 
     if "componentKeyLevel1" in magnet.columns:
         merged = magnet.merge(shares, on="componentKeyLevel1", how="inner")
@@ -352,12 +353,50 @@ def element_flows(magnet_mass: pd.DataFrame, elements: pd.DataFrame,
         # they do today, all SH, and the row says so.
         per_scenario = shares.groupby(
             ["grade_scenario", "is_base", "element", "TmaxOperating_C"],
-            as_index=False)["element_share"].mean()
+            as_index=False)[["element_share", "share_low", "share_high"]].mean()
         merged = magnet.merge(per_scenario, how="cross")
-    for column in ("mass", "mass_low", "mass_high"):
-        if column in merged.columns:
-            merged[column] = merged[column] * merged["element_share"]
-    return merged.drop(columns=["element_share"]).reset_index(drop=True)
+
+    # ⚠️ BOTH UNCERTAINTIES, COMBINED -- NOT THE MASS ALONE.
+    #
+    # The first version multiplied the magnet mass INTERVAL by the element share
+    # MEAN, so every element line carried the mass uncertainty and none of the
+    # chemistry. For neodymium that is nearly harmless -- the chemistry is ±9%
+    # against the mass's ±11% -- and for terbium it is a serious understatement:
+    # the SH grade permits 0.0001 to 0.0049 of the magnet, ±95%, which dwarfs
+    # anything the mass contributes. A terbium line drawn with a ±11% band says
+    # the opposite of what the source says.
+    #
+    # The two are INDEPENDENT: one is a bootstrap of a regression through eleven
+    # segments, the other a grade's specification range. So the relative
+    # half-widths combine in quadrature.
+    #
+    # ⚠️ AND THAT IS AN APPROXIMATION THE TRACTION PROJECT WOULD NOT ACCEPT OF
+    # ITSELF. "A percentile is a property of a distribution, and arithmetic on
+    # two percentiles is not the percentile of the result." It holds well where
+    # both widths are small and badly for terbium, where ±95% is nowhere near
+    # symmetric and the lower end would go negative if it were not clipped. Both
+    # sets of 200,000 draws exist -- the magnet masses and the chemistry
+    # fractions, in the traction project's `data/consolidated/draws` -- and
+    # multiplying them per draw is the right answer. This is the interim one.
+    mass_mean = merged["mass"].astype(float)
+    share_mean = merged["element_share"].replace(0.0, pd.NA).astype(float)
+
+    def relative(low: str, high: str, centre) -> pd.Series:
+        width = (merged[high].astype(float) - merged[low].astype(float)) / 2.0
+        return (width / centre).fillna(0.0).abs()
+
+    mass_relative = (relative("mass_low", "mass_high", mass_mean)
+                     if {"mass_low", "mass_high"} <= set(merged.columns)
+                     else pd.Series(0.0, index=merged.index))
+    share_relative = relative("share_low", "share_high", share_mean)
+    combined = (mass_relative ** 2 + share_relative ** 2) ** 0.5
+
+    merged["mass"] = mass_mean * merged["element_share"]
+    merged["mass_low"] = (merged["mass"] * (1.0 - combined)).clip(lower=0.0)
+    merged["mass_high"] = merged["mass"] * (1.0 + combined)
+    merged["relative_halfwidth"] = combined
+    return merged.drop(columns=["element_share", "share_low", "share_high"]
+                       ).reset_index(drop=True)
 
 
 MATERIAL_COLOURS = {
@@ -697,10 +736,20 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     for (element, scenario), state in scenarios[
             scenarios["element"].isin(["Dy", "Tb"])].groupby(
             ["element", "grade_scenario"]):
-        state = state.groupby("scrap_year", as_index=False)["mass"].sum()
+        columns = [c for c in ("mass", "mass_low", "mass_high")
+                   if c in state.columns]
+        state = state.groupby("scrap_year", as_index=False)[columns].sum()
+        colour = ELEMENT_COLOURS.get(element, "#555555")
+        # ⚠️ EVERY SCENARIO BANDED, and they will overlap heavily -- which is
+        # the honest picture. The grade moves dysprosium by 64% between SH and
+        # EH, and the uncertainty within any one grade is of the same order, so
+        # the three are not cleanly separated answers.
+        if {"mass_low", "mass_high"} <= set(state.columns):
+            axis.fill_between(state["scrap_year"], state["mass_low"] / 1e6,
+                              state["mass_high"] / 1e6, color=colour,
+                              alpha=0.10, lw=0)
         axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=1.9,
-                  color=ELEMENT_COLOURS.get(element, "#555555"),
-                  ls=GRADE_LINESTYLE.get(scenario, "-"),
+                  color=colour, ls=GRADE_LINESTYLE.get(scenario, "-"),
                   label=f"{element}  {scenario}")
     axis.set_title("What the magnet grade costs: Dy and Tb", fontsize=11.5)
     axis.set_ylabel("[kt / year]")
@@ -712,9 +761,11 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     figure.text(0.005, 0.015,
                 "Neodymium and praseodymium are identical across the three "
                 "grade scenarios: the didymium is 0.29-0.32 of the magnet in "
-                "every class, so only the heavy rare earths move.      "
-                "bands: the composition's 95% interval, carried through as "
-                "correlated.",
+                "every class, so only the heavy rare earths move.\n"
+                "bands COMBINE two independent uncertainties -- the magnet "
+                "mass (±11%) and the grade's own chemistry range -- in "
+                "quadrature. The chemistry dominates for terbium, whose SH "
+                "range is ±95% of its own value.",
                 fontsize=8.2, color="#555555", ha="left")
     figure.tight_layout(rect=(0, 0.055, 1, 1))
     figure.savefig(path, dpi=160)
