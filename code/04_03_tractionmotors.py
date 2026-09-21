@@ -775,12 +775,19 @@ def main() -> dict[str, Any]:
         "04_03_traction_elements.pkl": element_tidy,
     })
 
+    # ⚠️ INTO A FOLDER OF ITS OWN. `data/processed/` holds directories --
+    # battery_draws, bev_draws, element_draws, figures, intermediate -- and no
+    # loose files; the first version of this stage dropped three CSVs straight
+    # into it, which is the orphan-data problem by another name.
     out_dir = PROJECT_ROOT / "data" / "processed"
+    csv_dir = out_dir / "traction"
+    csv_dir.mkdir(parents=True, exist_ok=True)
     for name, frame in (("04_03_traction_parallel", parallel_tidy),
                         ("04_03_traction_combined", combined_tidy),
+                        ("04_03_traction_combined_by_type", combined_by_type),
                         ("04_03_traction_elements", element_tidy)):
         if not frame.empty:
-            frame.to_csv(out_dir / f"{name}.csv", index=False)
+            frame.to_csv(csv_dir / f"{name}.csv", index=False)
 
     scenario_outputs = {}
     for name, tracker in available.items():
