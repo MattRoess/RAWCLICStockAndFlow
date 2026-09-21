@@ -1591,6 +1591,141 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes, if that project renames what it writes.
     traction_composition_file_name: str = "TractionMotor_for_stockandflow.xlsx"
 
+    # ==================================================================
+    # HOW THE FLEET SPLITS ACROSS TRACTION MOTOR TYPES AND VOLTAGES
+    # ==================================================================
+    #
+    # The traction project reports a composition for every combination of motor
+    # type, voltage class, torque and year, and takes no view on how many cars
+    # are of each. That view is here, because it is a fleet question and this is
+    # the fleet model. Matthias 2026-09-21.
+    #
+    # ⚠️ DRAWN PER CAR, NOT BLENDED. A vehicle is one motor type at one voltage,
+    # for life -- the same rule `battery_voltage.py` states for the pack: "THE
+    # STATES ARE DISCRETE. A vehicle is one architecture, never a blend." A
+    # share is the probability a draw lands on that state, not a fraction of
+    # every car.
+
+    # ⚠️ THE REPORT'S OWN SHARES, TRANSCRIBED UNCHANGED, IN ITS OWN CATEGORIES.
+    # RAWCLIC_BEV_Motors_Comprehensive_Report_V1 §10.2-10.7, base case where it
+    # offers conservative/base/optimistic (2060 and 2070). Percentages, summing
+    # to 100 in every row, exactly as printed -- the mapping onto this model's
+    # five motor types happens in code and is visible there rather than baked
+    # into the numbers.
+    #
+    # ⚠️ THEY ARE SCENARIO CONSTRUCTION AND THE REVIEW SAYS SO: "the original
+    # 2030, 2035 and 2040 architecture shares are scenario construction rather
+    # than confirmed forecasts". Treat the trajectory as an argument, not a
+    # measurement. The 2025 row is the closest thing to an observation here.
+    #
+    # BEFORE 2025 the report says nothing, so the 2025 mix is held constant
+    # backwards with axial flux at zero -- it was not on the market -- and its
+    # share given to PMSM. Early Tesla induction is not separately modelled.
+    # SAFE TO CHANGE: yes. A registration-weighted series would beat all of it.
+    traction_type_shares: dict[str, dict[int, dict[str, float]]] = field(
+        default_factory=lambda: {
+            "AB": {
+                2010: {"PMSM": 91, "EESM": 5, "ASM": 4, "axial": 0, "SynRM": 0},
+                2025: {"PMSM": 88, "EESM": 5, "ASM": 4, "axial": 0, "SynRM": 3},
+                2030: {"PMSM": 75, "EESM": 8, "ASM": 5, "axial": 1, "SynRM": 11},
+                2040: {"PMSM": 55, "EESM": 12, "ASM": 5, "axial": 2, "SynRM": 26},
+                2050: {"PMSM": 42, "EESM": 14, "ASM": 5, "axial": 3, "SynRM": 36},
+                2060: {"PMSM": 35, "EESM": 15, "ASM": 5, "axial": 3, "SynRM": 42},
+                2070: {"PMSM": 29, "EESM": 16, "ASM": 5, "axial": 5, "SynRM": 45},
+            },
+            "CD": {
+                2010: {"PMSM": 86, "EESM": 7, "ASM": 6, "axial": 0, "SynRM": 0},
+                2025: {"PMSM": 84, "EESM": 7, "ASM": 6, "axial": 1, "SynRM": 2},
+                2030: {"PMSM": 72, "EESM": 12, "ASM": 7, "axial": 3, "SynRM": 6},
+                2040: {"PMSM": 52, "EESM": 21, "ASM": 6, "axial": 8, "SynRM": 13},
+                2050: {"PMSM": 43, "EESM": 25, "ASM": 5, "axial": 12, "SynRM": 15},
+                2060: {"PMSM": 36, "EESM": 27, "ASM": 5, "axial": 15, "SynRM": 17},
+                2070: {"PMSM": 31, "EESM": 30, "ASM": 5, "axial": 17, "SynRM": 17},
+            },
+            "EF": {
+                2010: {"PMSM": 81, "EESM": 10, "ASM": 9, "axial": 0, "SynRM": 0},
+                2025: {"PMSM": 78, "EESM": 10, "ASM": 9, "axial": 2, "SynRM": 1},
+                2030: {"PMSM": 65, "EESM": 17, "ASM": 8, "axial": 7, "SynRM": 3},
+                2040: {"PMSM": 45, "EESM": 25, "ASM": 5, "axial": 19, "SynRM": 6},
+                2050: {"PMSM": 37, "EESM": 28, "ASM": 4, "axial": 25, "SynRM": 6},
+                2060: {"PMSM": 30, "EESM": 31, "ASM": 4, "axial": 29, "SynRM": 6},
+                2070: {"PMSM": 25, "EESM": 32, "ASM": 4, "axial": 33, "SynRM": 6},
+            },
+        })
+
+    # ⚠️ WHERE SynRM/PMa GOES, BECAUSE THIS PROJECT DOES NOT MODEL IT.
+    # Matthias 2026-09-21: "SynRM goes to PMSM for now."
+    #
+    # The traction project excluded synchronous reluctance deliberately --
+    # "demonstrators only, with no bill of material in either source" -- which
+    # was right while nothing needed a share. The report gives it one, and it is
+    # not small: 45% of AB by 2070 in the base case.
+    #
+    # ⚠️ AND THE CHOICE IS NOT NEUTRAL. A PMa-SynRM uses far less magnet than an
+    # IPM, so sending its share to PMSM keeps the small-car fleet MAGNET-HEAVY
+    # exactly where the report had it going magnet-light. This is the
+    # conservative direction for rare-earth demand -- it cannot understate it --
+    # but it is a real overstatement of AB magnets in the late years, and it is
+    # the first thing to revisit when a SynRM bill of material exists.
+    # SAFE TO CHANGE: yes -- "EESM" is the other defensible destination, and it
+    # would bracket the answer from below.
+    traction_synrm_goes_to: str = "PMSM"
+
+    # ⚠️ THE SHARE OF CARS WITH TWO DRIVEN AXLES, MEASURED, BY SEGMENT GROUP.
+    # EV Database, 1438 models: AWD 576, front 440, rear 422. By group the
+    # gradient is steep and monotonic -- A and B have essentially none, F is
+    # 80.7%, JF 88.9%.
+    #
+    # ⚠️ MODEL-WEIGHTED, NOT REGISTRATION-WEIGHTED, and Matthias chose to keep it
+    # that way 2026-09-21. It counts a 200-unit halo trim the same as a 50,000-
+    # unit volume seller, and AWD skews to low-volume trims, so the level is
+    # probably high even though the gradient is certainly right. The critical
+    # review names the same gap: "eligible public evidence does not provide an EU
+    # registration-weighted distribution of single-, dual- and multi-motor BEVs
+    # by segment and year".
+    # SAFE TO CHANGE: yes, and a registration-weighted series would replace it.
+    traction_awd_share: dict[str, float] = field(default_factory=lambda: {
+        "AB": 0.061, "CD": 0.386, "EF": 0.755,
+    })
+
+    # ⚠️ AND OF THOSE TWO-MOTOR CARS, HOW MANY CARRY TWO PERMANENT-MAGNET
+    # MACHINES RATHER THAN ONE PM AND ONE INDUCTION.
+    #
+    # Matthias 2026-09-21: "I assume AWD induction will be the large parts, but
+    # E and F might have two permanent ones, due to being very heavy cars."
+    #
+    # WHY IT DECIDES WHICH CATEGORY THE CAR IS IN. `IMandPMElectricMotors` in the
+    # source data is the PM-plus-induction configuration; a PM-plus-PM car is
+    # simply a PM car with more torque, and belongs in `PMElectricMotors`. The
+    # composition is a function of torque, so a twin-PM car at the vehicle's own
+    # torque needs no special treatment -- two machines at half the torque carry
+    # about the same magnet as one at full torque, which is this project's own
+    # measured finding.
+    #
+    # WHAT IT COSTS. The two categories differ by a CONSTANT 1.20 kg of magnet at
+    # every torque -- the fitted intercepts are +1.107 and -0.093 kg and the
+    # slopes are identical -- because the second machine in an IM+PM car has no
+    # magnet in it at all. So every percentage point moved between them is 1.2 kg
+    # of magnet per car, and in EF that is the single largest lever on
+    # rare-earth demand in this model.
+    #
+    # ⚠️ NOT MEASURED. Nothing in the fleet data says which AWD cars are twin-PM.
+    # These three numbers are Matthias's reading of the market, rising with
+    # vehicle weight, and they are the only invented figures in this block.
+    # SAFE TO CHANGE: yes, and this is the one to vary first.
+    traction_twin_pm_share_of_awd: dict[str, float] = field(
+        default_factory=lambda: {"AB": 0.20, "CD": 0.40, "EF": 0.70})
+
+    # ⚠️ THE DUAL-ROTOR RADIAL MACHINE GETS NO SHARE, ON PURPOSE.
+    # The report has no category for it: its "axial" share is YASA-shaped, and
+    # DeepDrive is a separate bet by a separate company. Giving it a share means
+    # inventing adoption for a machine with no published composition and no
+    # registrations. Zero keeps it in the model -- its composition is computed
+    # and its draws are written -- without fabricating a market.
+    # SAFE TO CHANGE: yes, and it takes its share from `axial` when it gets one.
+    traction_dual_rotor_share: float = 0.0
+
+
     # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
     #
     # A segment does not offer a continuum of pack sizes, it offers a handful.
@@ -1713,6 +1848,44 @@ class MaterialsParams:
                2050: (0.880, 1.0, 1.0), 2060: (0.880, 1.0, 1.0),
                2070: (0.880, 1.0, 1.0)},
     })
+
+    # ⚠️ AND A THIRD VOLTAGE STATE: 1000 V, WHICH THE BATTERY SIDE DOES NOT HAVE.
+    #
+    # Matthias 2026-09-21: "1000V stays separate. I expect 1000V to show up at E
+    # and F segment in limited numbers and could become more dominant."
+    #
+    # The traction composition carries three voltage classes -- 400, 800 and
+    # 1000 -- because copper mass falls with voltage, and `scenario.copper_mass`
+    # in that project puts 1000 V at 0.585 of the 400 V copper against 800 V's
+    # 0.667. Without a share for it the class exists in the composition and
+    # never reaches a car.
+    #
+    # ⚠️ ENTIRELY UNMEASURED, AND THE SHAPE IS MATTHIAS'S. Only BYD ships a
+    # 1000 V-class architecture today, and it is sold mainly outside Europe, so
+    # there is no European registration base to fit. These numbers say: nothing
+    # before 2030, EF first and fastest because that is where charging power is
+    # worth paying for, CD later and smaller, AB barely at all. They are a
+    # stated expectation written as a curve, not evidence.
+    #
+    # THE THREE STATES MUST NOT OVERLAP. 1000 V is taken out of the 800 V
+    # population, not added on top: a car draws 1000 V first, then 800 V from
+    # what is left, then 400 V. The code does that; these are the raw shares.
+    # SAFE TO CHANGE: yes, and the first real registration data replaces it.
+    pack_voltage_1000v_share: dict[str, dict[int, tuple[float, float, float]]] = field(
+        default_factory=lambda: {
+            "AB": {2010: (0.0, 0.0, 0.0), 2025: (0.0, 0.0, 0.0),
+                   2030: (0.0, 0.0, 0.0), 2040: (0.0, 0.0, 0.01),
+                   2050: (0.0, 0.01, 0.03), 2060: (0.0, 0.02, 0.05),
+                   2070: (0.0, 0.03, 0.08)},
+            "CD": {2010: (0.0, 0.0, 0.0), 2025: (0.0, 0.0, 0.0),
+                   2030: (0.0, 0.0, 0.01), 2040: (0.0, 0.03, 0.08),
+                   2050: (0.02, 0.08, 0.18), 2060: (0.03, 0.12, 0.24),
+                   2070: (0.05, 0.15, 0.30)},
+            "EF": {2010: (0.0, 0.0, 0.0), 2025: (0.0, 0.0, 0.01),
+                   2030: (0.0, 0.02, 0.05), 2040: (0.03, 0.10, 0.20),
+                   2050: (0.08, 0.20, 0.35), 2060: (0.12, 0.28, 0.45),
+                   2070: (0.15, 0.33, 0.50)},
+        })
 
     # Which of the source's three groups each segment belongs to. The voltage
     # driver is resolved at AB/CD/EF because that is the grain it was built at;

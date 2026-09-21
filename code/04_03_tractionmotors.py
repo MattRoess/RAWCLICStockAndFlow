@@ -1,47 +1,46 @@
 """
 04_03_tractionmotors.py
-=========================
+=======================
 
-Stage 04, part 3: material-only quantification for traction motors, using a SEPARATE
-composition workbook from the main `ELV_2010_2050.xlsx` used by 04_01.
+Stage 04, part 3: traction-motor material and element flows.
 
-ESSENTIAL REQUIREMENT already satisfied: `MATERIAL_PARAMETER_CODE = "m-c"` (component +
-material level, never decomposed into individual chemical elements) -- confirmed
-correct, no change needed.
+    .venv/bin/python code/04_03_tractionmotors.py
 
-FIXES APPLIED THIS ROUND
---------------------------
-- Dataclass params access throughout.
-- Upward-searching `_find_project_root` + `SCRIPT_DIR`-anchored `input_dir` resolution
-  (same CWD-independence fix as every other stage this round).
-- `root=PROJECT_ROOT` threaded into `load_many`.
-- **Traction composition filename centralized**: was hardcoded directly in this file
-  (`"20260309-Traction_motors_consolidated.xlsx"`, a date-stamped name) -- now read
-  from `params.materials.traction_composition_file_name`.
-- **Read from the traction project, not from data/raw** (2026-09-21): the workbook is
-  `RAWCLICVehicleTractionMotor/data/consolidated/TractionMotor_for_stockandflow.xlsx`,
-  reached through `params.materials.traction_composition_dir`. Traction motor
-  information lives in that project and nowhere else; this model keeps no copy.
-- **Persistence cleaned up**: replaced the raw, ad hoc pickle-saving loops with the
-  shared `materials.save_unregistered_scenario_outputs()` helper (new this round, also
-  used by `04_01_materials.py`/`04_04_batteries.py`).
-- **New integrated diagnostic plot**: the secondary-supply ratio
-  (`build_material_ratio_df`, already computed by this file but never plotted) --
-  collected-vs-inflow mass ratio over time, the direct visual for "what fraction of
-  this year's traction-motor material demand could be met by end-of-life collection."
+REWRITTEN 2026-09-21, and not edited -- the previous version was wrong in ways
+that could not be patched out. It summed across `voltageClass`, adding the
+400 V, 800 V and 1000 V variants of one car together and trebling the mass; it
+summed across motor type, collapsing five drive configurations into one; it
+dropped `materialClass`, so the two newer machines -- which carry their material
+name in that column and not in the house keys -- arrived with no material at
+all, 32% of rows and 12.8% of mass; and it took ONE anchor year and replicated
+it across every cohort, an assumption its own docstring called stronger than
+04_01's. The composition file now carries 61 years, so none of that is needed.
 
-STILL OPEN, UNCHANGED (flagged, not fixed -- needs real data or your confirmation)
---------------------------------------------------------------------------------------
-- The `.abs()` normalization on `productionYear` (fixing negative-year data-quality
-  quirks) would silently collide a genuine "-2020" and genuine "2020" row if both
-  existed. Not changed without seeing real data.
-- The single-anchor-year, bidirectional composition extension is a materially stronger
-  assumption than 04_01's forward-only extension (traction motor material intensity
-  assumed CONSTANT across the entire vehicle history, not just frozen beyond 2050).
-  Documented, not changed -- this is a modeling choice, not a bug.
-- Whether the traction file provides distributional data (`meanValue` alongside
-  min/max/std) that's being collapsed to a point estimate -- not verifiable without
-  the real file.
+WHAT IT PRODUCES, and Matthias asked for both:
+
+  PARALLEL     material mass per (motor type, voltage class), unpartitioned --
+               15 states, each answering "if every BEV were this". Nothing is
+               mixed, so nothing has to be believed about market shares to read
+               it.
+  COMBINED     one fleet total, the 15 states weighted by the shares in
+               `src/traction.py`. This is the answer to "how much copper and
+               how much neodymium", and it depends on every share being right.
+
+  ELEMENTS     Nd, Pr, Dy and Tb inside the magnet, for both -- the element
+               layer arrived in the composition file on 2026-09-21 and closes
+               what HANDOVER §7.2 of the traction project called its biggest
+               gap.
+
+⚠️ MEAN ONLY, FOR NOW, AND IT IS A CHOICE. The composition file carries p025,
+p975 and STD from a 200,000-draw bootstrap, and this stage uses `meanValue` and
+ignores them. Matthias 2026-09-21: mean only for now. The bands are not lost --
+they are in the file and in the draw arrays beside it -- but nothing downstream
+of here carries uncertainty until this stage draws instead of multiplying.
+
+⚠️ THE GRADE SCENARIOS ARE NOT AVERAGED. The magnet element sheet carries SH, UH
+and EH, and they are three answers to one question rather than a distribution
+over it. Every element output is per scenario, and the base is whichever the
+composition file marks `is_base`.
 """
 
 from __future__ import annotations
@@ -71,299 +70,319 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 from src.artifacts import load_many, artifact_status  # type: ignore
 import src.materials as materials  # type: ignore
+import src.traction as traction  # type: ignore
 
-quantify_elements_from_tracker = materials.quantify_elements_from_tracker
 save_unregistered_scenario_outputs = materials.save_unregistered_scenario_outputs
 
-MATERIAL_LEVELS = ["materialKeyLevel4", "materialKeyLevel3", "materialKeyLevel2", "materialKeyLevel1"]
-MATERIAL_LEVEL_COLS = [
-    "materialKeyLevel0", "materialKeyLevel1", "materialKeyLevel2",
-    "materialKeyLevel3", "materialKeyLevel4", "materialKeyLevel_highest",
+# The dimensions that must survive to the parallel output. Losing any of them is
+# the defect this rewrite exists to fix.
+KEEP = [
+    "productKeyLevel2", "productKeyLevel3", "productionYear",
+    "componentKeyLevel1", "componentKeyLevel2",
+    "materialClass", "materialKeyLevel1", "voltageClass", "torque_nm",
+    "parameterCode", "meanValue",
 ]
 
 
-def load_composition(p01, p04, tracker_keyed: dict) -> pd.DataFrame:
+def load_composition(p04: dict) -> pd.DataFrame:
     """
-    Load the traction-motor composition workbook and extend it to every cohort year
-    that appears anywhere in `tracker_keyed`.
+    The traction composition, read where it lies, with every dimension kept.
 
-    THE MATH MODEL: single-anchor-year, bidirectional extension -- see module docstring
-    "STILL OPEN" for why this is a stronger assumption than 04_01's forward-only one.
+    ⚠️ NO ANCHOR YEAR AND NO REPLICATION. The file has one row per segment,
+    motor type, voltage class and YEAR -- 62,403 of them, 61 years -- so the
+    year is read, not manufactured. The previous version picked a single year
+    and copied it forwards and backwards over the whole cohort range.
     """
-    # READ WHERE IT LIES, in the traction-motor project's own folder. Not copied
-    # into data/raw: that holds what this model consumes and no sibling
-    # produces. Same arrangement as the battery, via `battery_composition_dir`.
-    composition_dir = Path(p04["traction_composition_dir"])
-    composition_file = composition_dir / p04["traction_composition_file_name"]
-    composition_extend_from_year = int(p01.composition_extend_from_year)
-    material_parameter_code = p04["composition_parameter_code"]
-
-    if not composition_file.exists():
+    directory = Path(p04["traction_composition_dir"])
+    path = directory / p04["traction_composition_file_name"]
+    if not path.exists():
         raise FileNotFoundError(
             f"04_03_tractionmotors.py: expected the traction-motor composition "
-            f"workbook at {composition_file}, but it doesn't exist. That folder "
-            f"belongs to RAWCLICVehicleTractionMotor and is written by its "
+            f"workbook at {path}, but it doesn't exist. That folder belongs to "
+            f"RAWCLICVehicleTractionMotor and is written by its "
             f"01_composition.py -- run that project first, or set "
             f"params.materials.traction_composition_dir if it has moved. Do NOT "
             f"copy the workbook into this project's data/raw."
         )
-    print("Using traction composition file:", composition_file)
+    print("Traction composition:", path)
 
-    xlsx = pd.ExcelFile(composition_file)
-    selected_sheets = ["Consolidated data"]
-    columns_to_keep = [
-        "productionYear", "productKeyLevel1", "productKeyLevel2", "componentKeyLevel0",
-        "componentKeyLevel1", "materialKeyLevel0", "materialKeyLevel1", "materialKeyLevel2",
-        "materialKeyLevel3", "materialKeyLevel4", "parameterCode", "value",
-    ]
+    frame = pd.read_excel(path, sheet_name="Consolidated data")
+    frame = frame.rename(columns={c: str(c).strip() for c in frame.columns})
+    missing = [c for c in KEEP if c not in frame.columns]
+    if missing:
+        raise KeyError(
+            f"the composition file is missing {missing}. This stage needs the "
+            f"voltage class, the motor type and materialClass -- summing over "
+            f"any of them is what the 2026-09-21 rewrite exists to stop."
+        )
+    frame = frame[KEEP].copy()
 
-    raw_sheets = {}
-    for sheet_name in selected_sheets:
-        frame = pd.read_excel(composition_file, sheet_name=sheet_name)
+    code = p04["composition_parameter_code"]
+    frame["parameterCode"] = frame["parameterCode"].astype(str).str.strip()
+    frame = frame[frame["parameterCode"].eq(code)].copy()
+    if frame.empty:
+        raise ValueError(f"no rows with parameterCode == {code!r}")
+
+    frame["productionYear"] = pd.to_numeric(
+        frame["productionYear"], errors="coerce").abs().astype("Int64")
+    frame = frame[frame["productionYear"].notna()].copy()
+    frame["productionYear"] = frame["productionYear"].astype(int)
+    frame["voltageClass"] = pd.to_numeric(frame["voltageClass"]).astype(int)
+    frame["meanValue"] = frame["meanValue"].astype(float)
+    frame["productKeyLevel2"] = (frame["productKeyLevel2"].astype(str)
+                                 .str.strip().str.lower())
+    return frame
+
+
+def load_magnet_elements(p04: dict) -> pd.DataFrame:
+    """
+    The `e-m` rows: each element as a share of the magnet, per grade scenario.
+
+    Absent from older composition files, so a missing sheet is a warning and
+    not a failure -- the material flows still stand without it.
+    """
+    path = (Path(p04["traction_composition_dir"])
+            / p04["traction_composition_file_name"])
+    try:
+        frame = pd.read_excel(path, sheet_name="Magnet elements")
+    except ValueError:
+        print("  no 'Magnet elements' sheet -- element flows skipped. Re-run "
+              "the traction project to produce it.")
+        return pd.DataFrame()
+    frame = frame.rename(columns={c: str(c).strip() for c in frame.columns})
+    return frame
+
+
+def quantify_parallel(tracker_keyed: dict, composition: pd.DataFrame) -> dict:
+    """
+    Material mass per (motor type, voltage class), with nothing mixed together.
+
+    One frame per (region, drive train, flow). Every row answers "if every BEV
+    of this segment and cohort had this motor type at this voltage, how many
+    kilograms of this material would flow" -- so the 15 states stand side by
+    side and none of them has been believed yet.
+
+    ⚠️ THE JOIN IS THE SAME ONE `materials.quantify_elements_from_tracker` MAKES
+    -- tracker `key` and `cohort_year` against `productKeyLevel2` and
+    `productionYear` -- but it is done here because that helper drops
+    `voltageClass` and `materialClass` on the way through, and adding them to a
+    shared helper would change 04_01 and 04_04 as well.
+
+    ⚠️ AND IT IS A LEFT JOIN THAT REPORTS WHAT DID NOT MATCH. The shared helper
+    uses an inner join, which silently drops any tracker row with no composition
+    -- flagged in `materials.py` as a silent-failure design. Here the unmatched
+    rows are counted and printed.
+    """
+    mass_formula_note = "amount [millions] * 1e6 * value [kg per vehicle]"
+    out, unmatched_total, matched_total = {}, 0, 0
+
+    for (region, drive), frame in tracker_keyed.items():
+        for flow_name, flow in frame.groupby("flow"):
+            if flow.empty:
+                continue
+            data = flow[["Region", "Drive Train", "key", "cohort_year",
+                         "scrap_year", "amount"]].copy()
+            data["key"] = data["key"].astype(str).str.strip().str.lower()
+            data["cohort_year"] = data["cohort_year"].astype(int)
+            data["amount"] = data["amount"].astype(float)
+
+            merged = data.merge(
+                composition, how="left",
+                left_on=["key", "cohort_year"],
+                right_on=["productKeyLevel2", "productionYear"])
+
+            missing = merged["meanValue"].isna()
+            unmatched_total += int(missing.sum())
+            matched_total += int((~missing).sum())
+            merged = merged[~missing].copy()
+            if merged.empty:
+                continue
+
+            # kg: the project's "millions of vehicles" unit times kg per vehicle
+            merged["mass"] = merged["amount"] * 1e6 * merged["meanValue"]
+            merged = merged.rename(columns={"cohort_year": "production_year"})
+            out[(region, drive, flow_name)] = merged.drop(
+                columns=["key", "amount", "meanValue", "parameterCode"],
+                errors="ignore").reset_index(drop=True)
+
+    if unmatched_total:
+        share = unmatched_total / max(1, unmatched_total + matched_total)
+        print(f"  ⚠️  {unmatched_total:,} tracker rows ({share:.1%}) had no "
+              f"composition and were dropped -- reported, not silent")
+    print(f"  parallel: {len(out)} (region, drive train, flow) frames, "
+          f"{mass_formula_note}")
+    return out
+
+
+def combine_partitioned(parallel: dict, params) -> dict:
+    """
+    The 15 states weighted into one fleet total, by segment group and year.
+
+    ⚠️ THIS IS WHERE THE SHARES ARE BELIEVED. Everything above this line is
+    arithmetic on the composition file; everything below depends on
+    `src/traction.py` being right about how many cars are of each type at each
+    voltage. That is why the parallel output is kept and written too: when a
+    number here looks wrong, the parallel output says whether the composition or
+    the share is responsible.
+
+    The weight is the joint probability of (motor type, voltage class) for that
+    car's segment group and COHORT YEAR -- the year it was built, not the year
+    it is scrapped, because a car keeps the motor it was made with.
+    """
+    combined = {}
+    for key, frame in parallel.items():
         if frame.empty:
             continue
-        frame = frame.rename(columns={col: str(col).strip() for col in frame.columns})
-        if "value" not in frame.columns and "meanValue" in frame.columns:
-            frame["value"] = frame["meanValue"]  # see module docstring: drops any uncertainty info
-        raw_sheets[sheet_name] = frame[columns_to_keep].copy()
-
-    if not raw_sheets:
-        raise ValueError(
-            f"No usable sheets found in traction composition file after schema "
-            f"normalization. Available sheets: {xlsx.sheet_names}"
-        )
-
-    composition = pd.concat(raw_sheets.values(), ignore_index=True)
-    composition["parameterCode"] = composition["parameterCode"].astype(str).str.strip()
-    composition = composition[composition["parameterCode"].eq(material_parameter_code)].copy()
-
-    composition["productionYear"] = pd.to_numeric(composition["productionYear"], errors="coerce").abs().astype("Int64")
-    composition = composition[composition["productionYear"].notna()].copy()
-    composition["productionYear"] = composition["productionYear"].astype(int)
-
-    cohort_years = sorted({
-        int(y) for frame in tracker_keyed.values() for y in frame["cohort_year"].dropna().astype(int).unique().tolist()
-    })
-    if not cohort_years:
-        raise ValueError("No cohort years found in tracker_keyed.")
-
-    if composition_extend_from_year in set(composition["productionYear"].unique()):
-        base_year = composition_extend_from_year
-    else:
-        base_year = int(composition["productionYear"].mode().iloc[0])
-
-    rows_anchor = composition[composition["productionYear"] == base_year].copy()
-    if rows_anchor.empty:
-        raise ValueError(f"No composition rows available for base_year={base_year}.")
-
-    extended_rows = []
-    for year in cohort_years:
-        temp = rows_anchor.copy()
-        temp["productionYear"] = year
-        extended_rows.append(temp)
-    composition_extended = pd.concat(extended_rows, ignore_index=True)
-
-    print("Base composition year:", base_year)
-    print("Extended to cohort year range:", min(cohort_years), "to", max(cohort_years))
-
-    for col in MATERIAL_LEVELS:
-        if col in composition_extended.columns:
-            composition_extended[col] = composition_extended[col].astype(str).str.strip()
-            composition_extended.loc[composition_extended[col].isin(["", "nan", "None"]), col] = pd.NA
-    composition_extended["materialKeyLevel_highest"] = (
-        composition_extended[MATERIAL_LEVELS].bfill(axis=1).iloc[:, 0]
-    )
-
-    return composition_extended
-
-
-def quantify_by_key(
-    tracker_keyed: dict, composition_extended: pd.DataFrame, p04, *, keep_flow_in_key: bool,
-) -> dict:
-    """Shared quantify+aggregate step, used both for the single-tracker run and the per-scenario loop."""
-    material_parameter_code = p04["composition_parameter_code"]
-    material_level_key = p04["material_level_key"]
-
-    quantified = quantify_elements_from_tracker(
-        tracker_keyed=tracker_keyed,
-        composition_extended=composition_extended,
-        parameter_code=material_parameter_code,
-        material_level_key=material_level_key,
-    )
-
-    mass_by_year_materials_dict = {}
-    for key, frame in quantified.items():
-        if frame.empty:
-            continue
-        out = frame.copy()
-
-        if keep_flow_in_key and len(key) == 3:
-            region_key, drv_key, flow_key = key
-            if "Region" not in out.columns:
-                out["Region"] = region_key
-            if "Drive Train" not in out.columns:
-                out["Drive Train"] = drv_key
-            if "flow" not in out.columns:
-                out["flow"] = flow_key
-            group_cols = ["Region", "Drive Train", "flow", "scrap_year"]
-        else:
-            group_cols = ["Region", "Drive Train", "scrap_year"]
-
-        keep_cols = [c for c in MATERIAL_LEVEL_COLS if c in out.columns]
-        required_cols = {"scrap_year", "mass"}.union(keep_cols).union(set(group_cols))
-        missing_cols = required_cols.difference(out.columns)
-        if missing_cols:
-            raise KeyError(f"Missing columns for material aggregation in {key}: {sorted(missing_cols)}")
-
-        grouped = (
-            out.groupby(group_cols + keep_cols, as_index=False, dropna=False)["mass"]
-            .sum()
-            .sort_values(group_cols + keep_cols)
-            .reset_index(drop=True)
-        )
-        grouped["material"] = grouped[material_level_key].astype(str)
-        grouped["element"] = grouped["material"]
-        mass_by_year_materials_dict[key] = grouped
-
-    return mass_by_year_materials_dict
-
-
-def combine_by_flow_drv(mass_by_year_materials_dict: dict, material_level_key: str) -> dict:
-    """Combine per-(Region, Drive Train, flow) frames into per-(flow, Drive Train) views."""
-    combined: dict = {}
-    for (reg, drv, flow), frame in mass_by_year_materials_dict.items():
-        if frame.empty:
-            continue
-        key = (flow, drv)
-        combined[key] = pd.concat([combined[key], frame], ignore_index=True) if key in combined else frame.copy()
-
-    for key, frame in combined.items():
-        keep_cols = [c for c in MATERIAL_LEVEL_COLS if c in frame.columns]
-        combined[key] = (
-            frame.groupby(["Region", "Drive Train", "scrap_year"] + keep_cols, as_index=False)["mass"]
-            .sum()
-            .sort_values(["Region", "Drive Train", "scrap_year"] + keep_cols)
-            .reset_index(drop=True)
-        )
-        combined[key]["material"] = combined[key][material_level_key].astype(str)
-        combined[key]["element"] = combined[key]["material"]
+        block = frame.copy()
+        block["group"] = [traction.segment_group(s, params)
+                          for s in block["productKeyLevel3"]]
+        weights = {}
+        for group, year in set(zip(block["group"], block["production_year"])):
+            weights[(group, year)] = traction.joint_shares(params, group, year)
+        block["share"] = [
+            weights[(g, y)].get((m, v), 0.0)
+            for g, y, m, v in zip(block["group"], block["production_year"],
+                                  block["componentKeyLevel1"],
+                                  block["voltageClass"])]
+        block["mass"] = block["mass"] * block["share"]
+        combined[key] = block[block["mass"] > 0].reset_index(drop=True)
     return combined
 
 
-def build_material_ratio_df(combined_materials_tractionmotor: dict, material_level_key: str, region: str = "EUR") -> pd.DataFrame:
+def by_material(frames: dict, extra_keys: list[str]) -> pd.DataFrame:
+    """One tidy frame: mass by flow, scrap year, material and whatever else."""
+    rows = []
+    for (region, drive, flow), frame in frames.items():
+        if frame.empty:
+            continue
+        keys = ["scrap_year", "materialClass"] + extra_keys
+        grouped = frame.groupby(keys, as_index=False, dropna=False)["mass"].sum()
+        grouped["Region"], grouped["Drive Train"], grouped["flow"] = (
+            region, drive, flow)
+        rows.append(grouped)
+    return (pd.concat(rows, ignore_index=True) if rows else pd.DataFrame())
+
+
+def element_flows(magnet_mass: pd.DataFrame, elements: pd.DataFrame,
+                  params) -> pd.DataFrame:
     """
-    Same-calendar-year "secondary supply ratio": collected mass in year Y divided by
-    new inflow mass in that SAME year Y -- "what fraction of this year's new material
-    demand could in principle be met by this year's collected end-of-life material".
+    Nd, Pr, Dy and Tb, from the magnet mass and the `e-m` shares.
+
+    ⚠️ PER GRADE SCENARIO, NEVER AVERAGED. SH, UH and EH are three answers to
+    "which grade does a traction magnet use", and the mean of them is a magnet
+    nobody makes. Every row carries `grade_scenario`, and a consumer picks one.
+
+    ⚠️ AND THE SHARE DEPENDS ON THE MOTOR TYPE, because the grade does: the
+    scenarios are applied to every magnet-bearing type, and the element sheet
+    holds one row per (scenario, motor type, element).
     """
-    key_in = (region, "inflow")
-    key_col = (region, "collected")
-    if key_in not in combined_materials_tractionmotor or key_col not in combined_materials_tractionmotor:
-        return pd.DataFrame(columns=["scrap_year", material_level_key, "inflow", "collected", "ratio"])
+    if magnet_mass.empty or elements.empty:
+        return pd.DataFrame()
+    magnet = magnet_mass[magnet_mass["materialClass"] == "magnet"]
+    if magnet.empty:
+        return pd.DataFrame()
 
-    inflow = (
-        combined_materials_tractionmotor[key_in][["scrap_year", material_level_key, "mass"]]
-        .rename(columns={"mass": "inflow"}).groupby(["scrap_year", material_level_key], as_index=False)["inflow"].sum()
-    )
-    collected = (
-        combined_materials_tractionmotor[key_col][["scrap_year", material_level_key, "mass"]]
-        .rename(columns={"mass": "collected"}).groupby(["scrap_year", material_level_key], as_index=False)["collected"].sum()
-    )
-    ratio_df = inflow.merge(collected, on=["scrap_year", material_level_key], how="inner")
-    ratio_df["ratio"] = ratio_df["collected"] / ratio_df["inflow"].where(ratio_df["inflow"] > 0)
-    return ratio_df
+    wanted = ["Nd", "Pr", "Dy", "Tb"]
+    shares = elements[elements["element"].isin(wanted)][
+        ["grade_scenario", "is_base", "componentKeyLevel1", "element",
+         "meanValue", "TmaxOperating_C"]].rename(
+        columns={"meanValue": "element_share"})
 
-
-def plot_secondary_supply_ratio(ratio_df: pd.DataFrame, material_level_key: str) -> tuple[plt.Figure, plt.Axes]:
-    """
-    [NEW] Direct visual for build_material_ratio_df's output -- previously computed
-    but never plotted. Shows, per material, what fraction of new inflow demand could
-    be met by same-year collected end-of-life material.
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    if ratio_df.empty:
-        ax.text(0.5, 0.5, "No overlapping inflow/collected data to compute a ratio", ha="center", va="center")
-        return fig, ax
-
-    for material, grp in ratio_df.groupby(material_level_key):
-        grp = grp.sort_values("scrap_year")
-        ax.plot(grp["scrap_year"], grp["ratio"], linewidth=1.8, label=str(material))
-
-    ax.set_title("Traction motor secondary-supply ratio (collected / inflow, same year)", fontsize=12)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Ratio")
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False, fontsize=8)
-    plt.tight_layout(rect=[0, 0, 0.82, 1])
-    return fig, ax
+    if "componentKeyLevel1" in magnet.columns:
+        merged = magnet.merge(shares, on="componentKeyLevel1", how="inner")
+    else:
+        # The combined output has already summed over motor type, so the
+        # element share cannot be motor-specific. Averaged across the
+        # magnet-bearing types, which is exact only when they share a grade --
+        # they do today, all SH, and the row says so.
+        per_scenario = shares.groupby(
+            ["grade_scenario", "is_base", "element", "TmaxOperating_C"],
+            as_index=False)["element_share"].mean()
+        merged = magnet.merge(per_scenario, how="cross")
+    merged["mass"] = merged["mass"] * merged["element_share"]
+    return merged.drop(columns=["element_share"]).reset_index(drop=True)
 
 
 def main() -> dict[str, Any]:
     scenario_names = [
-        "BAU", "BEV_only", "stock_lower", "BEV_A_F", "BEV_JA_JF", "BEV_large", "BEV_small",
-        "BEV_longer", "ICEV_shorter", "losses_zero", "losses_high",
+        "BAU", "BEV_only", "stock_lower", "BEV_A_F", "BEV_JA_JF", "BEV_large",
+        "BEV_small", "BEV_longer", "ICEV_shorter", "losses_zero", "losses_high",
     ]
-    loaded = load_many(
-        "params", "tracker_keyed", *[f"tracker_keyed_{n}" for n in scenario_names],
-        root=PROJECT_ROOT,
-    )
+    # ⚠️ LOAD WHAT EXISTS. Ten of the eleven scenario trackers are absent
+    # whenever stage 03 has not been re-run, and demanding all of them made this
+    # stage impossible to run at all. The baseline is required; a missing
+    # scenario is named and skipped.
+    loaded = load_many("params", "tracker_keyed", root=PROJECT_ROOT)
     params = loaded["params"]
-    p01 = params.data_prep
-    p04_dict = params.to_nested_dict()["04_materials"]
-    material_level_key = p04_dict["material_level_key"]
+    p04 = params.to_nested_dict()["04_materials"]
     tracker_keyed = loaded["tracker_keyed"]
 
     print(artifact_status(root=PROJECT_ROOT))
 
-    composition_extended = load_composition(p01, p04_dict, tracker_keyed)
+    available, absent = {}, []
+    for name in scenario_names:
+        try:
+            available[name] = load_many(f"tracker_keyed_{name}",
+                                        root=PROJECT_ROOT)[f"tracker_keyed_{name}"]
+        except Exception:
+            absent.append(name)
+    if absent:
+        print(f"  scenarios not on disk, skipped: {', '.join(absent)}")
 
-    # -----------------------------------------------------------------------
-    # Single-tracker (baseline) run
-    # -----------------------------------------------------------------------
-    mass_by_year_materials_dict_tractionmotor = quantify_by_key(
-        tracker_keyed, composition_extended, p04_dict, keep_flow_in_key=False
-    )
-    combined_materials_tractionmotor = combine_by_flow_drv(mass_by_year_materials_dict_tractionmotor, material_level_key)
+    composition = load_composition(p04)
+    elements = load_magnet_elements(p04)
+    print(f"  {len(composition):,} composition rows, "
+          f"{composition.productionYear.nunique()} years, "
+          f"{composition.componentKeyLevel1.nunique()} motor types, "
+          f"{composition.voltageClass.nunique()} voltage classes")
+
+    # ---------------------------------------------------------------- parallel
+    print("\nParallel -- nothing mixed")
+    parallel = quantify_parallel(tracker_keyed, composition)
+    parallel_tidy = by_material(parallel, ["componentKeyLevel1", "voltageClass"])
+
+    # ---------------------------------------------------------------- combined
+    print("\nCombined -- the shares applied")
+    combined = combine_partitioned(parallel, params)
+    combined_tidy = by_material(combined, [])
+    combined_by_type = by_material(combined, ["componentKeyLevel1"])
+
+    # ---------------------------------------------------------------- elements
+    element_tidy = element_flows(combined_by_type, elements, params)
+    if not element_tidy.empty:
+        print(f"  elements: {len(element_tidy):,} rows, "
+              f"{element_tidy.grade_scenario.nunique()} grade scenarios")
 
     artifacts_dir = PROJECT_ROOT / "data" / "processed" / "intermediate"
     saved = save_unregistered_scenario_outputs(artifacts_dir, {
-        "04_mass_by_year_materials_dict_tractionmotor.pkl": mass_by_year_materials_dict_tractionmotor,
-        "04_combined_materials_tractionmotor.pkl": combined_materials_tractionmotor,
+        "04_03_traction_parallel.pkl": parallel_tidy,
+        "04_03_traction_combined.pkl": combined_tidy,
+        "04_03_traction_combined_by_type.pkl": combined_by_type,
+        "04_03_traction_elements.pkl": element_tidy,
     })
 
-    ratio_df_material_tm = build_material_ratio_df(combined_materials_tractionmotor, material_level_key)
+    out_dir = PROJECT_ROOT / "data" / "processed"
+    for name, frame in (("04_03_traction_parallel", parallel_tidy),
+                        ("04_03_traction_combined", combined_tidy),
+                        ("04_03_traction_elements", element_tidy)):
+        if not frame.empty:
+            frame.to_csv(out_dir / f"{name}.csv", index=False)
 
-    # -----------------------------------------------------------------------
-    # Diagnostic plot: secondary supply ratio -- integrated here, the exact point
-    # this data first exists.
-    # -----------------------------------------------------------------------
-    fig, _ = plot_secondary_supply_ratio(ratio_df_material_tm, material_level_key)
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
-    fig_dir.mkdir(parents=True, exist_ok=True)
-    fig_path = fig_dir / "04_03_secondary_supply_ratio.png"
-    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-    print(f"Saved diagnostic plot: {fig_path}")
+    scenario_outputs = {}
+    for name, tracker in available.items():
+        par = quantify_parallel(tracker, composition)
+        com = combine_partitioned(par, params)
+        scenario_outputs[name] = {
+            "parallel": by_material(par, ["componentKeyLevel1", "voltageClass"]),
+            "combined": by_material(com, []),
+        }
+    if scenario_outputs:
+        saved.update(save_unregistered_scenario_outputs(artifacts_dir, {
+            f"04_03_traction_{name}.pkl": frames
+            for name, frames in scenario_outputs.items()}))
 
-    # -----------------------------------------------------------------------
-    # Per-scenario loop (C6 is fixed -- all 11 are genuinely distinct)
-    # -----------------------------------------------------------------------
-    saved_scenarios: dict[str, Any] = {}
-    for scenario_name in scenario_names:
-        tracker = loaded[f"tracker_keyed_{scenario_name}"]
-        mass_dict = quantify_by_key(tracker, composition_extended, p04_dict, keep_flow_in_key=True)
-        combined_dict = combine_by_flow_drv(mass_dict, material_level_key)
-        print(scenario_name, "| mass_dict:", len(mass_dict), "| combined_dict:", len(combined_dict))
-
-        saved_scenarios.update(save_unregistered_scenario_outputs(artifacts_dir, {
-            f"04_mass_by_year_materials_dict_tractionmotor_{scenario_name}.pkl": mass_dict,
-            f"04_combined_materials_tractionmotor_{scenario_name}.pkl": combined_dict,
-        }))
-
-    print("Saved (baseline):", saved)
-    print("Saved (per-scenario):", saved_scenarios)
-    return {"saved": saved, "saved_scenarios": saved_scenarios, "ratio_df": ratio_df_material_tm}
+    return {"saved": saved, "parallel": parallel_tidy,
+            "combined": combined_tidy, "elements": element_tidy}
 
 
 if __name__ == "__main__":
