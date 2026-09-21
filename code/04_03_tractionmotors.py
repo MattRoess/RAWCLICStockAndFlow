@@ -303,6 +303,227 @@ def element_flows(magnet_mass: pd.DataFrame, elements: pd.DataFrame,
     return merged.drop(columns=["element_share"]).reset_index(drop=True)
 
 
+MATERIAL_COLOURS = {
+    "lamination": "#4A6FA5", "copper": "#B5651D", "magnet": "#C0392B",
+    "steel": "#7F8C8D", "aluminium": "#7FB3D5",
+}
+ELEMENT_COLOURS = {"Nd": "#1F4E79", "Pr": "#2E8B57", "Dy": "#D68910",
+                   "Tb": "#C0392B"}
+GRADE_LINESTYLE = {"SH": "-", "UH": "--", "EH": ":"}
+
+
+def build_material_ratio_df(combined: pd.DataFrame,
+                            region: str = "EUR") -> pd.DataFrame:
+    """
+    The secondary-supply ratio: collected in year Y over new inflow in year Y.
+
+    "What fraction of this year's new traction-motor material demand could in
+    principle be met by this year's collected end-of-life material."
+
+    ⚠️ RESTORED 2026-09-21. The rewrite dropped this and its figure without
+    replacing them, which was a deletion dressed as a rewrite. Kept working on
+    the tidy combined frame instead of the old dict of frames.
+    """
+    if combined.empty:
+        return pd.DataFrame(columns=["scrap_year", "materialClass", "inflow",
+                                     "collected", "ratio"])
+    scoped = combined[combined["Region"] == region]
+    if scoped.empty:
+        return pd.DataFrame(columns=["scrap_year", "materialClass", "inflow",
+                                     "collected", "ratio"])
+
+    def side(flow: str, name: str) -> pd.DataFrame:
+        return (scoped[scoped["flow"] == flow]
+                .groupby(["scrap_year", "materialClass"], as_index=False)["mass"]
+                .sum().rename(columns={"mass": name}))
+
+    ratio = side("inflow", "inflow").merge(side("collected", "collected"),
+                                           on=["scrap_year", "materialClass"],
+                                           how="inner")
+    ratio["ratio"] = ratio["collected"] / ratio["inflow"].where(
+        ratio["inflow"] > 0)
+    return ratio
+
+
+def figure_secondary_supply(ratio: pd.DataFrame, path: Path) -> Path:
+    """Per material, the share of new demand same-year collection could meet."""
+    figure, axis = plt.subplots(figsize=(10, 6))
+    if ratio.empty:
+        axis.text(0.5, 0.5, "No overlapping inflow/collected data",
+                  ha="center", va="center")
+    else:
+        for material, block in ratio.groupby("materialClass"):
+            block = block.sort_values("scrap_year")
+            axis.plot(block["scrap_year"], block["ratio"], lw=1.9,
+                      color=MATERIAL_COLOURS.get(material), label=str(material))
+        axis.axhline(1.0, color="#333333", lw=0.9, ls=":")
+        axis.annotate("collection meets demand", xy=(0.02, 1.02),
+                      xycoords=("axes fraction", "data"), fontsize=8.5,
+                      color="#555555")
+        axis.legend(frameon=False, fontsize=9)
+    axis.set_title("Traction motor secondary-supply ratio "
+                   "(collected / inflow, same year)", fontsize=12)
+    axis.set_xlabel("Year")
+    axis.set_ylabel("Ratio")
+    axis.grid(True, ls="--", alpha=0.3)
+    for side_name in ("top", "right"):
+        axis.spines[side_name].set_visible(False)
+    figure.tight_layout()
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+    return path
+
+
+def figure_material(material: str, parallel: pd.DataFrame,
+                    combined: pd.DataFrame, by_type: pd.DataFrame,
+                    by_voltage: pd.DataFrame, path: Path) -> Path:
+    """
+    One material -- copper or magnet -- as development and as distribution.
+
+    Matthias 2026-09-21 asked for exactly this: the developments, and the
+    distributions, for copper and the permanent magnets.
+
+    left    DEVELOPMENT. The combined fleet demand over time, on the fan of the
+            15 unmixed motor-type x voltage states. How far the solid line sits
+            inside that fan is how much of the answer is the share assumption
+            rather than the composition.
+    middle  DISTRIBUTION BY MOTOR TYPE, stacked. Which drive configurations the
+            demand actually sits in, and how that shifts as the fleet turns
+            over.
+    right   DISTRIBUTION BY VOLTAGE CLASS, stacked -- and for copper this is the
+            whole 800 V story: the same car needs two thirds of the copper at
+            800 V and 0.585 at 1000 V.
+
+    ⚠️ INFLOW ONLY. These are the materials going INTO new vehicles. Outflow and
+    collected are in the same frames and drawn by the secondary-supply figure.
+    """
+    figure, axes = plt.subplots(1, 3, figsize=(17.5, 5.2))
+
+    # ---- development, against the unmixed states -------------------------
+    axis = axes[0]
+    states = parallel[(parallel["materialClass"] == material)
+                      & (parallel["flow"] == "inflow")]
+    if not states.empty:
+        for _, state in states.groupby(["componentKeyLevel1", "voltageClass"]):
+            state = state.groupby("scrap_year", as_index=False)["mass"].sum()
+            axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=0.9,
+                      color="#AAB2BA", alpha=0.65, zorder=1)
+    whole = combined[(combined["materialClass"] == material)
+                     & (combined["flow"] == "inflow")]
+    if not whole.empty:
+        whole = whole.groupby("scrap_year", as_index=False)["mass"].sum()
+        axis.plot(whole["scrap_year"], whole["mass"] / 1e6, lw=2.8,
+                  color=MATERIAL_COLOURS.get(material), zorder=3,
+                  label="combined, shares applied")
+        axis.legend(frameon=False, fontsize=9)
+    axis.set_title(f"{material.capitalize()} into new vehicles", fontsize=11.5)
+    axis.set_ylabel("kilotonnes per year")
+    axis.annotate("grey: each of the 15 motor-type x voltage states,\n"
+                  "unmixed -- 'if every car were this one'",
+                  xy=(0.03, 0.87), xycoords="axes fraction", fontsize=8.2,
+                  color="#555555")
+
+    # ---- distribution by motor type --------------------------------------
+    _stacked(axes[1], by_type, material, "componentKeyLevel1",
+             f"{material.capitalize()} by motor type",
+             lambda name: str(name).replace("ElectricMotors", ""))
+
+    # ---- distribution by voltage class -----------------------------------
+    _stacked(axes[2], by_voltage, material, "voltageClass",
+             f"{material.capitalize()} by voltage class",
+             lambda name: f"{int(name)} V")
+
+    for axis in axes:
+        axis.set_xlabel("Year")
+        axis.set_ylim(bottom=0)
+        axis.grid(True, ls="--", alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+    return path
+
+
+def _stacked(axis, frame: pd.DataFrame, material: str, column: str,
+             title: str, label) -> None:
+    """One stacked area: where a material's demand sits, over time."""
+    block = frame[(frame["materialClass"] == material)
+                  & (frame["flow"] == "inflow")] if not frame.empty else frame
+    axis.set_title(title, fontsize=11.5)
+    if block.empty:
+        axis.text(0.5, 0.5, "no rows", ha="center", va="center")
+        return
+    wide = (block.groupby(["scrap_year", column], as_index=False)["mass"].sum()
+            .pivot(index="scrap_year", columns=column, values="mass")
+            .fillna(0.0).sort_index())
+    axis.stackplot(wide.index, *[wide[c].values / 1e6 for c in wide.columns],
+                   labels=[label(c) for c in wide.columns], alpha=0.9)
+    axis.set_ylabel("kilotonnes per year")
+    axis.legend(frameon=False, fontsize=8.5, loc="upper left")
+
+
+def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
+    """
+    The magnet's elements: Nd, Pr, Dy and Tb, development and scenario spread.
+
+    left    DEVELOPMENT, one line per element, base grade scenario. Log scale,
+            because neodymium and terbium are three orders of magnitude apart
+            and a linear axis shows only neodymium.
+    right   WHAT THE GRADE COSTS. Dysprosium and terbium under SH, UH and EH --
+            the only two elements the grade moves, since the didymium is
+            0.29-0.32 of the magnet in every class.
+
+    ⚠️ THREE ANSWERS, NEVER AVERAGED. The scenarios are three readings of "which
+    grade does a traction magnet use", and their mean is a magnet nobody makes.
+    """
+    figure, axes = plt.subplots(1, 2, figsize=(14, 5.2))
+    if elements.empty:
+        for axis in axes:
+            axis.text(0.5, 0.5, "No element rows -- re-run the traction project\n"
+                                "to write the 'Magnet elements' sheet",
+                      ha="center", va="center")
+        figure.tight_layout(); figure.savefig(path, dpi=160); plt.close(figure)
+        return path
+
+    block = (elements[elements["flow"] == "inflow"]
+             if "flow" in elements.columns else elements)
+    base = block[block["is_base"]] if "is_base" in block.columns else block
+
+    axis = axes[0]
+    for element, state in base.groupby("element"):
+        state = state.groupby("scrap_year", as_index=False)["mass"].sum()
+        axis.plot(state["scrap_year"], state["mass"] / 1e3, lw=2.1,
+                  color=ELEMENT_COLOURS.get(element, "#555555"), label=element)
+    axis.set_yscale("log")
+    axis.set_title("Rare earths into new vehicles, base grade", fontsize=11.5)
+    axis.set_ylabel("tonnes per year (log)")
+    axis.legend(frameon=False, fontsize=9)
+
+    axis = axes[1]
+    for (element, scenario), state in block[
+            block["element"].isin(["Dy", "Tb"])].groupby(
+            ["element", "grade_scenario"]):
+        state = state.groupby("scrap_year", as_index=False)["mass"].sum()
+        axis.plot(state["scrap_year"], state["mass"] / 1e3, lw=1.9,
+                  color=ELEMENT_COLOURS.get(element, "#555555"),
+                  ls=GRADE_LINESTYLE.get(scenario, "-"),
+                  label=f"{element}  {scenario}")
+    axis.set_title("What the magnet grade costs: Dy and Tb", fontsize=11.5)
+    axis.set_ylabel("tonnes per year")
+    axis.legend(frameon=False, fontsize=8.5, ncol=2)
+    axis.annotate("Nd and Pr are identical across the three:\n"
+                  "the didymium does not vary with grade",
+                  xy=(0.03, 0.88), xycoords="axes fraction", fontsize=8.2,
+                  color="#555555")
+
+    for axis in axes:
+        axis.set_xlabel("Year")
+        axis.grid(True, ls="--", alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+    return path
+
+
 def main() -> dict[str, Any]:
     scenario_names = [
         "BAU", "BEV_only", "stock_lower", "BEV_A_F", "BEV_JA_JF", "BEV_large",
@@ -346,6 +567,7 @@ def main() -> dict[str, Any]:
     combined = combine_partitioned(parallel, params)
     combined_tidy = by_material(combined, [])
     combined_by_type = by_material(combined, ["componentKeyLevel1"])
+    combined_by_voltage = by_material(combined, ["voltageClass"])
 
     # ---------------------------------------------------------------- elements
     element_tidy = element_flows(combined_by_type, elements, params)
@@ -381,8 +603,25 @@ def main() -> dict[str, Any]:
             f"04_03_traction_{name}.pkl": frames
             for name, frames in scenario_outputs.items()}))
 
+    # ------------------------------------------------------------- figures
+    figure_dir = out_dir / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    ratio = build_material_ratio_df(combined_tidy)
+    made = [
+        figure_material("copper", parallel_tidy, combined_tidy, combined_by_type,
+                        combined_by_voltage, figure_dir / "04_03_copper.png"),
+        figure_material("magnet", parallel_tidy, combined_tidy, combined_by_type,
+                        combined_by_voltage, figure_dir / "04_03_magnet.png"),
+        figure_elements(element_tidy, figure_dir / "04_03_rare_earths.png"),
+        figure_secondary_supply(ratio, figure_dir / "04_03_secondary_supply.png"),
+    ]
+    print("\nFigures")
+    for path in made:
+        print(f"  {path}")
+
     return {"saved": saved, "parallel": parallel_tidy,
-            "combined": combined_tidy, "elements": element_tidy}
+            "combined": combined_tidy, "elements": element_tidy,
+            "ratio": ratio, "figures": made}
 
 
 if __name__ == "__main__":
