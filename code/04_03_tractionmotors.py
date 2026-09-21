@@ -524,6 +524,47 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     return path
 
 
+# What this stage needs from `params.materials`, all added 2026-09-21.
+REQUIRED_PARAMS = (
+    "traction_composition_dir", "traction_type_shares", "traction_synrm_goes_to",
+    "traction_awd_share", "traction_twin_pm_share_of_awd",
+    "traction_dual_rotor_share", "pack_voltage_1000v_share",
+)
+
+
+def _check_params_are_current(params) -> None:
+    """
+    Fail with an instruction when `00_params.pkl` predates this stage.
+
+    ⚠️ A PICKLED DATACLASS DOES NOT GAIN FIELDS WHEN THE CLASS DOES. The params
+    artifact is an INSTANCE frozen at the moment stage 00 last ran, so a field
+    added to `MaterialsParams` afterwards is simply absent from it, and the
+    first thing to touch that field fails -- previously inside `asdict()`, with
+    an AttributeError naming a dataclass internal and not a cause.
+
+    Regenerating it is safe and cheap: stage 00 validates and writes, and the
+    only schema changes since this artifact are additions plus two dead
+    filenames removed, so nothing stages 01-03 computed against has moved.
+    """
+    # ⚠️ `vars()`, NOT `hasattr`. A dataclass field with a plain default is also
+    # a CLASS attribute, so `hasattr` finds it on an instance that does not have
+    # it -- `traction_synrm_goes_to` would have passed while the field was
+    # missing. `asdict()` reads the instance, so the instance is what to check.
+    present = vars(params.materials)
+    absent = [name for name in REQUIRED_PARAMS if name not in present]
+    if not absent:
+        return
+    raise SystemExit(
+        "04_03_tractionmotors.py: the params artifact predates this stage.\n"
+        f"  missing from 00_params.pkl: {', '.join(absent)}\n"
+        "  These were added on 2026-09-21 and a pickled dataclass does not gain\n"
+        "  fields when the class does.\n\n"
+        "  Fix, and it is safe -- the changes since that artifact are additions:\n"
+        "      .venv/bin/python code/00_parameters.py\n"
+        "  then run this stage again."
+    )
+
+
 def main() -> dict[str, Any]:
     scenario_names = [
         "BAU", "BEV_only", "stock_lower", "BEV_A_F", "BEV_JA_JF", "BEV_large",
@@ -535,6 +576,7 @@ def main() -> dict[str, Any]:
     # scenario is named and skipped.
     loaded = load_many("params", "tracker_keyed", root=PROJECT_ROOT)
     params = loaded["params"]
+    _check_params_are_current(params)
     p04 = params.to_nested_dict()["04_materials"]
     tracker_keyed = loaded["tracker_keyed"]
 
