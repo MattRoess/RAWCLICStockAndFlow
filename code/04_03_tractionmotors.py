@@ -431,6 +431,43 @@ def figure_secondary_supply(ratio: pd.DataFrame, path: Path) -> Path:
     return path
 
 
+# ⚠️ THE TRACKER HAS NO "OUTFLOW" COLUMN, AND OUTFLOW IS COLLECTED PLUS LOST.
+# Matthias 2026-09-21. End of life splits three ways in the tracker --
+# `collected`, `export` and `unknown_whereabouts` -- and the last two are the
+# same thing for a European recycler: material that left the fleet and cannot be
+# recovered here. An exported car takes its motor with it; an unaccounted one
+# takes it nobody knows where. So:
+#
+#     outflow = collected + lost        lost = export + unknown_whereabouts
+#
+# Drawn as four series rather than three, because the LOST line is the answer to
+# "how much of the neodymium coming out of the fleet can we actually have", and
+# leaving it as the white space between two other lines makes the reader
+# measure it with a ruler.
+END_OF_LIFE = ("collected", "export", "unknown_whereabouts")
+LOST = ("export", "unknown_whereabouts")
+FLOW_SERIES = {
+    "inflow": ("into new vehicles", "#1F4E79", "-"),
+    "outflow": ("out of the fleet (collected + lost)", "#7F8C8D", "-"),
+    "collected": ("collected", "#2E8B57", "-"),
+    "lost": ("lost (exported + unknown whereabouts)", "#C0392B", "--"),
+}
+
+
+def _flow_series(frame: pd.DataFrame, material: str, name: str) -> pd.DataFrame:
+    """One of inflow / outflow / collected, summed by year, with its interval."""
+    if frame.empty:
+        return pd.DataFrame()
+    wanted = {"outflow": END_OF_LIFE, "lost": LOST}.get(name, (name,))
+    block = frame[(frame["materialClass"] == material)
+                  & (frame["flow"].isin(wanted))]
+    if block.empty:
+        return pd.DataFrame()
+    columns = [c for c in ("mass", "mass_low", "mass_high")
+               if c in block.columns]
+    return block.groupby("scrap_year", as_index=False)[columns].sum()
+
+
 def figure_material(material: str, parallel: pd.DataFrame,
                     combined: pd.DataFrame, by_type: pd.DataFrame,
                     by_voltage: pd.DataFrame, path: Path) -> Path:
@@ -454,10 +491,33 @@ def figure_material(material: str, parallel: pd.DataFrame,
     ⚠️ INFLOW ONLY. These are the materials going INTO new vehicles. Outflow and
     collected are in the same frames and drawn by the secondary-supply figure.
     """
-    figure, axes = plt.subplots(1, 3, figsize=(17.5, 5.2))
+    figure, axes = plt.subplots(1, 4, figsize=(22.5, 5.2))
 
-    # ---- development, against the unmixed states -------------------------
+    # ---- development: the three flows, with their intervals --------------
     axis = axes[0]
+    for name, (label, colour, style) in FLOW_SERIES.items():
+        series = _flow_series(combined, material, name)
+        if series.empty:
+            continue
+        if {"mass_low", "mass_high"} <= set(series.columns):
+            axis.fill_between(series["scrap_year"], series["mass_low"] / 1e6,
+                              series["mass_high"] / 1e6, color=colour,
+                              alpha=0.18, lw=0, zorder=2)
+        axis.plot(series["scrap_year"], series["mass"] / 1e6, lw=2.5,
+                  color=colour, ls=style, zorder=3, label=label)
+    axis.set_title(f"{material.capitalize()}: in, out, collected and lost",
+                   fontsize=11.5)
+    axis.set_ylabel("[kt / year]")
+    axis.legend(frameon=False, fontsize=8.5)
+    axis.annotate("outflow = collected + lost;  "
+                  "lost = exported + unknown whereabouts.\n"
+                  "bands: the composition's own 95% interval, carried\n"
+                  "through as correlated -- NOT a propagated Monte Carlo.",
+                  xy=(0.03, 0.83), xycoords="axes fraction", fontsize=8.2,
+                  color="#555555")
+
+    # ---- the unmixed states, for the inflow ------------------------------
+    axis = axes[1]
     states = parallel[(parallel["materialClass"] == material)
                       & (parallel["flow"] == "inflow")]
     if not states.empty:
@@ -465,39 +525,29 @@ def figure_material(material: str, parallel: pd.DataFrame,
             state = state.groupby("scrap_year", as_index=False)["mass"].sum()
             axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=0.9,
                       color="#AAB2BA", alpha=0.65, zorder=1)
-    whole = combined[(combined["materialClass"] == material)
-                     & (combined["flow"] == "inflow")]
+    whole = _flow_series(combined, material, "inflow")
     if not whole.empty:
-        columns = [c for c in ("mass", "mass_low", "mass_high")
-                   if c in whole.columns]
-        whole = whole.groupby("scrap_year", as_index=False)[columns].sum()
-        colour = MATERIAL_COLOURS.get(material)
-        if {"mass_low", "mass_high"} <= set(whole.columns):
-            axis.fill_between(whole["scrap_year"], whole["mass_low"] / 1e6,
-                              whole["mass_high"] / 1e6, color=colour,
-                              alpha=0.22, lw=0, zorder=2,
-                              label="95% composition interval")
         axis.plot(whole["scrap_year"], whole["mass"] / 1e6, lw=2.8,
-                  color=colour, zorder=3, label="combined, shares applied")
+                  color=MATERIAL_COLOURS.get(material), zorder=3,
+                  label="combined, shares applied")
         axis.legend(frameon=False, fontsize=9)
-    axis.set_title(f"{material.capitalize()} into new vehicles", fontsize=11.5)
+    axis.set_title(f"{material.capitalize()} in, against the 15 states",
+                   fontsize=11.5)
     axis.set_ylabel("[kt / year]")
-    axis.annotate("grey: each of the 15 motor-type x voltage states,\n"
-                  "unmixed -- 'if every car were this one'.\n"
-                  "band: the composition's own 95% interval, carried through\n"
-                  "as correlated -- NOT a propagated Monte Carlo.",
-                  xy=(0.03, 0.80), xycoords="axes fraction", fontsize=8.2,
+    axis.annotate("grey: each motor-type x voltage state, unmixed --\n"
+                  "'if every car were this one'",
+                  xy=(0.03, 0.88), xycoords="axes fraction", fontsize=8.2,
                   color="#555555")
 
-    # ---- distribution by motor type --------------------------------------
-    _stacked(axes[1], by_type, material, "componentKeyLevel1",
-             f"{material.capitalize()} by motor type",
-             lambda name: str(name).replace("ElectricMotors", ""))
-
-    # ---- distribution by voltage class -----------------------------------
-    _stacked(axes[2], by_voltage, material, "voltageClass",
-             f"{material.capitalize()} by voltage class",
-             lambda name: f"{int(name)} V")
+    # ---- distribution by motor type, in and collected --------------------
+    _stacked(axes[2], by_type, material, "componentKeyLevel1",
+             f"{material.capitalize()} IN, by motor type",
+             lambda name: str(name).replace("ElectricMotors", ""),
+             flows=("inflow",))
+    _stacked(axes[3], by_type, material, "componentKeyLevel1",
+             f"{material.capitalize()} COLLECTED, by motor type",
+             lambda name: str(name).replace("ElectricMotors", ""),
+             flows=("collected",))
 
     for axis in axes:
         axis.set_xlabel("Year")
@@ -510,10 +560,10 @@ def figure_material(material: str, parallel: pd.DataFrame,
 
 
 def _stacked(axis, frame: pd.DataFrame, material: str, column: str,
-             title: str, label) -> None:
-    """One stacked area: where a material's demand sits, over time."""
+             title: str, label, flows: tuple[str, ...] = ("inflow",)) -> None:
+    """One stacked area: where a material's flow sits, over time."""
     block = frame[(frame["materialClass"] == material)
-                  & (frame["flow"] == "inflow")] if not frame.empty else frame
+                  & (frame["flow"].isin(flows))] if not frame.empty else frame
     axis.set_title(title, fontsize=11.5)
     if block.empty:
         axis.text(0.5, 0.5, "no rows", ha="center", va="center")
@@ -541,7 +591,7 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     ⚠️ THREE ANSWERS, NEVER AVERAGED. The scenarios are three readings of "which
     grade does a traction magnet use", and their mean is a magnet nobody makes.
     """
-    figure, axes = plt.subplots(1, 2, figsize=(14, 5.2))
+    figure, axes = plt.subplots(1, 3, figsize=(18.5, 5.2))
     if elements.empty:
         for axis in axes:
             axis.text(0.5, 0.5, "No element rows -- re-run the traction project\n"
@@ -550,12 +600,39 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
         figure.tight_layout(); figure.savefig(path, dpi=160); plt.close(figure)
         return path
 
-    block = (elements[elements["flow"] == "inflow"]
-             if "flow" in elements.columns else elements)
-    base = block[block["is_base"]] if "is_base" in block.columns else block
+    base = (elements[elements["is_base"]]
+            if "is_base" in elements.columns else elements)
 
+    # ⚠️ LEFT PANEL IS THE THREE FLOWS, not the inflow alone. For a rare earth
+    # the gap between what goes in and what comes back out is the whole
+    # recovery question, and drawing only the inflow hides it.
     axis = axes[0]
-    for element, state in base.groupby("element"):
+    for name, (label, colour, style) in FLOW_SERIES.items():
+        wanted = END_OF_LIFE if name == "outflow" else (name,)
+        flow_block = (base[base["flow"].isin(wanted)]
+                      if "flow" in base.columns else base)
+        for element, state in flow_block.groupby("element"):
+            if element != "Nd":      # Nd carries the story; the rest crowd it
+                continue
+            if state.empty:
+                continue
+            columns = [c for c in ("mass", "mass_low", "mass_high")
+                       if c in state.columns]
+            state = state.groupby("scrap_year", as_index=False)[columns].sum()
+            if {"mass_low", "mass_high"} <= set(state.columns):
+                axis.fill_between(state["scrap_year"], state["mass_low"] / 1e6,
+                                  state["mass_high"] / 1e6, color=colour,
+                                  alpha=0.18, lw=0)
+            axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=2.4,
+                      color=colour, ls=style, label=f"Nd {label}")
+    axis.set_title("Neodymium: in, out, collected and lost", fontsize=11.5)
+    axis.set_ylabel("[kt / year]")
+    axis.legend(frameon=False, fontsize=8.5)
+
+    axis = axes[1]
+    block = (base[base["flow"] == "inflow"]
+             if "flow" in base.columns else base)
+    for element, state in block.groupby("element"):
         columns = [c for c in ("mass", "mass_low", "mass_high")
                    if c in state.columns]
         state = state.groupby("scrap_year", as_index=False)[columns].sum()
@@ -567,14 +644,15 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
         axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=2.1,
                   color=colour, label=element)
     axis.set_yscale("log")
-    axis.set_title("Rare earths into new vehicles, base grade "
-                   "(band: composition interval)", fontsize=11.5)
+    axis.set_title("All four elements in, base grade", fontsize=11.5)
     axis.set_ylabel("[kt / year], log scale")
     axis.legend(frameon=False, fontsize=9)
 
-    axis = axes[1]
-    for (element, scenario), state in block[
-            block["element"].isin(["Dy", "Tb"])].groupby(
+    axis = axes[2]
+    scenarios = (elements[elements["flow"] == "inflow"]
+                 if "flow" in elements.columns else elements)
+    for (element, scenario), state in scenarios[
+            scenarios["element"].isin(["Dy", "Tb"])].groupby(
             ["element", "grade_scenario"]):
         state = state.groupby("scrap_year", as_index=False)["mass"].sum()
         axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=1.9,
