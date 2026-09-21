@@ -80,7 +80,7 @@ KEEP = [
     "productKeyLevel2", "productKeyLevel3", "productionYear",
     "componentKeyLevel1", "componentKeyLevel2",
     "materialClass", "materialKeyLevel1", "voltageClass", "torque_nm",
-    "parameterCode", "meanValue",
+    "parameterCode", "meanValue", "p025", "p975",
 ]
 
 
@@ -128,7 +128,11 @@ def load_composition(p04: dict) -> pd.DataFrame:
     frame = frame[frame["productionYear"].notna()].copy()
     frame["productionYear"] = frame["productionYear"].astype(int)
     frame["voltageClass"] = pd.to_numeric(frame["voltageClass"]).astype(int)
-    frame["meanValue"] = frame["meanValue"].astype(float)
+    for column in ("meanValue", "p025", "p975"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    # A row with no interval carries the mean as both ends: a point, not a gap.
+    frame["p025"] = frame["p025"].fillna(frame["meanValue"])
+    frame["p975"] = frame["p975"].fillna(frame["meanValue"])
     frame["productKeyLevel2"] = (frame["productKeyLevel2"].astype(str)
                                  .str.strip().str.lower())
     return frame
@@ -153,7 +157,8 @@ def load_magnet_elements(p04: dict) -> pd.DataFrame:
     return frame
 
 
-def quantify_parallel(tracker_keyed: dict, composition: pd.DataFrame) -> dict:
+def quantify_parallel(tracker_keyed: dict, composition: pd.DataFrame,
+                      params=None) -> dict:
     """
     Material mass per (motor type, voltage class), with nothing mixed together.
 
@@ -176,13 +181,56 @@ def quantify_parallel(tracker_keyed: dict, composition: pd.DataFrame) -> dict:
     mass_formula_note = "amount [millions] * 1e6 * value [kg per vehicle]"
     out, unmatched_total, matched_total = {}, 0, 0
 
+    # ⚠️ BEV ONLY, AND BEFORE THE JOIN. The composition describes `elvBEV`, so
+    # joining the whole tracker drops every petrol, diesel and hybrid row --
+    # 42.9% of all vehicle-flow -- and the warning then reads like a
+    # catastrophe when it is a diesel not having a BEV traction motor. See
+    # `traction_drive_trains` for why PHEV and HEV being excluded IS a real
+    # limitation and not a tautology.
+    wanted = (tuple(params.materials.traction_drive_trains) if params
+              else ("BEV",))
+    fallback = (dict(params.materials.traction_segment_fallback) if params
+                else {})
+    skipped_drive = sorted({drive for _region, drive in tracker_keyed
+                            if drive not in wanted})
+    if skipped_drive:
+        print(f"  drive trains without a BEV traction motor, not counted: "
+              f"{', '.join(skipped_drive)}")
+
+    # ⚠️ AND A SEGMENT THE COMPOSITION DOES NOT HAVE. JA is in the tracker and
+    # not in the dataset; without this it was 3.52 million vehicle-flows leaving
+    # by the back door.
+    if fallback:
+        keys = composition[["productKeyLevel2",
+                            "productKeyLevel3"]].drop_duplicates()
+        by_segment = dict(zip(keys.productKeyLevel3, keys.productKeyLevel2))
+        remap = {}
+        for absent, stand_in in fallback.items():
+            if absent not in by_segment and stand_in in by_segment:
+                remap[absent] = by_segment[stand_in]
+        if remap:
+            print(f"  segments read from a stand-in: "
+                  f"{', '.join(f'{a} -> {b}' for a, b in fallback.items())}")
+
     for (region, drive), frame in tracker_keyed.items():
+        if drive not in wanted:
+            continue
         for flow_name, flow in frame.groupby("flow"):
             if flow.empty:
                 continue
             data = flow[["Region", "Drive Train", "key", "cohort_year",
                          "scrap_year", "amount"]].copy()
             data["key"] = data["key"].astype(str).str.strip().str.lower()
+            if fallback and "Segment" in flow.columns:
+                stand_in = {absent.lower(): by_segment[name]
+                            for absent, name in fallback.items()
+                            if name in by_segment}
+                segments = flow["Segment"].astype(str).str.strip().str.upper()
+                data["key"] = [
+                    stand_in.get(str(seg).lower(), key)
+                    if str(seg).upper() in
+                    {a.upper() for a in fallback} else key
+                    for seg, key in zip(segments, data["key"])]
             data["cohort_year"] = data["cohort_year"].astype(int)
             data["amount"] = data["amount"].astype(float)
 
@@ -199,10 +247,14 @@ def quantify_parallel(tracker_keyed: dict, composition: pd.DataFrame) -> dict:
                 continue
 
             # kg: the project's "millions of vehicles" unit times kg per vehicle
-            merged["mass"] = merged["amount"] * 1e6 * merged["meanValue"]
+            vehicles = merged["amount"] * 1e6
+            merged["mass"] = vehicles * merged["meanValue"]
+            merged["mass_low"] = vehicles * merged["p025"]
+            merged["mass_high"] = vehicles * merged["p975"]
             merged = merged.rename(columns={"cohort_year": "production_year"})
             out[(region, drive, flow_name)] = merged.drop(
-                columns=["key", "amount", "meanValue", "parameterCode"],
+                columns=["key", "amount", "meanValue", "p025", "p975",
+                         "parameterCode"],
                 errors="ignore").reset_index(drop=True)
 
     if unmatched_total:
@@ -244,7 +296,8 @@ def combine_partitioned(parallel: dict, params) -> dict:
             for g, y, m, v in zip(block["group"], block["production_year"],
                                   block["componentKeyLevel1"],
                                   block["voltageClass"])]
-        block["mass"] = block["mass"] * block["share"]
+        for column in ("mass", "mass_low", "mass_high"):
+            block[column] = block[column] * block["share"]
         combined[key] = block[block["mass"] > 0].reset_index(drop=True)
     return combined
 
@@ -256,7 +309,9 @@ def by_material(frames: dict, extra_keys: list[str]) -> pd.DataFrame:
         if frame.empty:
             continue
         keys = ["scrap_year", "materialClass"] + extra_keys
-        grouped = frame.groupby(keys, as_index=False, dropna=False)["mass"].sum()
+        columns = [c for c in ("mass", "mass_low", "mass_high")
+                   if c in frame.columns]
+        grouped = frame.groupby(keys, as_index=False, dropna=False)[columns].sum()
         grouped["Region"], grouped["Drive Train"], grouped["flow"] = (
             region, drive, flow)
         rows.append(grouped)
@@ -299,7 +354,9 @@ def element_flows(magnet_mass: pd.DataFrame, elements: pd.DataFrame,
             ["grade_scenario", "is_base", "element", "TmaxOperating_C"],
             as_index=False)["element_share"].mean()
         merged = magnet.merge(per_scenario, how="cross")
-    merged["mass"] = merged["mass"] * merged["element_share"]
+    for column in ("mass", "mass_low", "mass_high"):
+        if column in merged.columns:
+            merged[column] = merged[column] * merged["element_share"]
     return merged.drop(columns=["element_share"]).reset_index(drop=True)
 
 
@@ -411,16 +468,25 @@ def figure_material(material: str, parallel: pd.DataFrame,
     whole = combined[(combined["materialClass"] == material)
                      & (combined["flow"] == "inflow")]
     if not whole.empty:
-        whole = whole.groupby("scrap_year", as_index=False)["mass"].sum()
+        columns = [c for c in ("mass", "mass_low", "mass_high")
+                   if c in whole.columns]
+        whole = whole.groupby("scrap_year", as_index=False)[columns].sum()
+        colour = MATERIAL_COLOURS.get(material)
+        if {"mass_low", "mass_high"} <= set(whole.columns):
+            axis.fill_between(whole["scrap_year"], whole["mass_low"] / 1e6,
+                              whole["mass_high"] / 1e6, color=colour,
+                              alpha=0.22, lw=0, zorder=2,
+                              label="95% composition interval")
         axis.plot(whole["scrap_year"], whole["mass"] / 1e6, lw=2.8,
-                  color=MATERIAL_COLOURS.get(material), zorder=3,
-                  label="combined, shares applied")
+                  color=colour, zorder=3, label="combined, shares applied")
         axis.legend(frameon=False, fontsize=9)
     axis.set_title(f"{material.capitalize()} into new vehicles", fontsize=11.5)
     axis.set_ylabel("[kt / year]")
     axis.annotate("grey: each of the 15 motor-type x voltage states,\n"
-                  "unmixed -- 'if every car were this one'",
-                  xy=(0.03, 0.87), xycoords="axes fraction", fontsize=8.2,
+                  "unmixed -- 'if every car were this one'.\n"
+                  "band: the composition's own 95% interval, carried through\n"
+                  "as correlated -- NOT a propagated Monte Carlo.",
+                  xy=(0.03, 0.80), xycoords="axes fraction", fontsize=8.2,
                   color="#555555")
 
     # ---- distribution by motor type --------------------------------------
@@ -490,11 +556,19 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
 
     axis = axes[0]
     for element, state in base.groupby("element"):
-        state = state.groupby("scrap_year", as_index=False)["mass"].sum()
+        columns = [c for c in ("mass", "mass_low", "mass_high")
+                   if c in state.columns]
+        state = state.groupby("scrap_year", as_index=False)[columns].sum()
+        colour = ELEMENT_COLOURS.get(element, "#555555")
+        if {"mass_low", "mass_high"} <= set(state.columns):
+            axis.fill_between(state["scrap_year"], state["mass_low"] / 1e6,
+                              state["mass_high"] / 1e6, color=colour,
+                              alpha=0.20, lw=0)
         axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=2.1,
-                  color=ELEMENT_COLOURS.get(element, "#555555"), label=element)
+                  color=colour, label=element)
     axis.set_yscale("log")
-    axis.set_title("Rare earths into new vehicles, base grade", fontsize=11.5)
+    axis.set_title("Rare earths into new vehicles, base grade "
+                   "(band: composition interval)", fontsize=11.5)
     axis.set_ylabel("[kt / year], log scale")
     axis.legend(frameon=False, fontsize=9)
 
@@ -524,42 +598,40 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     return path
 
 
-# What this stage needs from `params.materials`, all added 2026-09-21.
-REQUIRED_PARAMS = (
-    "traction_composition_dir", "traction_type_shares", "traction_synrm_goes_to",
-    "traction_awd_share", "traction_twin_pm_share_of_awd",
-    "traction_dual_rotor_share", "pack_voltage_1000v_share",
-)
-
-
 def _check_params_are_current(params) -> None:
     """
-    Fail with an instruction when `00_params.pkl` predates this stage.
+    Fail with an instruction when `00_params.pkl` predates the schema.
 
     ⚠️ A PICKLED DATACLASS DOES NOT GAIN FIELDS WHEN THE CLASS DOES. The params
     artifact is an INSTANCE frozen at the moment stage 00 last ran, so a field
-    added to `MaterialsParams` afterwards is simply absent from it, and the
-    first thing to touch that field fails -- previously inside `asdict()`, with
-    an AttributeError naming a dataclass internal and not a cause.
+    added afterwards is simply absent from it, and the first thing to touch that
+    field fails -- inside `asdict()`, with an AttributeError naming a dataclass
+    internal and not a cause.
 
-    Regenerating it is safe and cheap: stage 00 validates and writes, and the
-    only schema changes since this artifact are additions plus two dead
-    filenames removed, so nothing stages 01-03 computed against has moved.
+    ⚠️ AND THE CHECK IS DERIVED, NOT LISTED. The first version compared against a
+    hand-written tuple of field names, which went stale the very next time a
+    parameter was added -- the guard against staleness, stale. It now asks the
+    LIVE dataclass what fields exist and compares that to what the artifact
+    carries, so anything added later is covered without anyone remembering to.
+
+    `vars()`, not `hasattr`: a field with a plain default is also a CLASS
+    attribute, so `hasattr` is True on an instance that does not have it.
+    `asdict()` reads the instance, so the instance is what to check.
     """
-    # ⚠️ `vars()`, NOT `hasattr`. A dataclass field with a plain default is also
-    # a CLASS attribute, so `hasattr` finds it on an instance that does not have
-    # it -- `traction_synrm_goes_to` would have passed while the field was
-    # missing. `asdict()` reads the instance, so the instance is what to check.
-    present = vars(params.materials)
-    absent = [name for name in REQUIRED_PARAMS if name not in present]
+    from dataclasses import fields as dataclass_fields
+    from src.params_schema import MaterialsParams  # type: ignore
+
+    declared = {f.name for f in dataclass_fields(MaterialsParams)}
+    carried = set(vars(params.materials))
+    absent = sorted(declared - carried)
     if not absent:
         return
+    shown = ", ".join(absent[:6]) + (" ..." if len(absent) > 6 else "")
     raise SystemExit(
-        "04_03_tractionmotors.py: the params artifact predates this stage.\n"
-        f"  missing from 00_params.pkl: {', '.join(absent)}\n"
-        "  These were added on 2026-09-21 and a pickled dataclass does not gain\n"
-        "  fields when the class does.\n\n"
-        "  Fix, and it is safe -- the changes since that artifact are additions:\n"
+        "04_03_tractionmotors.py: the params artifact predates the schema.\n"
+        f"  {len(absent)} field(s) missing from 00_params.pkl: {shown}\n"
+        "  A pickled dataclass does not gain fields when the class does.\n\n"
+        "  Fix:\n"
         "      .venv/bin/python code/00_parameters.py\n"
         "  then run this stage again."
     )
@@ -601,7 +673,7 @@ def main() -> dict[str, Any]:
 
     # ---------------------------------------------------------------- parallel
     print("\nParallel -- nothing mixed")
-    parallel = quantify_parallel(tracker_keyed, composition)
+    parallel = quantify_parallel(tracker_keyed, composition, params)
     parallel_tidy = by_material(parallel, ["componentKeyLevel1", "voltageClass"])
 
     # ---------------------------------------------------------------- combined
@@ -634,7 +706,7 @@ def main() -> dict[str, Any]:
 
     scenario_outputs = {}
     for name, tracker in available.items():
-        par = quantify_parallel(tracker, composition)
+        par = quantify_parallel(tracker, composition, params)
         com = combine_partitioned(par, params)
         scenario_outputs[name] = {
             "parallel": by_material(par, ["componentKeyLevel1", "voltageClass"]),

@@ -1725,6 +1725,43 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes, and it takes its share from `axial` when it gets one.
     traction_dual_rotor_share: float = 0.0
 
+    # ⚠️ SEGMENTS THE COMPOSITION DOES NOT HAVE, AND WHAT TO READ INSTEAD.
+    #
+    # The fleet tracker carries twelve segments; the consolidated composition
+    # carries eleven. The missing one is JA, the smallest light-commercial
+    # class -- it is not in the Zenodo dataset, so the traction project cannot
+    # report it without inventing it.
+    #
+    # Left alone it was a SILENT LOSS: 5,370 tracker rows and 3.52 million
+    # vehicle-flows, 0.34% of all BEV flow, cohorts 2011 to 2070, dropped by the
+    # join and never counted. Small, and still wrong to lose without saying so.
+    #
+    # JA reads JB: the next light-commercial size up, and already its partner in
+    # the AB voltage group. The alternative was A, the passenger car of similar
+    # size, and JB was preferred because a van's duty cycle and torque sit
+    # closer to another van's.
+    # SAFE TO CHANGE: yes, and the entry disappears the day the composition
+    # covers JA.
+    traction_segment_fallback: dict[str, str] = field(
+        default_factory=lambda: {"JA": "JB"})
+
+    # ⚠️ WHICH DRIVE TRAINS HAVE A TRACTION MOTOR OF THIS KIND AT ALL.
+    #
+    # The composition describes `elvBEV`, so joining the whole tracker against
+    # it drops every petrol, diesel and hybrid row -- 42.9% of all vehicle-flow,
+    # which looks like a catastrophe in a warning line and is simply a diesel
+    # not having a BEV traction motor. Filtered before the join so the count
+    # that gets reported is the count that matters.
+    #
+    # ⚠️ AND PHEV IS A REAL EXCLUSION, NOT A TAUTOLOGY. A plug-in hybrid has a
+    # traction motor -- 46,392 rows and 42.3 million vehicle-flows of them -- and
+    # this model does not count it, because the composition covers BEVs only.
+    # HEV likewise, 65.1 million. That understates European traction-motor
+    # material demand by however much those motors weigh, and it is a scope
+    # limit of the source rather than a decision made here.
+    # SAFE TO CHANGE: yes, the day a composition exists for a hybrid's motor.
+    traction_drive_trains: tuple[str, ...] = ("BEV",)
+
 
     # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
     #
