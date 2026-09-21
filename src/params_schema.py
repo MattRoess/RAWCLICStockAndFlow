@@ -1793,6 +1793,12 @@ class MaterialsParams:
     # nothing else.
     traction_figure_first_year: int = 2012
 
+    # Where the traction project keeps its 200,000-draw arrays, relative to
+    # `traction_composition_dir`. 31 mass arrays, 12 chemistry arrays, the
+    # torque grid and the year x voltage scale table.
+    # SAFE TO CHANGE: only if that project moves them.
+    traction_draws_dir: str = "draws"
+
 
     # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
     #

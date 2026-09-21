@@ -318,85 +318,70 @@ def by_material(frames: dict, extra_keys: list[str]) -> pd.DataFrame:
     return (pd.concat(rows, ignore_index=True) if rows else pd.DataFrame())
 
 
-def element_flows(magnet_mass: pd.DataFrame, elements: pd.DataFrame,
-                  params) -> pd.DataFrame:
+def drawn_distributions(tracker_keyed: dict, composition: pd.DataFrame,
+                        params) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Nd, Pr, Dy and Tb, from the magnet mass and the `e-m` shares.
+    Material and element flows with their real distributions, from the draws.
 
-    ⚠️ PER GRADE SCENARIO, NEVER AVERAGED. SH, UH and EH are three answers to
-    "which grade does a traction magnet use", and the mean of them is a magnet
-    nobody makes. Every row carries `grade_scenario`, and a consumer picks one.
+    ⚠️ THIS REPLACES CARRYING p025 AND p975 THROUGH THE ARITHMETIC. That was
+    wrong twice over: it summed percentiles across segments, motor types and
+    components as if every one of them erred in the same direction, and for the
+    elements it multiplied the magnet-mass interval by the chemistry MEAN, so a
+    terbium line drawn with a +-11% band hid a +-95% specification range.
 
-    ⚠️ AND THE SHARE DEPENDS ON THE MOTOR TYPE, because the grade does: the
-    scenarios are applied to every magnet-bearing type, and the element sheet
-    holds one row per (scenario, motor type, element).
+    Now the sum happens DRAW BY DRAW -- draw i of the magnet mass at this
+    segment's torque, times draw i of that grade's chemistry, times the
+    deterministic vehicle count, share and year factor -- and only the finished
+    200,000-long distribution is reduced to percentiles. That is what the
+    traction project persisted its arrays for.
+
+    Returns `(materials, elements)`, both tidy with `mass`, `mass_low`,
+    `mass_high`.
     """
-    if magnet_mass.empty or elements.empty:
-        return pd.DataFrame()
-    magnet = magnet_mass[magnet_mass["materialClass"] == "magnet"]
-    if magnet.empty:
-        return pd.DataFrame()
+    from src import traction_draws as td
 
-    wanted = ["Nd", "Pr", "Dy", "Tb"]
-    shares = elements[elements["element"].isin(wanted)][
-        ["grade_scenario", "is_base", "componentKeyLevel1", "element",
-         "meanValue", "p025", "p975", "TmaxOperating_C"]].rename(
-        columns={"meanValue": "element_share", "p025": "share_low",
-                 "p975": "share_high"})
+    library = td.DrawLibrary(params)
+    segment_torque = (composition.groupby("productKeyLevel3")
+                      ["torque_nm"].first().to_dict())
+    drive_trains = tuple(params.materials.traction_drive_trains)
 
-    if "componentKeyLevel1" in magnet.columns:
-        merged = magnet.merge(shares, on="componentKeyLevel1", how="inner")
-    else:
-        # The combined output has already summed over motor type, so the
-        # element share cannot be motor-specific. Averaged across the
-        # magnet-bearing types, which is exact only when they share a grade --
-        # they do today, all SH, and the row says so.
-        per_scenario = shares.groupby(
-            ["grade_scenario", "is_base", "element", "TmaxOperating_C"],
-            as_index=False)[["element_share", "share_low", "share_high"]].mean()
-        merged = magnet.merge(per_scenario, how="cross")
+    material_rows = []
+    for material in sorted(composition["materialClass"].dropna().unique()):
+        frame, columns = td.coefficients(tracker_keyed, segment_torque, params,
+                                         library, material, drive_trains)
+        if frame.empty:
+            continue
+        drawn = td.flow_distribution(frame,
+                                     td.draw_matrix(library, columns,
+                                                    segment_torque))
+        material_rows.append(drawn.assign(materialClass=material))
+    materials = (pd.concat(material_rows, ignore_index=True)
+                 if material_rows else pd.DataFrame())
 
-    # ⚠️ BOTH UNCERTAINTIES, COMBINED -- NOT THE MASS ALONE.
-    #
-    # The first version multiplied the magnet mass INTERVAL by the element share
-    # MEAN, so every element line carried the mass uncertainty and none of the
-    # chemistry. For neodymium that is nearly harmless -- the chemistry is ±9%
-    # against the mass's ±11% -- and for terbium it is a serious understatement:
-    # the SH grade permits 0.0001 to 0.0049 of the magnet, ±95%, which dwarfs
-    # anything the mass contributes. A terbium line drawn with a ±11% band says
-    # the opposite of what the source says.
-    #
-    # The two are INDEPENDENT: one is a bootstrap of a regression through eleven
-    # segments, the other a grade's specification range. So the relative
-    # half-widths combine in quadrature.
-    #
-    # ⚠️ AND THAT IS AN APPROXIMATION THE TRACTION PROJECT WOULD NOT ACCEPT OF
-    # ITSELF. "A percentile is a property of a distribution, and arithmetic on
-    # two percentiles is not the percentile of the result." It holds well where
-    # both widths are small and badly for terbium, where ±95% is nowhere near
-    # symmetric and the lower end would go negative if it were not clipped. Both
-    # sets of 200,000 draws exist -- the magnet masses and the chemistry
-    # fractions, in the traction project's `data/consolidated/draws` -- and
-    # multiplying them per draw is the right answer. This is the interim one.
-    mass_mean = merged["mass"].astype(float)
-    share_mean = merged["element_share"].replace(0.0, pd.NA).astype(float)
-
-    def relative(low: str, high: str, centre) -> pd.Series:
-        width = (merged[high].astype(float) - merged[low].astype(float)) / 2.0
-        return (width / centre).fillna(0.0).abs()
-
-    mass_relative = (relative("mass_low", "mass_high", mass_mean)
-                     if {"mass_low", "mass_high"} <= set(merged.columns)
-                     else pd.Series(0.0, index=merged.index))
-    share_relative = relative("share_low", "share_high", share_mean)
-    combined = (mass_relative ** 2 + share_relative ** 2) ** 0.5
-
-    merged["mass"] = mass_mean * merged["element_share"]
-    merged["mass_low"] = (merged["mass"] * (1.0 - combined)).clip(lower=0.0)
-    merged["mass_high"] = merged["mass"] * (1.0 + combined)
-    merged["relative_halfwidth"] = combined
-    return merged.drop(columns=["element_share", "share_low", "share_high"]
-                       ).reset_index(drop=True)
+    # ---- the elements, magnet mass times chemistry, per draw --------------
+    element_rows = []
+    frame, columns = td.coefficients(tracker_keyed, segment_torque, params,
+                                     library, "magnet", drive_trains)
+    if not frame.empty:
+        scenarios = list(params.run.magnet_grade_scenarios) if hasattr(
+            params, "run") else ["SH"]
+        base = scenarios[0]
+        for grade in scenarios:
+            names, _ = library.chemistry(library.motor_of(columns[0][0]), grade)
+            for element in ("Nd", "Pr", "Dy", "Tb"):
+                if element not in names:
+                    continue
+                drawn = td.flow_distribution(
+                    frame, td.draw_matrix(library, columns, segment_torque,
+                                          element=element, grade=grade))
+                element_rows.append(drawn.assign(
+                    element=element, grade_scenario=grade,
+                    is_base=(grade == base),
+                    TmaxOperating_C=params.data.magnet_grade_temperature[grade]
+                    if hasattr(params, "data") else None))
+    elements = (pd.concat(element_rows, ignore_index=True)
+                if element_rows else pd.DataFrame())
+    return materials, elements
 
 
 MATERIAL_COLOURS = {
@@ -495,9 +480,9 @@ def figure_secondary_supply(ratio: pd.DataFrame, path: Path) -> Path:
         figure.text(0.01, 0.015,
                     "dotted line at 1.0: same-year collection meets that "
                     "year's demand.\n"
-                    "band: the composition's 95% interval, correlated on both "
-                    "flows -- narrow because a composition error scales "
-                    "collected and inflow\ntogether and cancels in their ratio.",
+                    "band: from the 200,000 draws of both flows -- narrow "
+                    "because a composition error scales collected and inflow\n"
+                    "together and cancels in their ratio.",
                     fontsize=8.2, color="#555555", ha="left", va="bottom")
     axis.set_title("Traction motor secondary-supply ratio "
                    "(collected / inflow, same year)", fontsize=12)
@@ -632,8 +617,8 @@ def figure_material(material: str, parallel: pd.DataFrame,
                 "whereabouts.      "
                 "grey: each of the 15 motor-type x voltage states, unmixed "
                 "-- 'if every car were this one'.      "
-                "bands: the composition's own 95% interval carried through as "
-                "correlated, NOT a propagated Monte Carlo.",
+                "bands: 95% of 200,000 draws, summed draw by draw across "
+                "segments, motor types, voltages and cohorts.",
                 fontsize=8.2, color="#555555", ha="left")
     figure.tight_layout(rect=(0, 0.055, 1, 1))
     figure.savefig(path, dpi=160)
@@ -762,10 +747,10 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
                 "Neodymium and praseodymium are identical across the three "
                 "grade scenarios: the didymium is 0.29-0.32 of the magnet in "
                 "every class, so only the heavy rare earths move.\n"
-                "bands COMBINE two independent uncertainties -- the magnet "
-                "mass (±11%) and the grade's own chemistry range -- in "
-                "quadrature. The chemistry dominates for terbium, whose SH "
-                "range is ±95% of its own value.",
+                "bands: 200,000 draws of the magnet mass times the same "
+                "draw of that grade's chemistry, summed draw by draw. The "
+                "chemistry dominates for terbium, whose SH range is ±95% of "
+                "its own value.",
                 fontsize=8.2, color="#555555", ha="left")
     figure.tight_layout(rect=(0, 0.055, 1, 1))
     figure.savefig(path, dpi=160)
@@ -840,6 +825,8 @@ def main() -> dict[str, Any]:
         print(f"  scenarios not on disk, skipped: {', '.join(absent)}")
 
     composition = load_composition(p04)
+    # Loaded to report whether the traction project has written it; the element
+    # FLOWS come from the draw arrays, not from these summary rows.
     elements = load_magnet_elements(p04)
     print(f"  {len(composition):,} composition rows, "
           f"{composition.productionYear.nunique()} years, "
@@ -854,15 +841,28 @@ def main() -> dict[str, Any]:
     # ---------------------------------------------------------------- combined
     print("\nCombined -- the shares applied")
     combined = combine_partitioned(parallel, params)
-    combined_tidy = by_material(combined, [])
     combined_by_type = by_material(combined, ["componentKeyLevel1"])
     combined_by_voltage = by_material(combined, ["voltageClass"])
 
-    # ---------------------------------------------------------------- elements
-    element_tidy = element_flows(combined_by_type, elements, params)
+    # ---------------------------------------------- the real distributions
+    #
+    # ⚠️ THE MEANS COME FROM THE ARITHMETIC ABOVE AND THE BANDS DO NOT. Summing
+    # p025 across segments, motor types and components assumed they all erred
+    # together, which roughly doubled the width -- the drawn magnet band is
+    # +-5%, the carried one was +-10%. The stacked panels keep using the means,
+    # because a stack has no band; everything with a band reads from here.
+    print("\nDrawn -- the 200,000 simulations, summed draw by draw")
+    drawn_materials, element_tidy = drawn_distributions(
+        tracker_keyed, composition, params)
+    combined_tidy = (drawn_materials if not drawn_materials.empty
+                     else by_material(combined, []))
+    if not drawn_materials.empty:
+        print(f"  materials: {len(drawn_materials):,} rows with true "
+              f"percentiles")
     if not element_tidy.empty:
         print(f"  elements: {len(element_tidy):,} rows, "
-              f"{element_tidy.grade_scenario.nunique()} grade scenarios")
+              f"{element_tidy.grade_scenario.nunique()} grade scenarios, "
+              f"magnet mass x chemistry per draw")
 
     artifacts_dir = PROJECT_ROOT / "data" / "processed" / "intermediate"
     saved = save_unregistered_scenario_outputs(artifacts_dir, {
