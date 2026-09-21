@@ -389,16 +389,49 @@ def build_material_ratio_df(combined: pd.DataFrame,
         return pd.DataFrame(columns=["scrap_year", "materialClass", "inflow",
                                      "collected", "ratio"])
 
+    columns = [c for c in ("mass", "mass_low", "mass_high")
+               if c in scoped.columns]
+
     def side(flow: str, name: str) -> pd.DataFrame:
-        return (scoped[scoped["flow"] == flow]
-                .groupby(["scrap_year", "materialClass"], as_index=False)["mass"]
-                .sum().rename(columns={"mass": name}))
+        block = (scoped[scoped["flow"] == flow]
+                 .groupby(["scrap_year", "materialClass"], as_index=False)
+                 [columns].sum())
+        return block.rename(columns={c: f"{name}_{c}" for c in columns})
 
     ratio = side("inflow", "inflow").merge(side("collected", "collected"),
                                            on=["scrap_year", "materialClass"],
                                            how="inner")
-    ratio["ratio"] = ratio["collected"] / ratio["inflow"].where(
-        ratio["inflow"] > 0)
+    positive = ratio["inflow_mass"].where(ratio["inflow_mass"] > 0)
+    ratio["ratio"] = ratio["collected_mass"] / positive
+
+    # ⚠️ THE BAND IS NARROW ON PURPOSE, AND THAT IS THE FINDING. A composition
+    # error scales BOTH sides of this ratio: if the magnet mass is 10% high, the
+    # collected mass and the inflow mass are both 10% high and the ratio is
+    # unchanged. So the ends are taken CORRELATED -- low over low, high over
+    # high -- and what survives is only the part that does not cancel, which is
+    # the composition of a car built twenty years ago differing from one built
+    # today. Taking low over high instead would assume the same fit erred in
+    # opposite directions on the two flows, which is not a thing that happens.
+    if {"collected_mass_low", "inflow_mass_low"} <= set(ratio.columns):
+        at_low = (ratio["collected_mass_low"]
+                  / ratio["inflow_mass_low"].where(ratio["inflow_mass_low"] > 0))
+        at_high = (ratio["collected_mass_high"]
+                   / ratio["inflow_mass_high"].where(
+                       ratio["inflow_mass_high"] > 0))
+        # ⚠️ AND WHICH END IS WHICH IS NOT FIXED. The two flows have different
+        # relative widths -- collected comes from cohorts built twenty years
+        # earlier, with their own composition -- so low-over-low is not reliably
+        # the smaller ratio. Measured: copper 2040 gives 0.228 at the low ends
+        # against 0.225 at the high ends, the wrong way round. Named for what
+        # they are rather than where they came from.
+        # ⚠️ AND THE CENTRAL RATIO IS IN THE SPAN. mean-over-mean is not
+        # necessarily between low-over-low and high-over-high -- with different
+        # relative widths on the two flows it can sit outside both, which left
+        # the line outside its own band on 1.7% of rows. The band spans every
+        # outcome considered, central included.
+        ends = pd.concat([at_low, at_high, ratio["ratio"]], axis=1)
+        ratio["ratio_low"] = ends.min(axis=1)
+        ratio["ratio_high"] = ends.max(axis=1)
     return ratio
 
 
@@ -411,14 +444,22 @@ def figure_secondary_supply(ratio: pd.DataFrame, path: Path) -> Path:
     else:
         for material, block in ratio.groupby("materialClass"):
             block = block.sort_values("scrap_year")
+            colour = MATERIAL_COLOURS.get(material)
+            if {"ratio_low", "ratio_high"} <= set(block.columns):
+                axis.fill_between(block["scrap_year"], block["ratio_low"],
+                                  block["ratio_high"], color=colour,
+                                  alpha=0.20, lw=0)
             axis.plot(block["scrap_year"], block["ratio"], lw=1.9,
-                      color=MATERIAL_COLOURS.get(material), label=str(material))
+                      color=colour, label=str(material))
         axis.axhline(1.0, color="#333333", lw=0.9, ls=":")
         axis.legend(frameon=False, fontsize=9, loc="upper left")
-        figure.text(0.005, 0.015,
-                    "the dotted line at 1.0 is where same-year collection would "
-                    "meet that year's demand.",
-                    fontsize=8.2, color="#555555", ha="left")
+        figure.text(0.01, 0.015,
+                    "dotted line at 1.0: same-year collection meets that "
+                    "year's demand.\n"
+                    "band: the composition's 95% interval, correlated on both "
+                    "flows -- narrow because a composition error scales "
+                    "collected and inflow\ntogether and cancels in their ratio.",
+                    fontsize=8.2, color="#555555", ha="left", va="bottom")
     axis.set_title("Traction motor secondary-supply ratio "
                    "(collected / inflow, same year)", fontsize=12)
     axis.set_xlabel("Year")
