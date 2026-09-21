@@ -417,7 +417,7 @@ def figure_material(material: str, parallel: pd.DataFrame,
                   label="combined, shares applied")
         axis.legend(frameon=False, fontsize=9)
     axis.set_title(f"{material.capitalize()} into new vehicles", fontsize=11.5)
-    axis.set_ylabel("kilotonnes per year")
+    axis.set_ylabel("[kt / year]")
     axis.annotate("grey: each of the 15 motor-type x voltage states,\n"
                   "unmixed -- 'if every car were this one'",
                   xy=(0.03, 0.87), xycoords="axes fraction", fontsize=8.2,
@@ -457,7 +457,7 @@ def _stacked(axis, frame: pd.DataFrame, material: str, column: str,
             .fillna(0.0).sort_index())
     axis.stackplot(wide.index, *[wide[c].values / 1e6 for c in wide.columns],
                    labels=[label(c) for c in wide.columns], alpha=0.9)
-    axis.set_ylabel("kilotonnes per year")
+    axis.set_ylabel("[kt / year]")
     axis.legend(frameon=False, fontsize=8.5, loc="upper left")
 
 
@@ -491,11 +491,11 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     axis = axes[0]
     for element, state in base.groupby("element"):
         state = state.groupby("scrap_year", as_index=False)["mass"].sum()
-        axis.plot(state["scrap_year"], state["mass"] / 1e3, lw=2.1,
+        axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=2.1,
                   color=ELEMENT_COLOURS.get(element, "#555555"), label=element)
     axis.set_yscale("log")
     axis.set_title("Rare earths into new vehicles, base grade", fontsize=11.5)
-    axis.set_ylabel("tonnes per year (log)")
+    axis.set_ylabel("[kt / year], log scale")
     axis.legend(frameon=False, fontsize=9)
 
     axis = axes[1]
@@ -503,12 +503,12 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
             block["element"].isin(["Dy", "Tb"])].groupby(
             ["element", "grade_scenario"]):
         state = state.groupby("scrap_year", as_index=False)["mass"].sum()
-        axis.plot(state["scrap_year"], state["mass"] / 1e3, lw=1.9,
+        axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=1.9,
                   color=ELEMENT_COLOURS.get(element, "#555555"),
                   ls=GRADE_LINESTYLE.get(scenario, "-"),
                   label=f"{element}  {scenario}")
     axis.set_title("What the magnet grade costs: Dy and Tb", fontsize=11.5)
-    axis.set_ylabel("tonnes per year")
+    axis.set_ylabel("[kt / year]")
     axis.legend(frameon=False, fontsize=8.5, ncol=2)
     axis.annotate("Nd and Pr are identical across the three:\n"
                   "the didymium does not vary with grade",
@@ -651,11 +651,11 @@ def main() -> dict[str, Any]:
     ratio = build_material_ratio_df(combined_tidy)
     made = [
         figure_material("copper", parallel_tidy, combined_tidy, combined_by_type,
-                        combined_by_voltage, figure_dir / "04_03_copper.png"),
+                        combined_by_voltage, figure_dir / "04_03_1_copper.png"),
         figure_material("magnet", parallel_tidy, combined_tidy, combined_by_type,
-                        combined_by_voltage, figure_dir / "04_03_magnet.png"),
-        figure_elements(element_tidy, figure_dir / "04_03_rare_earths.png"),
-        figure_secondary_supply(ratio, figure_dir / "04_03_secondary_supply.png"),
+                        combined_by_voltage, figure_dir / "04_03_2_magnet.png"),
+        figure_elements(element_tidy, figure_dir / "04_03_3_rare_earths.png"),
+        figure_secondary_supply(ratio, figure_dir / "04_03_4_secondary_supply.png"),
     ]
     print("\nFigures")
     for path in made:
