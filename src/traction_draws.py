@@ -94,6 +94,25 @@ class DrawLibrary:
         return ((1.0 - weight) * np.asarray(block[:, lower], dtype=np.float64)
                 + weight * np.asarray(block[:, upper], dtype=np.float64))
 
+    def grade_classes(self) -> list[str]:
+        """
+        Which magnet grade classes have chemistry arrays on disk.
+
+        ⚠️ READ FROM THE FILES, NOT FROM A PARAMETER. The grade scenarios are
+        the TRACTION project's setting -- `run.magnet_grade_scenarios` -- and
+        this model's params have no `run` namespace at all. Asking for one here
+        returned nothing and silently left the consumer with a single scenario,
+        which is how UH and EH vanished from a figure that had been drawing
+        them. The arrays are named `<motor>__<CLASS>__magnet_element_fractions`,
+        so the files are the authority and cannot go out of step with them.
+        """
+        found = set()
+        for path in self.directory.glob("*__magnet_element_fractions.npy"):
+            parts = path.name.split("__")
+            if len(parts) == 3:          # motor, CLASS, fractions
+                found.add(parts[1])
+        return sorted(found)
+
     def chemistry(self, motor: str, grade: str) -> tuple[list[str], np.ndarray]:
         """The magnet's element fractions for one motor and grade class."""
         stem = f"{motor}__{grade}__magnet_element"

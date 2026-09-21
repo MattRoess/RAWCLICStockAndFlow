@@ -318,8 +318,38 @@ def by_material(frames: dict, extra_keys: list[str]) -> pd.DataFrame:
     return (pd.concat(rows, ignore_index=True) if rows else pd.DataFrame())
 
 
+def _grade_metadata(elements: pd.DataFrame | None,
+                    scenarios: list[str]) -> dict[str, dict]:
+    """
+    Which grade class is the base, and what each is rated to.
+
+    Both live in the traction project. They travel in the `Magnet elements`
+    sheet, so they are read from there and only guessed at if it is absent --
+    and the guess is named as one: the first class alphabetically is nobody's
+    base case.
+    """
+    fallback = {grade: {"is_base": grade == scenarios[0],
+                        "TmaxOperating_C": None} for grade in scenarios}
+    if elements is None or elements.empty:
+        return fallback
+    if not {"grade_scenario", "is_base"} <= set(elements.columns):
+        return fallback
+    out = {}
+    for grade in scenarios:
+        rows = elements[elements["grade_scenario"] == grade]
+        if rows.empty:
+            out[grade] = fallback[grade]
+            continue
+        temperature = (rows["TmaxOperating_C"].iloc[0]
+                       if "TmaxOperating_C" in rows.columns else None)
+        out[grade] = {"is_base": bool(rows["is_base"].iloc[0]),
+                      "TmaxOperating_C": temperature}
+    return out
+
+
 def drawn_distributions(tracker_keyed: dict, composition: pd.DataFrame,
-                        params) -> tuple[pd.DataFrame, pd.DataFrame]:
+                        params, elements: pd.DataFrame | None = None,
+                        ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Material and element flows with their real distributions, from the draws.
 
@@ -363,9 +393,13 @@ def drawn_distributions(tracker_keyed: dict, composition: pd.DataFrame,
     frame, columns = td.coefficients(tracker_keyed, segment_torque, params,
                                      library, "magnet", drive_trains)
     if not frame.empty:
-        scenarios = list(params.run.magnet_grade_scenarios) if hasattr(
-            params, "run") else ["SH"]
-        base = scenarios[0]
+        # ⚠️ THE SCENARIOS COME FROM THE ARRAYS ON DISK. They are the traction
+        # project's setting, and this model's params have no `run` namespace to
+        # read it from -- asking for one returned nothing and quietly left a
+        # single scenario, which is how UH and EH disappeared from a figure that
+        # had been drawing all three.
+        scenarios = library.grade_classes()
+        metadata = _grade_metadata(elements, scenarios)
         for grade in scenarios:
             names, _ = library.chemistry(library.motor_of(columns[0][0]), grade)
             for element in ("Nd", "Pr", "Dy", "Tb"):
@@ -376,9 +410,8 @@ def drawn_distributions(tracker_keyed: dict, composition: pd.DataFrame,
                                           element=element, grade=grade))
                 element_rows.append(drawn.assign(
                     element=element, grade_scenario=grade,
-                    is_base=(grade == base),
-                    TmaxOperating_C=params.data.magnet_grade_temperature[grade]
-                    if hasattr(params, "data") else None))
+                    is_base=metadata[grade]["is_base"],
+                    TmaxOperating_C=metadata[grade]["TmaxOperating_C"]))
     elements = (pd.concat(element_rows, ignore_index=True)
                 if element_rows else pd.DataFrame())
     return materials, elements
@@ -675,7 +708,11 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     # recovery question, and drawing only the inflow hides it.
     axis = axes[0]
     for name, (label, colour, style) in FLOW_SERIES.items():
-        wanted = END_OF_LIFE if name == "outflow" else (name,)
+        # ⚠️ THE SAME MAPPING AS EVERYWHERE ELSE. This loop had its own copy,
+        # written before `lost` existed, so it asked the data for a flow called
+        # "lost" -- which does not exist, the tracker calls them `export` and
+        # `unknown_whereabouts` -- and silently drew nothing. One mapping now.
+        wanted = {"outflow": END_OF_LIFE, "lost": LOST}.get(name, (name,))
         flow_block = (base[base["flow"].isin(wanted)]
                       if "flow" in base.columns else base)
         for element, state in flow_block.groupby("element"):
@@ -710,10 +747,27 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
                               alpha=0.20, lw=0)
         axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=2.1,
                   color=colour, label=element)
-    axis.set_yscale("log")
+    # ⚠️ LINEAR, NOT LOG. Matthias 2026-09-21: the bands look terrible on a log
+    # axis, and they do -- a 95% interval that starts near zero becomes a wedge
+    # covering three decades and reads as an error rather than a range. Linear
+    # tells the truth about the magnitudes and hides terbium instead, so the
+    # magnitudes are STATED here rather than shown.
     axis.set_title("All four elements in, base grade", fontsize=11.5)
-    axis.set_ylabel("[kt / year], log scale")
+    axis.set_ylabel("[kt / year]")
+    axis.set_ylim(bottom=0)
     axis.legend(frameon=False, fontsize=9)
+    peaks = (base[base["flow"] == "inflow"] if "flow" in base.columns else base)
+    if not peaks.empty:
+        summary = (peaks.groupby("element")["mass"].max() / 1e6
+                   ).sort_values(ascending=False)
+        axis.annotate(
+            "peak, kt/year:  " + ",  ".join(
+                f"{name} {value:.3g}" for name, value in summary.items())
+            + f"\nterbium is {summary.iloc[0] / summary.iloc[-1]:.0f}x smaller "
+              f"than neodymium and flat against this axis -- it is the right "
+              f"panel",
+            xy=(0.28, 0.42), xycoords="axes fraction", fontsize=8.2,
+            color="#555555")
 
     axis = axes[2]
     scenarios = (elements[elements["flow"] == "inflow"]
@@ -750,7 +804,8 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
                 "bands: 200,000 draws of the magnet mass times the same "
                 "draw of that grade's chemistry, summed draw by draw. The "
                 "chemistry dominates for terbium, whose SH range is ±95% of "
-                "its own value.",
+                "its own value -- which is why the middle axis is linear and "
+                "not logarithmic.",
                 fontsize=8.2, color="#555555", ha="left")
     figure.tight_layout(rect=(0, 0.055, 1, 1))
     figure.savefig(path, dpi=160)
@@ -853,7 +908,7 @@ def main() -> dict[str, Any]:
     # because a stack has no band; everything with a band reads from here.
     print("\nDrawn -- the 200,000 simulations, summed draw by draw")
     drawn_materials, element_tidy = drawn_distributions(
-        tracker_keyed, composition, params)
+        tracker_keyed, composition, params, elements)
     combined_tidy = (drawn_materials if not drawn_materials.empty
                      else by_material(combined, []))
     if not drawn_materials.empty:
