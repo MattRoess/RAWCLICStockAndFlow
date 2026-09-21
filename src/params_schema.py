@@ -1762,6 +1762,37 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes, the day a composition exists for a hybrid's motor.
     traction_drive_trains: tuple[str, ...] = ("BEV",)
 
+    # ⚠️ WHERE THE FIGURES START, AND WHY IT IS NOT WHERE THE DATA STARTS.
+    #
+    # Matthias 2026-09-21: "Can we start in 2012. 2011 numbers do not make
+    # sense" -- and then, decisively: "2011 is the initial stock."
+    #
+    # ⚠️ SO IT IS NOT AN ERROR, IT IS A DIFFERENT QUANTITY. The tracker hands
+    # this stage 0.2268 million BEVs for 2011 and 0.0545 for 2012, against real
+    # EU BEV registrations of roughly 0.01 million in 2011. The first figure is
+    # not a year of registrations at all: it is the BEV fleet that already
+    # existed when the series begins, injected as the first cohort. BEV alone
+    # shows it because BEV alone starts mid-model -- diesel, petrol and HEV
+    # begin in 2006 and PHEV in 2012, each continuous with its second year.
+    #
+    # Which is exactly why it must not be DRAWN beside annual registrations: a
+    # stock and a flow on one line, in the same units, inviting the reader to
+    # compare them.
+    #
+    # ⚠️ THE FIGURES ONLY. The data keeps 2011, and deliberately. It is 0.035% of
+    # cumulative BEV inflow, so it moves no total worth reporting -- and a stage
+    # that silently dropped a cohort the tracker contains would disagree with
+    # 04_01, 04_02 and 04_04, which all read the same tracker. A figure that
+    # declines to plot a bad year is honest; a stage that discards data other
+    # stages keep is a trap for whoever reconciles them.
+    #
+    # AND IT MUST STAY IN THE DATA. Those cars are really in the fleet: they
+    # carry copper and neodymium, and they come back as outflow fifteen to
+    # twenty years later. Dropping the cohort to tidy a figure would remove real
+    # material from the stock. SAFE TO CHANGE: yes -- it is a drawing window and
+    # nothing else.
+    traction_figure_first_year: int = 2012
+
 
     # ⚠️ WHAT A BEV OF EACH SEGMENT ACTUALLY CARRIES, as a DISCRETE MIXTURE.
     #

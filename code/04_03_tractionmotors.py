@@ -414,10 +414,11 @@ def figure_secondary_supply(ratio: pd.DataFrame, path: Path) -> Path:
             axis.plot(block["scrap_year"], block["ratio"], lw=1.9,
                       color=MATERIAL_COLOURS.get(material), label=str(material))
         axis.axhline(1.0, color="#333333", lw=0.9, ls=":")
-        axis.annotate("collection meets demand", xy=(0.02, 1.02),
-                      xycoords=("axes fraction", "data"), fontsize=8.5,
-                      color="#555555")
-        axis.legend(frameon=False, fontsize=9)
+        axis.legend(frameon=False, fontsize=9, loc="upper left")
+        figure.text(0.005, 0.015,
+                    "the dotted line at 1.0 is where same-year collection would "
+                    "meet that year's demand.",
+                    fontsize=8.2, color="#555555", ha="left")
     axis.set_title("Traction motor secondary-supply ratio "
                    "(collected / inflow, same year)", fontsize=12)
     axis.set_xlabel("Year")
@@ -425,7 +426,7 @@ def figure_secondary_supply(ratio: pd.DataFrame, path: Path) -> Path:
     axis.grid(True, ls="--", alpha=0.3)
     for side_name in ("top", "right"):
         axis.spines[side_name].set_visible(False)
-    figure.tight_layout()
+    figure.tight_layout(rect=(0, 0.045, 1, 1))
     figure.savefig(path, dpi=160)
     plt.close(figure)
     return path
@@ -508,13 +509,7 @@ def figure_material(material: str, parallel: pd.DataFrame,
     axis.set_title(f"{material.capitalize()}: in, out, collected and lost",
                    fontsize=11.5)
     axis.set_ylabel("[kt / year]")
-    axis.legend(frameon=False, fontsize=8.5)
-    axis.annotate("outflow = collected + lost;  "
-                  "lost = exported + unknown whereabouts.\n"
-                  "bands: the composition's own 95% interval, carried\n"
-                  "through as correlated -- NOT a propagated Monte Carlo.",
-                  xy=(0.03, 0.83), xycoords="axes fraction", fontsize=8.2,
-                  color="#555555")
+    axis.legend(frameon=False, fontsize=8.5, loc="upper left")
 
     # ---- the unmixed states, for the inflow ------------------------------
     axis = axes[1]
@@ -534,10 +529,6 @@ def figure_material(material: str, parallel: pd.DataFrame,
     axis.set_title(f"{material.capitalize()} in, against the 15 states",
                    fontsize=11.5)
     axis.set_ylabel("[kt / year]")
-    axis.annotate("grey: each motor-type x voltage state, unmixed --\n"
-                  "'if every car were this one'",
-                  xy=(0.03, 0.88), xycoords="axes fraction", fontsize=8.2,
-                  color="#555555")
 
     # ---- distribution by motor type, in and collected --------------------
     _stacked(axes[2], by_type, material, "componentKeyLevel1",
@@ -553,7 +544,18 @@ def figure_material(material: str, parallel: pd.DataFrame,
         axis.set_xlabel("Year")
         axis.set_ylim(bottom=0)
         axis.grid(True, ls="--", alpha=0.25)
-    figure.tight_layout()
+
+    # ⚠️ THE EXPLANATION GOES UNDER THE FIGURE, NOT ON THE DATA. In-axes
+    # annotations landed on the lines they were explaining.
+    figure.text(0.005, 0.015,
+                "outflow = collected + lost;  lost = exported + unknown "
+                "whereabouts.      "
+                "grey: each of the 15 motor-type x voltage states, unmixed "
+                "-- 'if every car were this one'.      "
+                "bands: the composition's own 95% interval carried through as "
+                "correlated, NOT a propagated Monte Carlo.",
+                fontsize=8.2, color="#555555", ha="left")
+    figure.tight_layout(rect=(0, 0.055, 1, 1))
     figure.savefig(path, dpi=160)
     plt.close(figure)
     return path
@@ -661,16 +663,19 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
                   label=f"{element}  {scenario}")
     axis.set_title("What the magnet grade costs: Dy and Tb", fontsize=11.5)
     axis.set_ylabel("[kt / year]")
-    axis.legend(frameon=False, fontsize=8.5, ncol=2)
-    axis.annotate("Nd and Pr are identical across the three:\n"
-                  "the didymium does not vary with grade",
-                  xy=(0.03, 0.88), xycoords="axes fraction", fontsize=8.2,
-                  color="#555555")
+    axis.legend(frameon=False, fontsize=8.5, ncol=2, loc="upper right")
 
     for axis in axes:
         axis.set_xlabel("Year")
         axis.grid(True, ls="--", alpha=0.25)
-    figure.tight_layout()
+    figure.text(0.005, 0.015,
+                "Neodymium and praseodymium are identical across the three "
+                "grade scenarios: the didymium is 0.29-0.32 of the magnet in "
+                "every class, so only the heavy rare earths move.      "
+                "bands: the composition's 95% interval, carried through as "
+                "correlated.",
+                fontsize=8.2, color="#555555", ha="left")
+    figure.tight_layout(rect=(0, 0.055, 1, 1))
     figure.savefig(path, dpi=160)
     plt.close(figure)
     return path
@@ -805,14 +810,31 @@ def main() -> dict[str, Any]:
     # ------------------------------------------------------------- figures
     figure_dir = out_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
+    # ⚠️ THE FIGURES START AFTER THE FIRST YEAR OF THE SERIES. The tracker's
+    # 2011 BEV inflow is about twenty times the real one -- see
+    # `traction_figure_first_year`. Clipped here, for drawing only: everything
+    # written to disk above still carries it.
+    first = int(params.materials.traction_figure_first_year)
+
+    def _from(frame: pd.DataFrame) -> pd.DataFrame:
+        return (frame[frame["scrap_year"] >= first]
+                if not frame.empty and "scrap_year" in frame.columns else frame)
+
+    parallel_shown = _from(parallel_tidy)
+    combined_shown = _from(combined_tidy)
+    by_type_shown = _from(combined_by_type)
+    by_voltage_shown = _from(combined_by_voltage)
+    elements_shown = _from(element_tidy)
+
     ratio = build_material_ratio_df(combined_tidy)
     made = [
-        figure_material("copper", parallel_tidy, combined_tidy, combined_by_type,
-                        combined_by_voltage, figure_dir / "04_03_1_copper.png"),
-        figure_material("magnet", parallel_tidy, combined_tidy, combined_by_type,
-                        combined_by_voltage, figure_dir / "04_03_2_magnet.png"),
-        figure_elements(element_tidy, figure_dir / "04_03_3_rare_earths.png"),
-        figure_secondary_supply(ratio, figure_dir / "04_03_4_secondary_supply.png"),
+        figure_material("copper", parallel_shown, combined_shown, by_type_shown,
+                        by_voltage_shown, figure_dir / "04_03_1_copper.png"),
+        figure_material("magnet", parallel_shown, combined_shown, by_type_shown,
+                        by_voltage_shown, figure_dir / "04_03_2_magnet.png"),
+        figure_elements(elements_shown, figure_dir / "04_03_3_rare_earths.png"),
+        figure_secondary_supply(_from(ratio),
+                                figure_dir / "04_03_4_secondary_supply.png"),
     ]
     print("\nFigures")
     for path in made:
