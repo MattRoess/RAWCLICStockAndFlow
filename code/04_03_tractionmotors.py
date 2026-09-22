@@ -904,11 +904,25 @@ def main() -> dict[str, Any]:
     # whenever stage 03 has not been re-run, and demanding all of them made this
     # stage impossible to run at all. The baseline is required; a missing
     # scenario is named and skipped.
-    loaded = load_many("params", "tracker_keyed", root=PROJECT_ROOT)
+    loaded = load_many("params", root=PROJECT_ROOT)
     params = loaded["params"]
     _check_params_are_current(params)
     p04 = params.to_nested_dict()["04_materials"]
-    tracker_keyed = loaded["tracker_keyed"]
+
+    # ⚠️ THE BASELINE IS `tracker_keyed_BAU`, NOT `tracker_keyed`. Repointed
+    # 22 September 2026. `03_tracker_keyed.pkl` is written by an older code path
+    # and went stale: on 22 September it was 11 days behind
+    # `03_tracker_keyed_BAU.pkl` and disagreed with it by 18.6% on collected at
+    # 2040 (3.0938 M against 3.6692 M vehicles). Worse, `bev_draws/` -- which
+    # every per-draw quantity in this stage rests on -- is written by the SAME
+    # 03_02 run as the BAU tracker, six minutes before it, so the baseline was
+    # the one artefact here that did not match. BAU is also already in
+    # `scenario_names` below, so this load was redundant as well as wrong.
+    #
+    # No fallback to `tracker_keyed` on purpose: falling back would quietly
+    # restore the stale numbers, which is the defect this replaces.
+    tracker_keyed = load_many("tracker_keyed_BAU",
+                              root=PROJECT_ROOT)["tracker_keyed_BAU"]
 
     print(artifact_status(root=PROJECT_ROOT))
 

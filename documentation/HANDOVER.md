@@ -508,8 +508,13 @@ minutes before the BAU tracker — same run. But `04_03_tractionmotors.py:907` l
 the per-scenario trackers from 14 September at line 918. The baseline figures are
 therefore drawn from an 11-day-old artefact that no longer matches anything else.
 The earlier +7.9% figure in this item came from comparing that stale file against
-the current draws. **Fix this before anything else in §4.1d** — either re-run so
-`03_tracker_keyed.pkl` is current, or point 04_03's baseline at the BAU tracker.
+the current draws. **FIXED 22 September 2026: 04_03's baseline now loads `tracker_keyed_BAU`.**
+`code/04_03_tractionmotors.py:907` was repointed, with no fallback to the stale
+file — falling back would quietly restore the defect. Baseline collected at 2040
+is now 3.6815 M instead of 3.0938 M. `03_tracker_keyed.pkl` is left on disk and
+untouched; nothing in this stage reads it any more. **Stage 04_03 has NOT been
+re-run — every figure currently on disk still comes from the stale baseline and
+must be regenerated.**
 
 **Superseded — the original blocker text, kept because the numbers were quoted.**
 On `collected` the
