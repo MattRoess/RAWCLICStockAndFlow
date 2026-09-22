@@ -419,6 +419,110 @@ the COVID and chip-shortage collapse, and 1975-2004 is flat because **no pre-200
 data exists in this project** — supplying a historical registrations series would fix
 that one.
 
+### 4.1d OPEN — 04_03's vehicle counts are deterministic, and two artefacts disagree
+
+State as of **22 September 2026**. Nothing in this item has been implemented. The
+repository is at `19ebc98`; the work below exists only as a proof script and must be
+turned into real code deliberately.
+
+Reproduce every number in this item with:
+
+    .venv/bin/python code/proof_0403_vehicle_draws.py
+
+That script writes nothing, modifies nothing and runs no stage. It imports
+`DrawLibrary`, `draw_matrix`, `joint_shares` and `scale` from the real modules, so
+the composition side is identical to production and only the vehicle side differs.
+It runs at 2,000 draws. Delete it once the fix is in.
+
+**The defect.** `src/traction_draws.py:222` reads
+
+```python
+vehicles = float(amount) * 1e6
+```
+
+so the vehicle count enters the material flow as ONE NUMBER taken from
+`tracker_keyed`, while `data/processed/bev_draws/BAU/` holds the same quantity as
+12 arrays of shape `(200000, 96)` — one value per draw per year. The vehicle
+uncertainty is therefore discarded, and every band 04_03 draws is **composition
+uncertainty only**. That is why the figures sit at 7–11% regardless of what is
+plotted. `BEV_A_inflow.npy` alone has a 64.3% band in its last year.
+
+This is NOT a fault of `traction_draws.py`'s design. Its matrix formulation
+(`C @ V`, deterministic coefficients times draw vectors) is correct and should be
+kept. Only the placement of the vehicle count changes.
+
+**The shape of the fix.** Take the vehicle count out of `C` and replace it with the
+normalised cohort mix, so `C` becomes kilograms PER VEHICLE; then multiply by the
+per-draw vehicle vector for that segment, flow and year, and sum over segments draw
+by draw:
+
+    mass(draw, y) = SUM_seg  V_seg(draw, y)  x  ( C_pv[row, seg-cols] @ V_comp )
+
+Percentiles are taken once, at the end, of the finished sum. The cohort mix stays
+deterministic — agreed 22 September 2026.
+
+**Measured effect, 2,000 draws** (proof only, no stage run, no file written):
+
+| material | flow | year | band now | band with vehicle draws |
+|---|---|---|---:|---:|
+| copper | inflow | 2060 | 10.2% | 44.5% |
+| copper | collected | 2060 | 10.3% | 37.2% |
+| magnet | inflow | 2060 | 11.7% | 44.7% |
+| steel | collected | 2040 | 7.5% | 41.8% |
+
+All five materials behave the same way. Medians move by −0.3 to −0.7% on inflow,
+which is the expected median-of-draws versus deterministic-value difference.
+
+**⚠️ THE BLOCKER — do not implement before resolving this.** On `collected` the
+median moved by **+10.7%**, identically for all five materials, which is a
+structural disagreement and not noise. Traced to the two artefacts themselves,
+summed over the same 11 segments, same flow, same year:
+
+| flow | year | `tracker_keyed` | `bev_draws` median | difference |
+|---|---:|---:|---:|---:|
+| inflow | 2040 | 15.9849 M | 15.8972 M | −0.55% |
+| inflow | 2060 | 16.2587 M | 16.1685 M | −0.55% |
+| collected | 2040 | 3.0938 M | 3.3377 M | **+7.88%** |
+| collected | 2060 | 13.4657 M | 13.1783 M | −2.13% |
+
+So `tracker_keyed` and `bev_draws` do not agree about how many vehicles are
+collected. **Whoever picks this up must find out which one is right before wiring
+the draws in**, because the fix silently adopts `bev_draws`' answer. Note also that
++7.88% on vehicles became +10.7% on mass — the remaining ~2.7% comes from the
+cohort-mix reweighting and is not yet explained.
+
+**One claim of mine to disregard.** In conversation I said a collected/inflow ratio
+above 100% was impossible. That was wrong. At vehicle level the ratio never exceeds
+100% (max 88.3% at 2060, 0 of 2000 draws over). At MATERIAL level it legitimately
+can, because collected vehicles are old cohorts whose per-vehicle mass differs from
+the current inflow. It is not evidence of a bug.
+
+**Also noticed, separate and pre-existing.** Segment `JA` is present in
+`tracker_keyed` but has no torque in the composition sheet's `productKeyLevel3`, so
+it is dropped from 04_03 entirely. It is dropped by the current code too, so this
+changes nothing about the comparison above — but JA vehicles carry no traction
+material in any 04_03 result today. Worth confirming that is intended.
+
+**Motor-type and voltage shares stay deterministic, and that is not a shortcut.**
+`src/traction.py:84` and `:144` return single floats; params hold no distribution
+for them at all. Drawing them would mean inventing a spread. If that uncertainty is
+wanted, the spread has to be specified first — it cannot be inferred from what is
+on disk.
+
+### 4.1e A WARNING ABOUT HOW THIS DAY WENT — read before touching `src/`
+
+On 22 September 2026 I wrote a new `src/traction_draws.py` over an existing 282-line
+module of the same name without reading it first, and committed it as `8238798`.
+That deleted 263 lines, including `class DrawLibrary`, which `04_03` calls at line
+373. The module I wrote was a worse reimplementation of work that already existed in
+commit `ac157e9`, "Propagate the 200,000 draws, instead of doing arithmetic on
+percentiles".
+
+It was caught, the file was restored byte-identically, and `8238798` was dropped with
+`git reset --hard 8238798^`. **HEAD is `19ebc98` and nothing is lost.** But the rule
+it broke is worth stating: in this project a file that sounds like the thing you are
+about to build probably already IS the thing you are about to build. Read it first.
+
 ### 4.2 Smaller open items
 
 - **`04_02` element resolution — DONE, 14 August 2026.** All four domains now carry
