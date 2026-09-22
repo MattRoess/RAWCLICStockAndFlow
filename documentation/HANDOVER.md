@@ -1,6 +1,62 @@
-# Handover — updated 2026-09-15
+# Handover — updated 2026-09-22
 
 Where the work stands, what is safe, what is not, and what to do next.
+
+## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
+
+On 2026-09-22 every repository's **git database was moved out of iCloud**, because
+iCloud corrupted this one. Working trees, `data/` and the virtualenvs did NOT move
+and stay in iCloud as before. Only `.git` moved.
+
+Each repo's `.git` is now a one-line pointer file:
+
+```
+gitdir: /Users/rm/gitdirs/<repo>.git
+```
+
+That pointer syncs through iCloud, so **the other Mac sees it but has no
+`~/gitdirs`, and every git command there will fail** until you create one. Same
+username on both machines, so the paths match. On that Mac, once per repository:
+
+```bash
+REPO=RAWCLICStockAndFlow          # repeat for each of the seven below
+mkdir -p ~/gitdirs
+git clone https://github.com/MattRoess/$REPO.git /tmp/attach-$REPO
+mv /tmp/attach-$REPO/.git ~/gitdirs/$REPO.git
+rm -rf /tmp/attach-$REPO
+git --git-dir=~/gitdirs/$REPO.git config core.worktree ~/Documents/GitHub/$REPO
+printf 'gitdir: %s\n' ~/gitdirs/$REPO.git > ~/Documents/GitHub/$REPO/.git
+cd ~/Documents/GitHub/$REPO && git status      # your working tree, nothing "deleted"
+```
+
+**Tested 2026-09-22** against a simulated second machine: `git status` came back
+with 0 entries, `git fsck` clean, correct branch and HEAD.
+
+⚠️ **NOT `git clone --bare`.** A bare clone has no index, so attaching it to an
+existing working tree makes git report every tracked file as *deleted* — 23 of
+them in the test — and `core.bare` plus `core.worktree` together also draw a
+warning from git. The ordinary clone above carries the index, which is the whole
+point.
+
+The seven repositories: `RAWCLICStockAndFlow`, `RAWCLICRecoveryModel`,
+`RAWCLICVehicleBattery`, `RAWCLICVehicleComposition`, `RAWCLICVehicleElectronics`,
+`RAWCLICVehicleTractionMotor`, `VehicleComposition`.
+
+**WHY, so nobody undoes it.** A git repository is only valid as a WHOLE set of
+objects. iCloud syncs files one at a time, lazily, in its own order, so a commit
+can arrive before the objects it points to. That is exactly what happened: on
+2026-09-22 this repo had 13 broken object links, `git status` failed with "bad tree
+object HEAD", and `git log` could not walk the history. Nothing was lost — GitHub
+had everything, and local HEAD already equalled remote `main` — but the local
+`.git` had to be rebuilt from a fresh clone.
+
+Data files have no such cross-file dependency, which is why `data/` and the 8.4 MB
+traction workbook were untouched and why they stay in iCloud. **Do not "fix" this by
+moving `.git` back.**
+
+**FROM NOW ON, MACHINES EXCHANGE WORK BY PUSH AND PULL, NOT BY iCLOUD.** The object
+store no longer travels through iCloud, so it can no longer arrive half-delivered.
+Commit and push on one Mac, pull on the other.
 
 The newest work is stage **04_04**, the battery material flow, built on 14–15
 September on top of battery-side work from the 9th. It has its own document —

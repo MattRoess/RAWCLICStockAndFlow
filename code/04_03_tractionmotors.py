@@ -788,24 +788,51 @@ def figure_elements(elements: pd.DataFrame, path: Path) -> Path:
     axis = axes[2]
     scenarios = (elements[elements["flow"] == "inflow"]
                  if "flow" in elements.columns else elements)
+
+    # COINCIDENT GRADES ARE DRAWN AS NESTED WIDTHS, NOT STACKED ON TOP.
+    # EH and UH carry the SAME terbium fraction in the source workbook --
+    # 0.005013 for both, against 0.002506 for SH -- so their curves are equal to
+    # the last digit and the second one drawn hid the first completely. The
+    # legend then promised three terbium lines and showed two. Nothing was
+    # wrong with the numbers; the reader simply could not see that two grades
+    # agree, which is itself the finding: the step from UH to EH is bought with
+    # dysprosium alone.
+    #
+    # Identical series are therefore drawn widest first, each narrower one on
+    # top, so every grade in the legend is visible as its own ring. No value is
+    # shifted to achieve it -- an offset would be a lie about the data.
+    columns = [c for c in ("mass", "mass_low", "mass_high")
+               if c in scenarios.columns]
+    drawn: dict[tuple, list] = {}
     for (element, scenario), state in scenarios[
             scenarios["element"].isin(["Dy", "Tb"])].groupby(
             ["element", "grade_scenario"]):
-        columns = [c for c in ("mass", "mass_low", "mass_high")
-                   if c in state.columns]
         state = state.groupby("scrap_year", as_index=False)[columns].sum()
+        signature = (element, tuple(state["mass"].round(6)))
+        drawn.setdefault(signature, []).append((scenario, state))
+
+    NESTED_WIDTHS = (4.6, 2.6, 1.4)     # enough separation to read at this size
+    for (element, _signature), members in drawn.items():
         colour = ELEMENT_COLOURS.get(element, "#555555")
-        # ⚠️ EVERY SCENARIO BANDED, and they will overlap heavily -- which is
-        # the honest picture. The grade moves dysprosium by 64% between SH and
-        # EH, and the uncertainty within any one grade is of the same order, so
-        # the three are not cleanly separated answers.
-        if {"mass_low", "mass_high"} <= set(state.columns):
-            axis.fill_between(state["scrap_year"], state["mass_low"] / 1e6,
-                              state["mass_high"] / 1e6, color=colour,
-                              alpha=0.10, lw=0)
-        axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=1.9,
-                  color=colour, ls=GRADE_LINESTYLE.get(scenario, "-"),
-                  label=f"{element}  {scenario}")
+        members.sort(key=lambda m: m[0])
+        for index, (scenario, state) in enumerate(members):
+            # ⚠️ EVERY SCENARIO BANDED, and they will overlap heavily -- which
+            # is the honest picture. The grade moves dysprosium by 64% between
+            # SH and EH, and the uncertainty within any one grade is of the same
+            # order, so the three are not cleanly separated answers.
+            if index == 0 and {"mass_low", "mass_high"} <= set(state.columns):
+                axis.fill_between(state["scrap_year"], state["mass_low"] / 1e6,
+                                  state["mass_high"] / 1e6, color=colour,
+                                  alpha=0.10, lw=0)
+            width = (NESTED_WIDTHS[min(index, len(NESTED_WIDTHS) - 1)]
+                     if len(members) > 1 else 1.9)
+            axis.plot(state["scrap_year"], state["mass"] / 1e6, lw=width,
+                      color=colour, ls=GRADE_LINESTYLE.get(scenario, "-"),
+                      zorder=3 + index,
+                      label=f"{element}  {scenario}"
+                            + ("  (= " + ", ".join(s for s, _ in members
+                                                   if s != scenario) + ")"
+                               if len(members) > 1 else ""))
     axis.set_title("What the magnet grade costs: Dy and Tb", fontsize=11.5)
     axis.set_ylabel("[kt / year]")
     axis.legend(frameon=False, fontsize=8.5, ncol=2, loc="upper right")
