@@ -473,7 +473,46 @@ deterministic — agreed 22 September 2026.
 All five materials behave the same way. Medians move by −0.3 to −0.7% on inflow,
 which is the expected median-of-draws versus deterministic-value difference.
 
-**⚠️ THE BLOCKER — do not implement before resolving this.** On `collected` the
+**✅ THE BLOCKER IS RESOLVED — 22 September 2026. `bev_draws` is right.**
+Measured, in this order, all at 2,000 draws:
+
+1. **`inflow` agrees to 0.02%** between `tracker_keyed_BAU` and the draw MEAN
+   (15.9848 vs 15.9824 M at 2040). The two artefacts are not generally inconsistent.
+2. **The collection share agrees to 0.04 pp.** Implied `collected/outflow` per draw
+   is 87.67 / 87.72 / 87.82 / 87.92% at 2030–2060, and the Jensen gap between
+   mean-of-ratio and ratio-of-means is at most 0.043 pp. The three-way normalisation
+   in `compute_collected_export_unknown_shares` is NOT the cause.
+3. **The whole gap is in `outflow`**: tracker (collected+export+unknown) against the
+   draw mean gives −5.44 / −6.07 / −5.39 / −2.11% at 2030–2060 — the same size and
+   sign as the gap on `collected`, which simply inherits it.
+
+**Cause: Jensen, on the survival curve.** Outflow is a nonlinear function of the
+drawn lifetime, so `E[outflow(λ)] ≠ outflow(E[λ])`. The tracker is one deterministic
+run at the point lifetime and therefore CANNOT equal the Monte Carlo mean. The
+draws are the correct quantity; the tracker's collected is biased high by 2–6%.
+This is the same effect already recorded for inflow in this project (ratio
+0.868–0.982). **So the fix in this item may adopt `bev_draws` — that is the right
+answer, not a silent substitution.**
+
+**⚠️ A SEPARATE, REAL DEFECT FOUND WHILE CHECKING THIS.** There are two tracker
+artefacts and they disagree:
+
+| file | written | collected 2040 |
+|---|---|---:|
+| `03_tracker_keyed.pkl` | **3 September** | 3.0938 M |
+| `03_tracker_keyed_BAU.pkl` | 14 September | 3.6692 M |
+
+An **18.6% difference**, and `bev_draws` was written at 12:18 on 14 September, six
+minutes before the BAU tracker — same run. But `04_03_tractionmotors.py:907` loads
+`tracker_keyed`, i.e. **the stale 3 September file**, for its baseline, while loading
+the per-scenario trackers from 14 September at line 918. The baseline figures are
+therefore drawn from an 11-day-old artefact that no longer matches anything else.
+The earlier +7.9% figure in this item came from comparing that stale file against
+the current draws. **Fix this before anything else in §4.1d** — either re-run so
+`03_tracker_keyed.pkl` is current, or point 04_03's baseline at the BAU tracker.
+
+**Superseded — the original blocker text, kept because the numbers were quoted.**
+On `collected` the
 median moved by **+10.7%**, identically for all five materials, which is a
 structural disagreement and not noise. Traced to the two artefacts themselves,
 summed over the same 11 segments, same flow, same year:
