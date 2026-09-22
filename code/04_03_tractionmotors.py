@@ -643,6 +643,22 @@ def figure_material(material: str, parallel: pd.DataFrame,
         axis.set_ylim(bottom=0)
         axis.grid(True, ls="--", alpha=0.25)
 
+    # ONE Y SCALE ACROSS PANELS 1, 3 AND 4, so they can be read against each
+    # other. They are the same quantity -- kilotonnes a year of this material --
+    # cut three ways: total flows, inflow by motor type, collected by motor type.
+    # On their own autoscales the eye compares bar heights that mean different
+    # things: collected topped out at 80 and inflow at 100, so the collected
+    # stack LOOKED nearly as tall as the inflow stack while being a fifth
+    # smaller.
+    #
+    # Panel 2 is deliberately left out. Its grey fan is each unmixed state --
+    # 'if every car were this one' -- and reaches 2-3x the combined line, so
+    # folding it in would flatten the other three to the bottom third.
+    shared = [axes[0], axes[2], axes[3]]
+    top = max(axis.get_ylim()[1] for axis in shared)
+    for axis in shared:
+        axis.set_ylim(0, top)
+
     # ⚠️ THE EXPLANATION GOES UNDER THE FIGURE, NOT ON THE DATA. In-axes
     # annotations landed on the lines they were explaining.
     figure.text(0.005, 0.015,
