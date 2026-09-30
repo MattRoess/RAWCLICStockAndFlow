@@ -1,4 +1,4 @@
-# Handover — updated 2026-09-22
+# Handover — updated 2026-09-28
 
 Where the work stands, what is safe, what is not, and what to do next.
 
@@ -57,6 +57,10 @@ moving `.git` back.**
 **FROM NOW ON, MACHINES EXCHANGE WORK BY PUSH AND PULL, NOT BY iCLOUD.** The object
 store no longer travels through iCloud, so it can no longer arrive half-delivered.
 Commit and push on one Mac, pull on the other.
+
+**2026-09-28: 04_03's export was missing the `outflow` flow** and now writes
+it. See the dated entry at the foot of this file. **04_03 has not been re-run**,
+so the recovery model's account figures stay absent until it is.
 
 The newest work is stage **04_04**, the battery material flow, built on 14–15
 September on top of battery-side work from the 9th. It has its own document —
@@ -968,3 +972,50 @@ or `materials_mc_seed` through `np.random.SeedSequence`, spawned in sorted order
 codebase, and that was the one site.
 
 If a stage ever needs a per-name seed offset again: **crc32, never `hash`.**
+
+
+---
+
+## 2026-09-28 — 04_03 was not exporting the outflow
+
+**`src/traction_export.py` wrote `collected` and `inflow` and stopped.** The
+recovery model needs all three, as `battery_recovery_draws` has carried them
+since it was written (`04_04_batteries.FLOWS`). Without `outflow` its
+`account()` returns None, and four figures are then silently not drawn for
+every traction motor case -- account, losses, trapped, fate -- while the
+battery and electronics cases have had them all along.
+
+Nothing failed. It surfaced on the recovery side, three days later, because
+somebody asked where copper's account figure was.
+
+**The tracker has no `outflow` row.** It keys each end-of-life vehicle by where
+it went, and `collected`, `export` and `unknown_whereabouts` PARTITION the
+outflow -- there is no fourth destination
+(`DESIGN_collected_flow_definition.md`). So the export composes it:
+
+    COMPOSED = {'outflow': ('collected', 'export', 'unknown_whereabouts')}
+
+and `EXPORTED_FLOWS` is now `('collected', 'inflow', 'outflow')`, which is the
+default `export()` uses and 04_03 does not override.
+
+A composed flow is **all of its parts or none**. Half of them would write an
+outflow that is quietly too small, and too small on the outflow means too small
+on "never collected" downstream -- a figure that flatters the collection rate
+with nothing failing. `_parts_of` raises and names the missing part instead.
+
+**`code/test_stage04_03_export.py`** is new, in the shape of
+`test_stage04_02_export.py`: it calls `_write` for real on a synthetic frame
+and then lists the files, checking that all three flows are written, that no
+tracker-only name leaks into the export, that `outflow` is the three
+destinations added exactly, and that a tracker missing a part refuses. Nine
+checks, a second to run, no pipeline needed.
+
+⚠️ **04_03 HAS NOT BEEN RE-RUN.** `data/processed/traction_recovery_draws/`
+still holds `collected` and `inflow` only, so the four figures stay absent
+downstream until it is. Nothing else about the export changed: `collected` and
+`inflow` are written by the same code path and the same arithmetic as before,
+which the test pins.
+
+The recovery side of the same problem -- `other_flow` could not address a
+resource exported AS a component, so even `collected` came back None for copper
+-- is fixed in `RAWCLICRecoveryModel`, DEFECTS 3.23.

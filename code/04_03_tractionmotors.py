@@ -966,6 +966,28 @@ def main() -> dict[str, Any]:
     print("\nDrawn -- the 200,000 simulations, summed draw by draw")
     drawn_materials, element_tidy = drawn_distributions(
         tracker_keyed, composition, params, elements)
+
+    # ⚠️ AND THE DRAWS THEMSELVES, FOR THE RECOVERY MODEL. Everything above
+    # reduces a 200,000-long distribution to three numbers. RAWCLICRecoveryModel
+    # runs its own Monte Carlo through a transfer-coefficient chain, so handed
+    # percentiles it could only multiply them -- the arithmetic that model
+    # forbids. The arrays are written in its own upstream layout.
+    print("\nRecovery-model export -- the draws, not the percentiles")
+    from src import traction_export
+    recovery_root = (PROJECT_ROOT / "data" / "processed"
+                     / "traction_recovery_draws")
+    manifest = traction_export.export(tracker_keyed, composition, params,
+                                      recovery_root)
+    if manifest.empty:
+        print("  nothing written -- no material had usable coefficients")
+    else:
+        print(f"  {len(manifest)} arrays, "
+              f"{manifest.grade.nunique()} grade folders "
+              f"({', '.join(sorted(manifest.grade.unique()))}), "
+              f"{manifest.flow.nunique()} flows, "
+              f"{manifest.MB.sum():.0f} MB")
+        print(f"  {recovery_root}")
+        manifest.to_csv(recovery_root / "manifest.csv", index=False)
     combined_tidy = (drawn_materials if not drawn_materials.empty
                      else by_material(combined, []))
     if not drawn_materials.empty:
