@@ -14,7 +14,7 @@ band.
 Reported **every year**, 2020 to 2070.
 
 ```bash
-.venv/bin/python code/04_04_batteries.py     # ~47 min at 200,000 draws, writes the figures too
+.venv/bin/python code/04_04_batteries.py     # an hour or more at 200,000 draws (47 min with five chemistries), writes the figures too
 .venv/bin/python code/test_04_04_figures.py  # ~30 s, redraws them from the saved draws
 ```
 
@@ -31,32 +31,26 @@ They are **assumptions, not data** — the observed record ends in 2026. Shares 
 stated at 2025, 2035, 2050 and 2070, interpolated between, and set per segment
 group (small / medium / large), in `src/params_schema.py`.
 
-| | what it says | who has no composition |
+| | what it says | whose cell is not described |
 |---|---|---|
 | **S1** incumbents hold | LFP carries the volume, NMC the premium cars, LMFP grows into both. Nothing new ever arrives. | nobody — 0 % throughout |
-| **S2** sodium enters | Sodium-ion takes the small segments (68 % by 2070), NMC shrinks to a niche. | 34 % of new cars by 2070 |
-| **S3** sodium and solid-state | S2, plus bipolar solid-state from 2040, large segments first (70 % of them by 2070). | 69 % of new cars by 2070 |
+| **S2** sodium enters | Sodium-ion takes the small segments (68 % by 2070, as Prussian white and layered oxide), NMC shrinks to a niche. | nobody — 0 % throughout |
+| **S3** sodium and solid-state | S2, plus bipolar solid-state from 2040, large segments first (70 % of them by 2070). | solid-state: about 48 % of new cars by 2070 |
 
 ![chemistry scenarios](../data/processed/figures/04_04_1_chemistry_scenarios.png)
 
 ## The one thing to know before reading any number
 
-**Sodium-ion and solid-state have no composition.** Nobody has published one that
-survives scrutiny, so their cars carry no material in this model at all. Their
-share is reported as an explicit gap instead of being dropped, because a total
-that quietly fell would read as falling demand rather than as a hole in the data.
+**Solid-state has no cell composition.** Nobody has published one that survives
+scrutiny, so its cars carry no cathode, anode or electrolyte in this model. Its share
+is reported as an explicit gap instead of being dropped, because a total that quietly
+fell would read as falling demand rather than as a hole in the data. Its packaging is
+carried, so its steel, aluminium and copper reach the totals.
 
-So S2 and S3 curves that sink are mostly cars leaving the picture. Every
-comparison figure carries the uncovered share next to the curves for that reason,
-and says on its face that this is an open item rather than an oversight.
-
-**Half of it was closed on 2026-09-15.** Both chemistries now carry their
-packaging — 209.5 kg of a 60 kWh sodium pack, within 3 kg of LFP's own structure
-— with the active material left at zero and still reported as the gap. Under S3
-in 2070 that recovered **+122 % iron, +216 % aluminium and +84 % copper** which
-had been falling out of the totals, and it changes the headline: the fleet's
-iron and aluminium demand does not collapse under S3, it moves away from
-lithium. Full account:
+The two sodium cells are built from the literature by the battery project — a scenario,
+not a bill of materials — and are counted like any other chemistry. Every comparison
+figure carries the uncovered share next to the curves for that reason, and says on
+its face that it is an open item rather than an oversight. Full account:
 [DESIGN_chemistries_without_composition.md](DESIGN_chemistries_without_composition.md).
 
 ![uncovered share](../data/processed/figures/04_04_4_uncovered_share.png)
@@ -77,8 +71,8 @@ do not add up to each other and a single frame would invite summing them.
 
 | | |
 |---|---|
-| `battery_material_flows` | 11 elements. Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co |
-| `battery_component_flows` | 12 components. Cathode and anode active material, the two current collectors, support frame, thermal conductor, module enclosure, cables, cell terminals, electrolyte, casing, separator |
+| `battery_material_flows` | 14 elements. Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co, and the sodium cells' Na, N and F |
+| `battery_component_flows` | 13 components. Cathode and anode active material, the two current collectors, support frame, thermal conductor, module enclosure, cables, cell terminals, electrolyte, casing, separator, and the sodium cells' unitemised cell mass |
 
 ![components](../data/processed/figures/04_04_7_components_collected.png)
 
@@ -102,7 +96,7 @@ Draw *i* is one coherent world on every side, because both projects run at
 **The result is the draws**, in
 `data/processed/battery_draws/<flow>/<scenario>/<chemistry>.npy`, shaped
 (draws, years, names) in tonnes, one pair of arrays per level — three flows,
-40 GB at 200,000 draws on the annual grid, five chemistries. The table in
+about 48 GB at 200,000 draws on the annual grid, six chemistries (40 GB with five). The table in
 `04_04_battery_material_flows.pkl` — mean, median, 2.5 % and 97.5 % — is computed
 from them and is for reading, never an input to further arithmetic. Recovery is a
 ratio of two of these numbers, and a ratio of percentiles is not the percentile of
@@ -129,22 +123,30 @@ Measured on the drawn shares themselves, 200,000 draws: the group sums to
 renormalising moves each chemistry's mean **+0.01 % to +0.78 %** off its stated
 value, which is small but is not nothing.
 
-**Where this lands, and where it does not.** Band as a share of the median,
-inflow 2070:
+**Where this lands, and where it does not.** Band as a share of the median, S1,
+inflow 2070 — measured on 2026-09-15, and S1 is untouched by the sodium cells. S2 and
+S3 are measured again on the first run with them, because the layered cell carries
+nickel, manganese and copper:
 
-| | S1 | S2 | S3 | carried by |
-|---|---|---|---|---|
-| Li | 59 % | 62 % | 70 % | all three chemistries |
-| Cu | 51 % | 55 % | 63 % | all three |
-| **Ni, Co** | **73 %** | **81 %** | **82 %** | NMC only |
-| Mn | 70 % | 71 % | 79 % | LMFP and NMC |
+| | S1 | carried by |
+|---|---|---|
+| Li | 59 % | all three chemistries |
+| Cu | 51 % | all three |
+| **Ni, Co** | **73 %** | NMC only |
+| Mn | 70 % | LMFP and NMC |
 
 Lithium's total band is unchanged by drawing the shares, and that is the
 mechanism rather than a bug. Measured on the same draws: each chemistry's OWN
 lithium carries a 70–73 % band while their sum carries 59 %. The drawn mix moves
 lithium between chemistries, and all three contain it, so it largely cancels in
-the total. Nickel and cobalt come only from NMC and cannot cancel — there the
+the total. In S1 nickel and cobalt come only from NMC and cannot cancel — there the
 share uncertainty arrives in full.
+
+**The two sodium cells draw independently**, one multiplier each, as every chemistry
+does. Measured on the drawn shares at 40,000 draws, the 95 % band of sodium's total
+share in 2070 is ±8.3 % of its median in small cars and ±18.0 % in medium ones, where one
+multiplier on all of sodium gave ±9.3 % and ±21.8 %: narrower, by a point or four, and
+the medians are the same.
 
 ## Inflow is built this year, what leaves was built long ago
 
@@ -161,11 +163,11 @@ and 03_02 already use, and the inflow the draw's own.
 
 This matters more than it sounds. Without it the chemistry mix multiplies both
 flows by the same factor, cancels out of every outflow-over-inflow ratio, and all
-three scenarios produce one identical curve. With it, S3's **collected** material
-reaches **153 %** of its own lithium demand by 2070, **154 %** of its copper and
-**232 %** of its nickel (peaking at 369 % in 2054). The outflow behind those
-numbers is 174 %, 175 % and 264 % — the difference is what never arrives: the cars being scrapped
-were built when lithium chemistries still dominated, while the new ones are not.
+three scenarios produce one identical curve. With it, the collected material of a
+scenario is a different multiple of its own inflow for each element, because the cars
+being scrapped were built when lithium chemistries still dominated, while the new ones
+are not. The figure below shows the result, and the difference between its two lines is
+what never arrives.
 
 ![secondary supply](../data/processed/figures/04_04_5_secondary_supply.png)
 
@@ -196,23 +198,24 @@ the extrapolation above 100 kWh all compound.
 
 ### Every element
 
-Eleven elements carry mass: Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co, in that
-order of size, oxygen excluded. One overview per flow — but only for the inflow
-and the collected: measured, the collected flow is **87.9 % of the outflow for
+Fourteen elements carry mass: Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si and Co from the
+lithium chemistries, and Na, N and F, which exist only in the sodium cells and so only in
+S2 and S3. Oxygen is excluded from the figures. One overview per flow — but only for the
+inflow and the collected: measured, the collected flow is **87.9 % of the outflow for
 every element to three decimals**, because the collection share is drawn on
 vehicles and not on materials. An outflow panel would be the collected one times
 a constant. Sulphur and vanadium sit in the arrays as columns of zeros — the
-element axis is the union over the chemistry files, and none of these three
-contains them.
+element axis is the union over the chemistry files, and none of the six contains
+them.
 
 ![all elements](../data/processed/figures/04_04_6_all_elements_inflow.png)
 
-Two pairs move together for structural reasons, not by accident. **Nickel and
-cobalt come only from NMC**, so their return ratios are identical to within
-0.03 pp — cobalt is therefore left out of the secondary-supply figure. Lithium
-and copper sit within 6 pp of each other because both scale with the pack rather
-than with the chemistry; manganese, which only LMFP and NMC carry, is 18 pp
-away.
+Cobalt comes only from NMC, so its return is NMC's own, which is why it is left out of
+the secondary-supply figure. Lithium and copper moved within 6 pp of each other in the
+earlier runs because both scale with the pack rather than with the chemistry; manganese,
+which LMFP, NMC and the layered sodium cell carry, moved apart from them. Those
+distances were measured before the sodium cells had a composition and are measured again
+on the first run with them.
 
 ## Where things live
 

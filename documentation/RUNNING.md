@@ -51,7 +51,7 @@ disk in ~30 s, without rerunning the stage. It is a bench tool, not a stage, and
 not a test despite the prefix — the prefix is there because `0x_` belongs to the
 things that produce results.
 
-**04_04 writes 40 GB of per-draw arrays** to `data/processed/battery_draws/`, and
+**04_04 writes about 48 GB of per-draw arrays** (40 GB with five chemistries) to `data/processed/battery_draws/`, and
 that is deliberate: secondary supply is collected over inflow formed draw by
 draw, and a mean with two percentiles cannot answer it. See
 `BATTERY_MATERIAL_FLOWS.md`.
@@ -145,7 +145,7 @@ arrays are all of it:
 
 | | |
 |---|---|
-| `battery_draws/` | 40 GB — 04_04, three flows x three scenarios x two levels, every year |
+| `battery_draws/` | about 48 GB — 04_04, three flows x three scenarios x two levels, every year |
 | `carcomposition_draws/` | 9.0 GB — 04_01 |
 | `element_draws/` | 5.5 GB — 04_02 |
 | `bev_draws/` | 2.6 GB — 03_02's BEV export |
@@ -191,7 +191,7 @@ is not reaching that quantity. That is exactly how the inflow defect was found.
 | `MODEL_DESCRIPTION.md` | How the model works: cohort mechanics, special cases, Monte Carlo methodology. |
 | `UNCERTAINTY_MAP.md` | Where uncertainty enters, travels, and stops. Read this before trusting a band. |
 | `DESIGN_inflow_uncertainty_propagation.md` | Why the inflow propagation is built the way it is, including two rejected designs. |
-| `DESIGN_chemistries_without_composition.md` | Why 04_04 cannot describe sodium-ion or solid-state cars, how big that hole is, and why it stays open. |
+| `DESIGN_chemistries_without_composition.md` | Why 04_04 cannot describe solid-state cars, how big that hole is, and why it stays open. |
 | `BATTERY_MATERIAL_FLOWS.md` | Stage 04_04 in full: the three chemistry scenarios, why there are two levels of detail, and what the figures do and do not say. |
 | `HANDOVER.md` | Current state: what is tested, at what draw count, and what is open. |
 

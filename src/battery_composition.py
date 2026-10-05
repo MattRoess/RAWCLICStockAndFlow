@@ -90,8 +90,9 @@ class CompositionAtCapacity:
             raise CompositionError(
                 f"no {level} mass arrays for {chemistry!r} at {voltage} V in "
                 f"{self.directory}. "
-                "Sodium-ion and solid-state have none -- they have no composition of "
-                "their own, and a caller must handle that rather than be handed zeros.")
+                "The name must be a file stem the battery project writes "
+                "(materials.battery_chemistry_file_names), and that project's "
+                "05_composition.py must have been run.")
         capacities, arrays, elements = [], [], None
         for path in found:
             # Matched rather than positioned: chemistry names carry a varying

@@ -2001,10 +2001,11 @@ class MaterialsParams:
     # ⚠️ CHEMISTRY SHARES TO 2070, three scenarios. ASSUMPTION, NOT DATA --
     # the observed record ends in 2026 and everything after it is judgement.
     #
-    # WRITTEN-DOWN COPY of RAWCLICVehicleBattery's src/scenarios.py, on the same
-    # footing as the voltage table above: copied so this repo runs without that
-    # one present, and IF THAT PROJECT CHANGES ITS SCENARIOS THIS MUST BE
-    # UPDATED BY HAND.
+    # WRITTEN-DOWN COPY of RAWCLICVehicleBattery's scenario_1, scenario_2 and
+    # scenario_3 (src/params_schema.py there), on the same footing as the voltage
+    # table above: copied so this repo runs without that one present, and IF THAT
+    # PROJECT CHANGES ITS SCENARIOS THIS MUST BE UPDATED BY HAND. Last copied
+    # 2026-10-05, when sodium became two chemistries there.
     #
     # Values are percentages at the anchor years, interpolated between and held
     # flat outside, then renormalised per group and year.
@@ -2013,10 +2014,17 @@ class MaterialsParams:
     # S2  sodium enters the small segments, NMC shrinks to a niche
     # S3  S2 plus bipolar solid-state from 2040, large segments first
     #
-    # ⚠️ Na_ion and solid_state HAVE NO COMPOSITION. Their share is carried and
-    # reported as a gap rather than silently dropped -- under S3 that is most of
-    # the market by 2070, and a total that quietly fell would read as a collapse
-    # in demand rather than a hole in the data.
+    # SODIUM IS TWO CHEMISTRIES, Na_ion_prussian_white and Na_ion_layered, each with
+    # a composition of its own that the battery project builds from the literature.
+    # The split is by segment group: small cars (A, B, JA, JB) use Prussian white and
+    # layered oxide rises to 20% of the sodium by 2070; medium cars (C, D, JC, JD) are
+    # half and half; large cars (E, F, JE, JF) are layered oxide only. The two shares
+    # add up to the single sodium share these scenarios had before.
+    #
+    # ⚠️ ONLY solid_state HAS NO COMPOSITION. Its share is carried and reported as a
+    # gap rather than silently dropped -- under S3 that is a large part of the market
+    # by 2070, and a total that quietly fell would read as a collapse in demand rather
+    # than a hole in the data.
     # SAFE TO CHANGE: yes, to track the battery project.
     battery_chemistry_anchor_years: tuple[int, ...] = (2025, 2035, 2050, 2070)
 
@@ -2037,21 +2045,27 @@ class MaterialsParams:
                        "NMC_high": (75, 65, 58, 55)},
         },
         "S2": {
-            "small":  {"Na_ion": (2, 40, 60, 68), "LFP": (68, 40, 25, 20),
+            "small":  {"Na_ion_prussian_white": (2, 38.22, 53.33, 54.4),
+                       "Na_ion_layered": (0, 1.78, 6.67, 13.6), "LFP": (68, 40, 25, 20),
                        "LMFP": (18, 15, 12, 10), "NMC_high": (12, 5, 3, 2)},
-            "medium": {"Na_ion": (0, 12, 20, 24), "LFP": (50, 48, 42, 38),
+            "medium": {"Na_ion_prussian_white": (0, 6, 10, 12),
+                       "Na_ion_layered": (0, 6, 10, 12), "LFP": (50, 48, 42, 38),
                        "LMFP": (22, 32, 34, 35), "NMC_high": (28, 8, 4, 3)},
-            "large":  {"Na_ion": (0, 3, 8, 10), "LFP": (8, 18, 24, 25),
+            "large":  {"Na_ion_layered": (0, 3, 8, 10), "LFP": (8, 18, 24, 25),
                        "LMFP": (17, 49, 58, 57), "NMC_high": (75, 30, 10, 8)},
         },
         "S3": {
-            "small":  {"solid_state": (0, 0, 15, 35), "Na_ion": (2, 40, 52, 45),
+            "small":  {"solid_state": (0, 0, 15, 35),
+                       "Na_ion_prussian_white": (2, 38.22, 46.22, 36),
+                       "Na_ion_layered": (0, 1.78, 5.78, 9),
                        "LFP": (68, 40, 20, 12), "LMFP": (18, 15, 11, 7),
                        "NMC_high": (12, 5, 2, 1)},
-            "medium": {"solid_state": (0, 0, 28, 50), "Na_ion": (0, 12, 15, 14),
+            "medium": {"solid_state": (0, 0, 28, 50),
+                       "Na_ion_prussian_white": (0, 6, 7.5, 7),
+                       "Na_ion_layered": (0, 6, 7.5, 7),
                        "LFP": (50, 48, 30, 18), "LMFP": (22, 32, 25, 17),
                        "NMC_high": (28, 8, 2, 1)},
-            "large":  {"solid_state": (0, 2, 45, 70), "Na_ion": (0, 3, 5, 5),
+            "large":  {"solid_state": (0, 2, 45, 70), "Na_ion_layered": (0, 3, 5, 5),
                        "LFP": (8, 18, 12, 6), "LMFP": (17, 49, 33, 17),
                        "NMC_high": (75, 28, 5, 2)},
         },
@@ -2063,29 +2077,29 @@ class MaterialsParams:
     battery_chemistry_file_names: dict[str, str] = field(default_factory=lambda: {
         "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub",
         "NMC_high": "battLiNMC_highNi",
+        # The two sodium cells, built from the literature by the battery project.
+        "Na_ion_layered": "Na_ion_layered",
+        "Na_ion_prussian_white": "Na_ion_prussian_white",
         # Packaging only -- see battery_chemistry_active_material_unknown.
-        "Na_ion": "Na_ion", "solid_state": "solid_state",
+        "solid_state": "solid_state",
     })
 
     # ⚠️ CHEMISTRIES WHOSE ACTIVE MATERIAL NOBODY HAS DESCRIBED.
     #
-    # These two DO have a composition file, and it is real: the casing, the
-    # separator, the cables, the terminals, the enclosure, the frame, the
-    # thermal conductor and both current collectors, at the mass of the pack
-    # they are modelled on. What it does not have is the cathode, the anode and
-    # the electrolyte -- the cell itself -- because nobody has published one
-    # that survives scrutiny, and a plausible number borrowed from a lithium
-    # chemistry would be a claim nobody made.
+    # Solid-state DOES have a composition file, and it is real: the cables, the
+    # enclosure, the frame, the thermal conductor and both current collectors, at
+    # the mass of the pack it is modelled on. What it does not have is the cathode,
+    # the anode and the electrolyte -- the cell itself -- because nobody has
+    # published one that survives scrutiny, and a plausible number borrowed from a
+    # lithium chemistry would be a claim nobody made.
     #
-    # In their arrays the active materials are ZERO, and zero there means NOT
-    # DESCRIBED rather than none present. This list is what stops that zero
-    # being read as a fact: the cars carrying these chemistries are reported as
-    # a gap, at the same share as before they had any composition at all. What
-    # changed is that their steel, aluminium and copper now reach the totals.
+    # In its arrays the active materials are ZERO, and zero there means NOT
+    # DESCRIBED rather than none present. This list is what stops that zero being
+    # read as a fact: the cars carrying it are reported as a gap. (Sodium-ion was on
+    # this list until 2026-10-05; the battery project now builds both of its cells.)
     # SAFE TO CHANGE: remove a name the day a real composition arrives for it,
     # and not before.
-    battery_chemistry_active_material_unknown: tuple[str, ...] = (
-        "Na_ion", "solid_state")
+    battery_chemistry_active_material_unknown: tuple[str, ...] = ("solid_state",)
 
     # WHERE 04_04 WRITES THE DRAWS THE RECOVERY MODEL READS, under
     # data/processed/. One folder per chemistry scenario, then per flow:

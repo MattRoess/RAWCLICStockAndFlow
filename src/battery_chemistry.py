@@ -3,7 +3,7 @@ battery_chemistry.py
 ====================
 
 Which battery chemistry the cars of a segment group carry, in a given year,
-under a given scenario -- and how much of that has no composition behind it.
+under a given scenario.
 
 Shares are stated percentages at the anchor years, interpolated between them,
 held flat outside, and renormalised per group and year.
@@ -19,11 +19,13 @@ renormalised to one. The renormalisation IS the correlation -- one chemistry
 gaining means the others give way, in that draw -- rather than a bookkeeping
 trick that dumps the imbalance on whichever chemistry was listed last.
 
-ONE DRAW PER CHEMISTRY, SHARED ACROSS GROUPS AND HELD ACROSS YEARS. If sodium
-beats expectations it beats them in small cars and in medium ones, so the
+ONE DRAW PER CHEMISTRY, SHARED ACROSS GROUPS AND HELD ACROSS YEARS. If a
+chemistry beats expectations it beats them in every group that carries it, so the
 multiplier is keyed on the chemistry alone. Redrawing it per year would make a
 trajectory that jitters, which is noise and not uncertainty; redrawing it per
-group would let sodium win in one segment and lose in the next for no reason.
+group would let a chemistry win in one segment and lose in the next for no reason.
+The two sodium cells are two chemistries and so draw independently: the uncertainty
+of sodium as a whole is narrower than one multiplier on all of it would give.
 
 The seed is offset with `zlib.crc32`, never `hash()`: Python salts `str` hashing
 per process, which cost this project its reproducibility once already.
@@ -51,19 +53,6 @@ def chemistry_share(params, scenario: str, group: str, chemistry: str,
         return 0.0
     here = np.interp(year, anchors, np.asarray(definition[chemistry], dtype=float))
     return float(here / total)
-
-
-def uncovered_share(params, scenario: str, group: str, year: float) -> float:
-    """
-    The share of a group with no composition, SUMMED over the chemistries that
-    lack one -- sodium-ion and solid-state are both missing under S3, and the
-    hole they leave is the two together.
-    """
-    materials = params.materials
-    named = materials.battery_chemistry_file_names
-    return sum(chemistry_share(params, scenario, group, chemistry, year)
-               for chemistry in materials.battery_chemistry_scenarios[scenario][group]
-               if chemistry not in named)
 
 
 def _share_multiplier(params, chemistry: str, years, n_draws: int,

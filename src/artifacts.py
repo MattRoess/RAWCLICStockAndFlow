@@ -155,7 +155,7 @@ ARTIFACT_FILES: dict[str, str] = {
     # miss 7-11% of the pack, which is exactly why this level exists.
     "battery_component_flows": "04_04_battery_component_flows.pkl",
     # The share of the fleet whose chemistry has no composition at all
-    # (sodium-ion, solid-state), carried so a missing mass is visible as a gap
+    # (solid-state), carried so a missing mass is visible as a gap
     # rather than read as a fall in demand.
     "battery_chemistry_gaps": "04_04_battery_chemistry_gaps.pkl",
     # [NEW] Same idea as mc_stage02/03_01_sensitivity, PER SCENARIO: for each of the

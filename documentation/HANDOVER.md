@@ -1,6 +1,36 @@
-# Handover — updated 2026-09-28
+# Handover — updated 2026-10-05
 
 Where the work stands, what is safe, what is not, and what to do next.
+
+## 2026-10-05 — the updated battery chemistry scenarios: sodium is two cells
+
+**Done, and not yet run on the real data.** RAWCLICVehicleBattery's S2 and S3 split sodium
+into two chemistries on 2026-10-02, and its composition was finished on 2026-10-05 (it called
+that done). This repository's written-down copy of the scenarios now matches it exactly:
+`Na_ion` is `Na_ion_prussian_white` plus `Na_ion_layered` in S2 and S3, by segment group, and
+the two shares add up to the old single sodium share in every group and year. S1 has no
+sodium. `battery_chemistry_file_names` names both cells, and
+`battery_chemistry_active_material_unknown` is `("solid_state",)` alone: the gap is
+solid-state's, 47.9 % of new cars by 2070 under S3 and exactly zero in S1 and S2.
+
+What else changed so the stage keeps telling the truth: the colours and labels of both cells;
+the all-elements figure now picks its elements from every scenario (S1 alone has no Na, N or F);
+`batteryCellUnitemised` is a thirteenth component and is hatched as invisible to the element
+level; `load_elements` reads only the chemistries the settings name, so a leftover `Na_ion.npy`
+cannot be summed beside the two cells; the dead `uncovered_share()` is gone; the figure notes,
+`OPEN_ITEM` and `DESIGN_chemistries_without_composition.md` no longer say sodium has no cell.
+
+**Tested in a sandbox only:** the whole of 04_04 at 2,000 draws, outputs redirected into a scratch
+folder, exit 0, all nine figures drawn, the lithium totals identical to his last run.
+
+**To run it:** `00_parameters.py` first (04_04 refuses a saved file that predates the schema), then
+04_04. Expect an hour or more and about 48 GB, not 47 minutes and 40 GB: six chemistries, not five.
+The 36 old `Na_ion*` files in `data/processed/battery_draws/` (8.2 GB) are not read any more and are
+his to delete.
+
+**Open:** the recovery export now carries three elements, Na, N and F, and a component,
+`batteryCellUnitemised`, that RAWCLICRecoveryModel's battery case has no process or coefficient
+for. The legend of figure 3 overlaps its footnote, as it did before this change.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 
@@ -74,7 +104,7 @@ This file records what changed around it.
 ### Since 2026-09-02 — stage 04_04, and what it dragged in with it
 
 04_04 was rewritten from nothing usable into a per-draw battery material flow:
-three flows, three chemistry scenarios, three chemistries, two levels of detail,
+three flows, three chemistry scenarios, six chemistries, two levels of detail,
 every year from 2020 to 2070, at 200,000 draws, with the chemistry shares
 themselves drawn. `RAWCLICVehicleBattery`
 supplies the composition and was changed to match.
@@ -86,7 +116,7 @@ supplies the composition and was changed to match.
 | `src/battery_capacity.py` | **new** — the pack a segment carries, as a five-level discrete mixture drawn per car and held for its life |
 | `src/battery_voltage.py` | **new** — 400 or 800 V, drawn per car, never blended |
 | `src/battery_composition.py` | **new** — element and component masses at a drawn capacity, read from the battery project |
-| `src/battery_chemistry.py` | **new** — the scenario shares, and the share with no composition behind it |
+| `src/battery_chemistry.py` | **new** — the scenario shares, and their draws |
 | `src/battery_vintage.py` | **new** — where the cars leaving the fleet were built |
 | `src/params_schema.py` | the battery block: capacity levels, voltage shares, three chemistry scenarios, the composition directory; `battery_size_map` and `battery_composition_parameter_code` deleted |
 | `src/artifacts.py` | registers `battery_material_flows`, `battery_component_flows`, `battery_chemistry_gaps` |
@@ -220,7 +250,7 @@ code/03_02_adjustedflows.py    ~40 min, plus ~13 min for the BEV export
 code/04_01_carcomposition.py
 code/04_02_BEVelectronics.py   needs 03_02's export and the electronics draws
 code/04_03_tractionmotors.py
-code/04_04_batteries.py        ~47 min, writes 40 GB of draws and nine figures
+code/04_04_batteries.py        an hour or more (47 min with five chemistries), about 48 GB of draws and nine figures
 code/test_04_04_figures.py     ~30 s, redraws those figures without the stage
                                -- a bench tool, not part of the chain
 ```
@@ -687,26 +717,18 @@ about to build probably already IS the thing you are about to build. Read it fir
   Do not repeat the number — point at the generated file.
 - **`RUNNING.md` still says 04_03 and 04_04 are "not part of this chain".**
   True when it was written, wrong now: 04_04 consumes 03_02's BEV export and the
-  battery project's arrays, takes about 47 minutes and writes 40 GB.
+  battery project's arrays, takes about an hour and writes about 48 GB.
 
 ### 4.3 OPEN — what 04_04 cannot yet say
 
-- **Sodium-ion and solid-state have no composition at all.** Their share is
-  reported as an explicit gap rather than dropped, but under S3 that gap is
-  69.3% [63.9-74.2] of new cars by 2070, and it passes 10% of the fleet in 2031.
-  **Left open deliberately** -- nobody has published a composition for either
-  that survives scrutiny, and inventing one would be worse than the hole. Full
-  account, with the measurements and the rejected alternatives:
-  `DESIGN_chemistries_without_composition.md`.
-- **Half of that gap was an export, not a data problem — CLOSED 2026-09-15.**
-  The battery project DOES model these two: at 60 kWh it gives sodium-ion
-  209.5 kg of casing, separator, cables, terminals, enclosure, frame, thermal
-  conductor and current collectors -- within 3 kg of LFP's own structure -- and
-  leaves only the ACTIVE material empty. It writes no `.npy` draw arrays for
-  them, so `src/battery_composition.py` raised and 04_04 dropped the whole car,
-  structure included. Both now export, the gap means "the active material"
-  rather than "the car", and the share it reports is unchanged. It recovered
-  +122% iron, +216% aluminium and +84% copper under S3 in 2070. See §2 of that
+- **Solid-state has no cell composition.** Its share is reported as an explicit gap rather
+  than dropped: under S3 it is about 48 % of new cars by 2070 and 8.9 % in 2040, and exactly
+  zero in S1 and S2. **Left open deliberately** -- nobody has published a composition for it
+  that survives scrutiny, and inventing one would be worse than the hole. Full account, with
+  the measurements and the rejected alternatives: `DESIGN_chemistries_without_composition.md`.
+  Sodium-ion was part of this gap until 2026-10-05; the battery project builds both of its cells.
+- **Solid-state's packaging is exported and counted.** The gap means "the active material"
+  rather than "the car", and its steel, aluminium and copper reach the totals. See §2 of that
   document.
 - **The material level is empty of information.** The battery workbook's `m-c`
   rows carry a mass but no material name, and only for three components — which
@@ -731,10 +753,10 @@ network is built and checked; nothing can run until they exist. The battery
 project's own handover has the same open item for the other two cases.
 
 Also open there: which recovery rate applies to a chemistry whose cell nobody has
-described. Sodium-ion's cell holds no CRM or SRM, so its absence costs the
-recovery answer nothing. Solid-state's holds lithium, and there is no coefficient
-to write for a composition that does not exist. See
-`DESIGN_chemistries_without_composition.md` §3b.
+described. Solid-state's holds lithium, and there is no coefficient to write for a
+composition that does not exist; see `DESIGN_chemistries_without_composition.md` §3b. And
+since 2026-10-05 the export carries Na, N and F and a thirteenth component, the sodium
+cells' unitemised cell mass, which the case has no coefficients for.
 
 ---
 
@@ -827,7 +849,7 @@ now Markdown, one of them generated, and moved to `superseded/`.
 | `BATTERY_MATERIAL_FLOWS.md` | **stage 04_04** — the three scenarios, the two levels, the vintage rule, and what the figures do and do not say. Read this one first for anything battery |
 | `DESIGN_bev_capacity_for_04_04.md` | why the pack a segment carries is a drawn five-level mixture and not a map |
 | `DESIGN_discrete_vehicle_states.md` | why voltage and pack size are drawn per car and never share-weighted |
-| `DESIGN_chemistries_without_composition.md` | the sodium-ion and solid-state gap: how big, why it stays open, and the half of it that is only an export away |
+| `DESIGN_chemistries_without_composition.md` | the solid-state gap: how big, why it stays open, and why its packaging is already counted |
 
 Regenerate the parameter reference after any parameter change:
 

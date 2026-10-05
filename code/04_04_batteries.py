@@ -13,17 +13,19 @@ outflow is an upper bound, not a supply.
 
     .venv/bin/python code/04_04_batteries.py
 
-THREE SCENARIOS x THREE CHEMISTRIES, KEPT APART
-------------------------------------------------
+THREE SCENARIOS, EVERY CHEMISTRY KEPT APART
+--------------------------------------------
 The scenario shares decide how many cars carry each chemistry. The output does
-NOT sum them: LFP, LMFP and NMC_high are reported separately within each
-scenario, so the contribution of each is visible and the totals can be formed
-by whoever needs them. Nine (scenario, chemistry) series per flow.
+NOT sum them: LFP, LMFP, NMC_high, the two sodium cells and solid-state are
+reported separately within each scenario, so the contribution of each is visible
+and the totals can be formed by whoever needs them.
 
-Sodium-ion and solid-state have a share in S2 and S3 and NO COMPOSITION at all.
-Their share is reported as an explicit gap rather than dropped -- under S3 that
-is most of the market by 2070, and a total that quietly fell would read as a
-collapse in demand rather than a hole in the data.
+The two sodium cells, Na_ion_layered and Na_ion_prussian_white, are built from
+the literature by the battery project -- a scenario, not a bill of materials --
+and are counted like any other chemistry. Solid-state has a share in S3 and NO
+COMPOSITION of its cell. Its share is reported as an explicit gap rather than
+dropped -- under S3 that is a large part of the market by 2070, and a total that
+quietly fell would read as a collapse in demand rather than a hole in the data.
 
 WHAT IS DRAWN AND WHAT IS NOT
 ------------------------------
@@ -107,8 +109,9 @@ FLOWS = ("inflow", "outflow", "collected")
 
 # Both levels the battery project writes. The elements do not add up to the
 # pack -- the cell casing and the separator have no element rows and the
-# electrolyte's cover 1% of its mass -- so 7-11% of every pack, the plastics,
-# the separator and the electrolyte, exists only at the component level. That
+# electrolyte's cover only its salt -- so 7-11% of a lithium pack, and more of a
+# sodium one, the plastics, the separator, the electrolyte and the sodium cells'
+# unitemised mass, exists only at the component level. That
 # is the part a recycler has to deal with rather than sell.
 LEVELS = ("element", "component")
 
@@ -288,9 +291,9 @@ def main() -> dict:
                       for group in set(groups.values())}
 
         # ONE LEVEL AT A TIME, and that is a memory decision rather than a
-        # modelling one. Five chemistries at two levels, 51 years and 200,000
-        # draws is 14 GB of accumulators live at once; one level at a time is
-        # half of that. The only work paid twice is the vintage weighting, which
+        # modelling one. Six chemistries at two levels, 51 years and 200,000
+        # draws is about 17 GB of accumulators live at once (five were 14 GB);
+        # one level at a time is half of that. The only work paid twice is the vintage weighting, which
         # is one matmul per segment and takes seconds.
         for level in LEVELS:
             accumulated = {
@@ -527,16 +530,16 @@ def main() -> dict:
                   f"{len(recovery_years)} years, kilotonnes")
 
         # The share whose ACTIVE MATERIAL nobody has described, reported rather
-        # than dropped. Sodium-ion and solid-state now carry their packaging --
-        # frame, enclosure, cables, collectors, at the mass of the pack they are
-        # modelled on -- so their steel, aluminium and copper reach the totals.
-        # Their cathode, anode and electrolyte are zero in those arrays, and a
-        # zero there means NOT DESCRIBED. This is what keeps that readable.
+        # than dropped. Solid-state carries its packaging -- frame, enclosure,
+        # cables, collectors, at the mass of the pack it is modelled on -- so its
+        # steel, aluminium and copper reach the totals. Its cathode, anode and
+        # electrolyte are zero in those arrays, and a zero there means NOT
+        # DESCRIBED. This is what keeps that readable.
         #
-        # SUMMED over the chemistries that lack one, not maxed: both are missing
-        # under S3 and the hole they leave is the two together. On a retirement
-        # flow it is the share of the cars' BUILD years, carried forward by the
-        # same vintage weights as the material.
+        # SUMMED over the chemistries that lack one, not maxed: a second one would
+        # add to the hole, not hide inside it. Today that is solid-state alone. On
+        # a retirement flow it is the share of the cars' BUILD years, carried
+        # forward by the same vintage weights as the material.
         #
         # It is now a BAND, because the shares behind it are drawn. The
         # percentiles are taken of the share itself, per draw, never of a
@@ -602,16 +605,19 @@ SCENARIO_COLORS = {"S1": "#1b9e77", "S2": "#7570b3", "S3": "#d95f02"}
 
 CHEMISTRY_COLORS = {
     "LFP": "#2c7fb8", "LMFP": "#41b6c4", "NMC_high": "#e6550d",
-    "Na_ion": "#bdbdbd", "solid_state": "#737373",
+    # The two sodium cells keep the colours the battery project draws them in.
+    "Na_ion_layered": "#e0b030", "Na_ion_prussian_white": "#a0782a",
+    "solid_state": "#737373",
 }
 CHEMISTRY_LABELS = {
     "LFP": "LFP", "LMFP": "LMFP", "NMC_high": "NMC high-Ni",
-    "Na_ion": "sodium-ion  (packaging only)",
+    "Na_ion_layered": "sodium-ion, layered oxide",
+    "Na_ion_prussian_white": "sodium-ion, Prussian white",
     "solid_state": "solid-state  (packaging only)",
 }
-# Short names for the twelve components, and the three the element level cannot
-# see at all -- the casing and the separator have no element rows, and the
-# electrolyte's cover 1% of its mass.
+# Short names for the thirteen components, and the four the element level cannot
+# see at all -- the casing, the separator and the sodium cells' unitemised mass have
+# no element rows, and the electrolyte's cover only its salt.
 COMPONENT_LABELS = {
     "cathodeActiveMaterial": "cathode active", "anodeActiveMaterial": "anode active",
     "batteryPackSupportFrame": "support frame",
@@ -622,6 +628,7 @@ COMPONENT_LABELS = {
     "batteryPackCables": "cables", "batteryPackCellTerminals": "cell terminals",
     "batteryCellElectrolyte": "electrolyte", "batteryCellCasing": "cell casing",
     "batteryCellSeparator": "separator",
+    "batteryCellUnitemised": "unitemised cell mass",
 }
 COMPONENT_COLORS = {
     "cathodeActiveMaterial": "#d94801", "anodeActiveMaterial": "#4a1486",
@@ -630,22 +637,22 @@ COMPONENT_COLORS = {
     "currentCollectorAnode": "#fd8d3c", "currentCollectorCathode": "#fdbe85",
     "batteryPackCables": "#41ab5d", "batteryPackCellTerminals": "#a1d99b",
     "batteryCellElectrolyte": "#d9d9d9", "batteryCellCasing": "#969696",
-    "batteryCellSeparator": "#737373",
+    "batteryCellSeparator": "#737373", "batteryCellUnitemised": "#c9b79c",
 }
 INVISIBLE_TO_ELEMENTS = ("batteryCellElectrolyte", "batteryCellCasing",
-                         "batteryCellSeparator")
+                         "batteryCellSeparator", "batteryCellUnitemised")
 GROUP_TITLES = {"small": "small  (A, B, JA, JB)",
                 "medium": "medium  (C, D, JC, JD)",
                 "large": "large  (E, F, JE, JF)"}
 
-OPEN_ITEM = ("Open item, not an oversight: no CELL composition for sodium-ion or "
-             "solid-state has been published that survives scrutiny, and inventing "
-             "one would be worse than the hole.\nTheir packaging is carried; their "
-             "cathode, anode and electrolyte are not. See "
+OPEN_ITEM = ("Open item, not an oversight: no CELL composition for solid-state has "
+             "been published that survives scrutiny, and inventing one would be worse "
+             "than the hole.\nIts packaging is carried; its cathode, anode and "
+             "electrolyte are not. See "
              "documentation/DESIGN_chemistries_without_composition.md.")
 
-GAP_NOTE = ("Sodium-ion and solid-state carry their packaging but no active material: "
-            "under S2 and S3 their cathode, anode and electrolyte leave the figure.\n"
+GAP_NOTE = ("Solid-state carries its packaging but no active material: under S3 its "
+            "cathode, anode and electrolyte leave the figure.\n"
             "The dotted line, right axis, is the share of cars whose cell is not "
             "described — read each curve against its own.")
 
@@ -662,6 +669,12 @@ def _style(ax) -> None:
 _LOADED: dict[tuple[str, str], tuple] = {}
 
 
+def _named_chemistries() -> set[str]:
+    """The chemistries this run writes: the keys of battery_chemistry_file_names."""
+    params = load_many("params", root=PROJECT_ROOT)["params"]
+    return set(params.materials.battery_chemistry_file_names)
+
+
 def load_elements(flow: str, scenario: str, level: str = "element"
                   ) -> tuple[np.ndarray, dict]:
     """
@@ -669,19 +682,27 @@ def load_elements(flow: str, scenario: str, level: str = "element"
     the chemistries that have a composition. Summed PER DRAW, so draw i stays
     one world.
 
-    One pass over the three arrays, held for the rest of the run: thirteen
-    elements read one at a time would be thirteen passes over two gigabytes.
+    Only the chemistries the settings name are read. The folder keeps whatever an
+    earlier run left in it, and a chemistry that was renamed -- the single
+    `Na_ion`, before 2026-10-05 -- would otherwise be summed beside the two cells
+    that replaced it.
+
+    One pass over the arrays, held for the rest of the run: fourteen elements
+    read one at a time would be fourteen passes over several gigabytes.
     """
     if (flow, scenario, level) in _LOADED:
         return _LOADED[(flow, scenario, level)]
     years = np.load(DRAWS_DIR / "years.npy")
     directory = DRAWS_DIR / flow / scenario
+    named = _named_chemistries()
     totals: dict[str, np.ndarray] = {}
     for path in sorted(directory.glob("*.npy")):
         if path.name.endswith("_names.npy"):
             continue
         at_component = path.stem.endswith("_components")
         if at_component != (level == "component"):
+            continue
+        if path.stem.removesuffix("_components") not in named:
             continue
         names = list(np.load(directory / f"{path.stem}_names.npy"))
         drawn = np.load(path, mmap_mode="r")
@@ -703,23 +724,28 @@ def load_element(flow: str, scenario: str, element: str,
     return years, totals[element]
 
 
-def elements_present(flow: str = "inflow", scenario: str = "S1",
-                     level: str = "element") -> list[str]:
+def elements_present(flow: str = "inflow", level: str = "element") -> list[str]:
     """
-    The names that actually carry mass, biggest first.
+    The names that actually carry mass in ANY scenario, biggest first.
 
     The arrays hold the union over the chemistries, so an element only some of
-    them contain -- and sulphur and vanadium, which none of the three do -- sits
-    there as a column of zeros.
+    them contain -- and sulphur and vanadium, which none of them do -- sits
+    there as a column of zeros. All three scenarios are looked at, not one: the
+    sodium, nitrogen and fluorine of the sodium cells exist only where those
+    cells do, which is S2 and S3, so S1 alone would leave them out of every
+    figure that claims to show every element.
 
     Oxygen is dropped from the plots. It is bound in the cathode oxides and the
     phosphate, never leaves as oxygen, and nothing recovers it; carrying it into
     a panel of its own only makes the real streams smaller.
     """
-    _, totals = load_elements(flow, scenario, level)
     skipped = {"O"} if level == "element" else set()
-    carrying = {name: float(values.max()) for name, values in totals.items()
-                if name not in skipped}
+    carrying: dict[str, float] = {}
+    for scenario in SCENARIO_COLORS:
+        _, totals = load_elements(flow, scenario, level)
+        for name, values in totals.items():
+            if name not in skipped:
+                carrying[name] = max(carrying.get(name, 0.0), float(values.max()))
     return [name for name, top in sorted(carrying.items(), key=lambda kv: -kv[1])
             if top > 0]
 
@@ -744,8 +770,7 @@ def figure_scenarios(params) -> Path:
         for column, group in enumerate(groups):
             ax = axes[row][column]
             definition = materials.battery_chemistry_scenarios[scenario][group]
-            order = [c for c in ("LFP", "LMFP", "NMC_high", "Na_ion", "solid_state")
-                     if c in definition]
+            order = [c for c in CHEMISTRY_COLORS if c in definition]
             stack = np.array([[chemistry_share(params, scenario, group, c, y)
                                for y in years] for c in order]) * 100
             ax.stackplot(years, stack,
@@ -788,7 +813,7 @@ def figure_scenarios(params) -> Path:
                         color="#555555")
 
     handles = [Patch(facecolor=CHEMISTRY_COLORS[c], label=CHEMISTRY_LABELS[c])
-               for c in ("LFP", "LMFP", "NMC_high", "Na_ion", "solid_state")]
+               for c in CHEMISTRY_COLORS]
     handles.append(Patch(facecolor="white", edgecolor="#999999", hatch="///",
                          label="active material not described — reported as a gap"))
     handles.append(Line2D([], [], color="#999999", linewidth=0.9,
@@ -902,9 +927,9 @@ def figure_chemistry_contribution(flows_frame: pd.DataFrame, element: str = "Li"
     fig.suptitle(f"Where the {element} demand sits, and what the scenarios take out of view",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.915,
-             "Only the three chemistries with a described cell are shown — sodium-ion "
-             "and solid-state carry no lithium that anyone has counted. The falling "
-             "totals in S2 and S3 are cars moving to them, not a falling demand.",
+             "Only the three lithium chemistries are shown — sodium-ion carries no "
+             "lithium, and solid-state's cell is not described. The falling totals in "
+             "S2 and S3 are cars moving to them, not a falling demand.",
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.02, OPEN_ITEM, ha="center", fontsize=8, color="#888888")
     fig.tight_layout(rect=[0, 0.16, 1, 0.90])
@@ -951,9 +976,9 @@ def figure_uncovered(gaps: pd.DataFrame) -> Path:
     fig.suptitle("The hole in the picture: share of cars whose cell is not described",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.915,
-             "Sodium-ion and solid-state summed, median with the 95% band. Their "
-             "packaging IS counted; this is the cathode, anode and electrolyte that "
-             "is not. S1 stays at an exact zero, not a narrow band.",
+             "Solid-state, median with the 95% band. Its packaging IS counted; this "
+             "is the cathode, anode and electrolyte that is not. S1 and S2 stay at an "
+             "exact zero, not a narrow band.",
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.02, OPEN_ITEM, ha="center", fontsize=8, color="#888888")
     fig.tight_layout(rect=[0, 0.10, 1, 0.90])
@@ -1014,7 +1039,7 @@ def figure_secondary_supply(elements=("Li", "Ni", "Cu", "Mn")) -> Path:
              "built when lithium chemistries still dominated, while the new ones are "
              "not. The gap between the two lines is\nexport and untraced vehicles — "
              "material that exists and never reaches a recycler. Cobalt is not shown: "
-             "it comes only from NMC, so its curve is nickel's to within 0.03 pp.",
+             "it comes only from NMC, so its return is NMC's own.",
              ha="center", fontsize=8.5, color="#555555")
     fig.tight_layout(rect=[0, 0.12, 1, 0.90])
     return _save(fig, "04_04_5_secondary_supply.png")
@@ -1060,7 +1085,7 @@ def figure_all_elements(flow: str = "inflow") -> Path:
                           label="95% band of the draws"))
     fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
                fontsize=9.5, bbox_to_anchor=(0.5, 0.035))
-    fig.suptitle(f"Every element the three chemistries carry — {flow}",
+    fig.suptitle(f"Every element the chemistries carry — {flow}",
                  fontsize=14, fontweight="bold", y=0.995)
     fig.text(0.5, 0.958,
              "Each panel has its own scale. Sulphur and vanadium are left out — no "
@@ -1068,9 +1093,9 @@ def figure_all_elements(flow: str = "inflow") -> Path:
              "cathode and is recovered by nobody.",
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.022,
-             "S2 and S3 fall because sodium-ion and solid-state carry no described "
-             "cell, so their cathode and anode leave the figure — not because the "
-             "world needs less. Their packaging is in these totals.",
+             "In S2 and S3 lithium falls as cars move to sodium-ion, which carries none. "
+             "S3 also loses what solid-state's undescribed cell would carry — a gap in "
+             "the data, not a fall in demand. Packaging is in these totals.",
              ha="center", fontsize=8.5, color="#555555")
     fig.text(0.5, 0.004, OPEN_ITEM.replace(chr(10), " "), ha="center", fontsize=8,
              color="#888888")
@@ -1083,10 +1108,10 @@ def figure_components(flow: str = "collected") -> Path:
     """
     What the flow is made of, component by component.
 
-    The three hatched ones are the reason this level exists: the element arrays
-    cannot see them, and they are 7-11% of every pack. They are also the part a
-    recycler has to handle rather than sell -- organic electrolyte, polymer
-    separator, plastic casing.
+    The hatched ones are the reason this level exists: the element arrays cannot
+    see them, and they are 7-11% of a lithium pack and more of a sodium one. They
+    are also the part a recycler has to handle rather than sell -- organic
+    electrolyte, polymer separator, plastic casing.
     """
     scenarios = list(SCENARIO_COLORS)
     fig, axes = plt.subplots(1, len(scenarios), figsize=(5.0 * len(scenarios), 6),
@@ -1121,8 +1146,9 @@ def figure_components(flow: str = "collected") -> Path:
                  fontsize=14, fontweight="bold")
     fig.text(0.5, 0.925,
              "Each band is that component's own median over 200,000 draws. The "
-             "hatched top — electrolyte, separator and cell casing — is 7–11% of a "
-             "pack and appears in no element figure at all.",
+             "hatched top — electrolyte, separator, cell casing and the sodium cells' "
+             "unitemised mass — is what the element figures cannot see: 7–11% of a "
+             "lithium pack, and more of a sodium one.",
              ha="center", fontsize=9, color="#555555")
     fig.tight_layout(rect=[0, 0.13, 1, 0.90])
     return _save(fig, f"04_04_7_components_{flow}.png")
