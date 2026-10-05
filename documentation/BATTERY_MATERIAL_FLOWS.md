@@ -198,11 +198,13 @@ the extrapolation above 100 kWh all compound.
 
 ### Every element
 
-Fourteen elements carry mass: Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si and Co from the
+Fourteen elements carry mass in the arrays: Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si and Co from the
 lithium chemistries, and Na, N and F, which exist only in the sodium cells and so only in
-S2 and S3. Oxygen is excluded from the figures. One overview per flow — but only for the
-inflow and the collected: measured, the collected flow is **87.9 % of the outflow for
-every element to three decimals**, because the collection share is drawn on
+S2 and S3. The figures and the recovery export leave out those the settings call not of
+interest (`materials.battery_elements_not_of_interest`: N and F, because only sodium is of
+interest among the three) and the figures leave out oxygen as well. One overview per flow
+— but only for the inflow and the collected: measured, the collected flow is **87.9 % of the
+outflow for every element to three decimals**, because the collection share is drawn on
 vehicles and not on materials. An outflow panel would be the collected one times
 a constant. Sulphur and vanadium sit in the arrays as columns of zeros — the
 element axis is the union over the chemistry files, and none of the six contains

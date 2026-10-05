@@ -2101,6 +2101,15 @@ class MaterialsParams:
     # and not before.
     battery_chemistry_active_material_unknown: tuple[str, ...] = ("solid_state",)
 
+    # ⚠️ ELEMENTS NOBODY ASKS ABOUT, left out of the figures and of the recovery export.
+    # The per-draw arrays keep them. Of the elements only the two sodium cells carry --
+    # sodium, nitrogen and fluorine -- sodium is the one of interest: nitrogen is the
+    # Prussian-white cathode's cyanide and fluorine is the electrolyte salt's, and he said
+    # on 2026-10-05 that neither matters here. Oxygen is left out of the figures on its own
+    # account (04_04 says why) but is still exported.
+    # SAFE TO CHANGE: yes. Take a name out of the list and rerun 04_04 to export it.
+    battery_elements_not_of_interest: tuple[str, ...] = ("N", "F")
+
     # WHERE 04_04 WRITES THE DRAWS THE RECOVERY MODEL READS, under
     # data/processed/. One folder per chemistry scenario, then per flow:
     #

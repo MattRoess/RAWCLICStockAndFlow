@@ -14,7 +14,7 @@ sodium. `battery_chemistry_file_names` names both cells, and
 solid-state's, 47.9 % of new cars by 2070 under S3 and exactly zero in S1 and S2.
 
 What else changed so the stage keeps telling the truth: the colours and labels of both cells;
-the all-elements figure now picks its elements from every scenario (S1 alone has no Na, N or F);
+the all-elements figure now picks its elements from every scenario (S1 alone has no Na), leaving out N and F;
 `batteryCellUnitemised` is a thirteenth component and is hatched as invisible to the element
 level; `load_elements` reads only the chemistries the settings name, so a leftover `Na_ion.npy`
 cannot be summed beside the two cells; the dead `uncovered_share()` is gone; the figure notes,
@@ -28,9 +28,12 @@ folder, exit 0, all nine figures drawn, the lithium totals identical to his last
 The 36 old `Na_ion*` files in `data/processed/battery_draws/` (8.2 GB) are not read any more and are
 his to delete.
 
-**Open:** the recovery export now carries three elements, Na, N and F, and a component,
+**Open:** the recovery export now carries one element it did not, Na, and a component,
 `batteryCellUnitemised`, that RAWCLICRecoveryModel's battery case has no process or coefficient
-for. The legend of figure 3 overlaps its footnote, as it did before this change.
+for. N and F, the other two elements only the sodium cells carry, are in the arrays but left out
+of the figures and of the export (`materials.battery_elements_not_of_interest`), on his word that
+only sodium is of interest. The legend of figure 3 overlaps its footnote, as it did before this
+change.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 

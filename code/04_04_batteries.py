@@ -232,6 +232,7 @@ def main() -> dict:
     scenarios = list(materials.battery_chemistry_scenarios)
     named = materials.battery_chemistry_file_names
     active_unknown = set(materials.battery_chemistry_active_material_unknown)
+    ignored = set(materials.battery_elements_not_of_interest)
     recovery_dir = (PROJECT_ROOT / "data" / "processed"
                     / materials.battery_recovery_draws_dir)
     groups = materials.battery_chemistry_segment_groups
@@ -458,6 +459,10 @@ def main() -> dict:
             for level, prefix in (("component", "__component__"), ("pair", "")):
                 for file_name in named.values():
                     for name in composition.names(file_name, level):
+                        # An element nobody asks about is not exported. Its mass is
+                        # still in its component's total.
+                        if level == "pair" and name.partition("|")[0] in ignored:
+                            continue
                         union.setdefault(f"{prefix}|{name}" if prefix else name,
                                          len(union))
             totals = {scenario: np.zeros((n_draws, len(recovery_years), len(union)),
@@ -488,15 +493,17 @@ def main() -> dict:
                         continue
                     for level, prefix in (("component", "__component__"), ("pair", "")):
                         names = composition.names(file_name, level)
-                        columns = [union[f"{prefix}|{n}" if prefix else n]
-                                   for n in names]
+                        keep = [i for i, n in enumerate(names)
+                                if (f"{prefix}|{n}" if prefix else n) in union]
+                        columns = [union[f"{prefix}|{names[i]}" if prefix else names[i]]
+                                   for i in keep]
                         per_car = np.stack([
                             composition.masses(
                                 chemistry=file_name, capacity_kwh=capacity[:, position],
                                 voltage_v=voltage[:, position],
                                 year=max(int(year), composition_floor),
                                 seed=404, level=level).astype(np.float32)
-                            for position, year in enumerate(vintages)], axis=1)
+                            for position, year in enumerate(vintages)], axis=1)[:, :, keep]
                         for year_position, year in enumerate(recovery_years):
                             count = counts[:, year_position] * 1e3  # millions, kg -> t
                             for scenario in scenarios:
@@ -675,6 +682,12 @@ def _named_chemistries() -> set[str]:
     return set(params.materials.battery_chemistry_file_names)
 
 
+def _not_of_interest() -> set[str]:
+    """The elements the figures and the recovery export leave out."""
+    params = load_many("params", root=PROJECT_ROOT)["params"]
+    return set(params.materials.battery_elements_not_of_interest)
+
+
 def load_elements(flow: str, scenario: str, level: str = "element"
                   ) -> tuple[np.ndarray, dict]:
     """
@@ -737,9 +750,10 @@ def elements_present(flow: str = "inflow", level: str = "element") -> list[str]:
 
     Oxygen is dropped from the plots. It is bound in the cathode oxides and the
     phosphate, never leaves as oxygen, and nothing recovers it; carrying it into
-    a panel of its own only makes the real streams smaller.
+    a panel of its own only makes the real streams smaller. So are the elements the
+    settings call not of interest.
     """
-    skipped = {"O"} if level == "element" else set()
+    skipped = ({"O"} | _not_of_interest()) if level == "element" else set()
     carrying: dict[str, float] = {}
     for scenario in SCENARIO_COLORS:
         _, totals = load_elements(flow, scenario, level)
@@ -748,6 +762,15 @@ def elements_present(flow: str = "inflow", level: str = "element") -> list[str]:
                 carrying[name] = max(carrying.get(name, 0.0), float(values.max()))
     return [name for name, top in sorted(carrying.items(), key=lambda kv: -kv[1])
             if top > 0]
+
+
+def _left_out_note() -> str:
+    """The sentence that says which elements the settings leave out, in the settings' words."""
+    names = sorted(_not_of_interest())
+    if not names:
+        return ""
+    listed = " and ".join(names) if len(names) < 3 else ", ".join(names[:-1]) + " and " + names[-1]
+    return f"{listed} are not of interest here and are left out too."
 
 
 def band(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1085,12 +1108,12 @@ def figure_all_elements(flow: str = "inflow") -> Path:
                           label="95% band of the draws"))
     fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
                fontsize=9.5, bbox_to_anchor=(0.5, 0.035))
-    fig.suptitle(f"Every element the chemistries carry — {flow}",
+    fig.suptitle(f"The elements the chemistries carry — {flow}",
                  fontsize=14, fontweight="bold", y=0.995)
     fig.text(0.5, 0.958,
              "Each panel has its own scale. Sulphur and vanadium are left out — no "
              "chemistry here contains them — and so is oxygen, which is bound in the "
-             "cathode and is recovered by nobody.",
+             "cathode and is recovered by nobody. " + _left_out_note(),
              ha="center", fontsize=9, color="#555555")
     fig.text(0.5, 0.022,
              "In S2 and S3 lithium falls as cars move to sodium-ion, which carries none. "
