@@ -35,6 +35,90 @@ of the figures and of the export (`materials.battery_elements_not_of_interest`),
 only sodium is of interest. The legend of figure 3 overlaps its footnote, as it did before this
 change.
 
+## 2026-10-05, later — the collection share: how it is drawn, why it is normalised, and what he decided
+
+**Nothing was changed.** This was a question and a measurement; the code is as committed in
+`2d221d4`. The numbers come from replaying the engine's own calls (`Params().stock_flow`, seed
+12345, 200,000 draws: `sample_relative_triangular_scale`, `sample_relative_triangular_scale_varying_center`
+and `normalize_three_shares` from `cohort_flow_mc.py`, in the order the engine uses them: lifetime,
+export, collected, untraced) and from reading the saved BAU draws in `data/processed/bev_draws/BAU/` at
+2070. The scripts lived in the session scratchpad and are not kept.
+
+**His question:** "How is the collection rate. Does it has a min, mode and max?" **Yes.** Every vehicle
+that leaves the fleet is split into collected, exported and untraced, and each share is drawn from
+`Triangular(point × (1 − lower), point, point × (1 + upper))`, once per draw and the same in every year
+(segment A's ratio differs between 2030 and 2070 by at most 1.7e-7, float32 rounding).
+
+| BEV share | setting | min / mode / max as drawn |
+|---|---|---|
+| collected | 0.88, ±8 % | 0.810 / 0.880 / 0.950 |
+| exported | 0.02, ±15 % | 0.017 / 0.020 / 0.023 |
+| untraced | 0.10, −20 % / +35 % around a centre that moves with the lifetime draw (k = 0.8) | 0.054 / 0.100 / 0.162 |
+
+Every combustion drivetrain has 0.49 ±5 %, 0.08 ±10 % and 0.43 (−20 % / +35 %); FCEV and Gases are
+placeholders. The settings are `collected_share_by_drv`, `export_share_by_drv`,
+`unknown_whereabouts_share`, the three `*_relative_spread` and `unknown_share_lifetime_coupling_k`
+in `src/params_schema.py`.
+
+**What reaches the flows is not that triangle.** The three are drawn independently, so they do not add
+up: for BEV the raw sum has a 95 % band of 0.938–1.064 (range 0.894–1.120), and 77 % of the draws miss 1
+by more than a percentage point. `normalize_three_shares` (`src/cohort_flow_mc.py:292`, called at :657;
+its scalar twin is `disaggregation.compute_collected_export_unknown_shares`) divides each by the sum.
+The collected share, 95 % band and, in brackets, the extremes over 200,000 draws:
+
+| | as set | delivered |
+|---|---|---|
+| BEV | 82.5–93.5 % (81.0–95.0) | 85.0–90.6 % (82.6–92.4) |
+| Petrol | 47.1–50.9 % | 42.7–55.7 % |
+
+So the band the flows carry is narrower than the one typed for BEV and wider for the combustion
+drivetrains, and nothing says so. For BEV it is close to what the untraced share's spread alone would
+give (option B below, 84.6–90.8 %). The same function makes scenario inputs that do not add up fit:
+`losses_high` (collected 0.88, export 0.08, untraced 0.43, sum 1.39) comes out as 63.3 / 5.8 / 30.9 %,
+and `losses_zero` (0.88, 0, 0) as 100 / 0 / 0 %. `ScenarioSpec` has no collected override and
+`validate()` checks the sum for the base points only. 04_04 reads BAU, so the battery results do not
+depend on those two.
+
+**His decision: "There should be no normalization. This always means someting is not good and them made
+to fit!!"** A principle, not yet a design: no replacement was chosen and none is implemented. The
+constraint stays, because the three partition the outflow, so one share has to be the remainder. That is
+an identity and not a fit. The point to put to him is that the three spreads cannot all be right at once,
+since two fix the third; the normalisation hides which one gave way. Options, measured on the same draws
+(BEV, 95 % band):
+
+- **A, my recommendation, not agreed:** untraced = 1 − collected − exported. It is how the settings
+  define untraced ("not recorded as recycled, not recorded as exported"), and collected keeps exactly its
+  min, mode and max (82.5–93.5 %). Untraced becomes derived: BEV 4.5–15.5 % (extremes 2.7 and 17.1),
+  Petrol 41.0–45.0 % (today 35.3–50.2 %). Costs: untraced loses its own spread and the lifetime coupling,
+  which then have nothing to act on; `losses_zero` and `losses_high` need explicit collected shares (1.0,
+  and 0.49 for "like ICEV"); it applies to every drivetrain, so every stage-03 output moves and not only
+  BEV; 03_02 and every stage that reads its draws must be rerun at 200,000 draws, which he does.
+- **B:** collected = 1 − exported − untraced, as it was before the normalisation. BEV collected would be
+  84.6–90.8 %, and the collected spread would do nothing. It was replaced because collected is the
+  measured quantity.
+- Exported as the remainder is not viable: at 0.02 and 0.08 it goes negative.
+
+**Found while checking, reported and not touched: the 12 BEV segments are drawn independently of each
+other.** `code/03_02_adjustedflows.py:859` passes the same `SeedSequence` object (`mc_seed`) to every
+per-segment export call, and `src/cohort_flow_mc.py:577` uses a `SeedSequence` argument as it is, so each
+`spawn()` advances its counter: segment A gets the child after the main run's, B the next, and so on.
+The comment at `03_02_adjustedflows.py:811` says the opposite ("SEEDS STILL LINE UP … the same BEV draws
+as the full run above") and promises that 04_02 re-checks it against the period summary; I found no such
+check in 04_02, 04_04 or the test files. Measured on the saved BAU draws at 2070: every segment has the
+same collected/outflow distribution (median 0.880, 95 % band 85.0–90.6 %), but the correlation between
+any two segments is −0.005 to 0.005, and the BEV total's band is 86.9–89.0 % because it is a weighted
+average of twelve independent collection rates. That is the "87.9 % with a 86.8–89.0 % band" in
+`BATTERY_MATERIAL_FLOWS.md` (lines 11 and 206, measured at 2,000 draws): the band of an average of twelve,
+not of the collection rate. The lifetime draw comes from the same spawn and so follows the same pattern;
+that part is not measured. `bev_draws/` is read by 04_01 (exact mode), 04_02, 04_03's vehicle counts and
+04_04, so every BEV band they report on a quantity that depends on the lifetime or the three shares is
+narrower than one coherent world would give. The remedy is a fresh `SeedSequence` per call, as
+`mc_scenario_seeds_drivetrain` (`03_02_adjustedflows.py:1225`) already does for the by-drivetrain run. It
+needs the same 03_02 rerun, and he has not been asked.
+
+**Next:** ask him A or B, and whether the segment seeding is to be fixed in the same rerun, since both
+force a 03_02 run. Edit neither without his answer.
+
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 
 On 2026-09-22 every repository's **git database was moved out of iCloud**, because
