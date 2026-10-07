@@ -119,9 +119,11 @@ needs the same 03_02 rerun, and he has not been asked.
 **Next:** ask him A or B, and whether the segment seeding is to be fixed in the same rerun, since both
 force a 03_02 run. Edit neither without his answer.
 
-## 2026-10-07 — the repository is public, documented, marked and licensed
+## 2026-10-07 — the repository is public, documented, marked and licensed, and so are the other six
 
-He switched the repository to public on 2026-10-07. Since then, in order:
+He switched this repository to public on 2026-10-07. What was done that day, in order, with the commits.
+
+**In this repository**
 
 - **`a285d13` — the documentation.** `README.md`, `requirements.txt` (pins taken from the `.venv`
   the results came from: pandas 3.0.3, numpy 2.5.0, scipy 1.18.0, matplotlib 3.11.0, openpyxl 3.1.5,
@@ -134,10 +136,37 @@ He switched the repository to public on 2026-10-07. Since then, in order:
   Roesslein` is in all 40 source files (39 Python files, `src/archive/` included, and the
   `pre-commit` hook), in the module docstring after the title block. **A new source file must get it
   too**; the year is the one the history starts in, 2026.
-- **This commit — the licence.** CC BY 4.0, chosen by him: `LICENSE` holds the official text
+- **`ab9a714` — the licence.** CC BY 4.0, chosen by him: `LICENSE` holds the official text
   (word for word the one GitHub offers), and the README says what it covers. It covers the code and the
   documentation, not the EEA file or the inputs. A Creative Commons licence cannot be withdrawn
   for copies already made.
+
+**In the other six**, on his words "Do the same in the all other repos", "yes, attach them", "yes,
+commit and push the traction work", "switch both" and "yes, remove the .DS_Store files from git". All
+seven are CC BY 4.0 on GitHub now, and none tracks a `.DS_Store`.
+
+| repository | commits | what |
+|---|---|---|
+| RAWCLICVehicleBattery | `fe1fac1` | the notice in all 16 Python files, `LICENSE`, a README section, a handover paragraph |
+| RAWCLICRecoveryModel | `a2aefc9` | the same in 52 of 54 files: the two engines the project received, `src/recovery_model_LA.py` and `src/recovery_model_optimized.py`, carry no notice, and the README lists them, the received test case, the user guide and the journal article as not covered |
+| RAWCLICVehicleElectronics | `54386e3` | the notice in all 19 Python files, years "2025 & 2026" as the notice it already had; `LICENSE` only, there is no README |
+| RAWCLICVehicleTractionMotor | `736069a`, `e8fe1fd` | the notice in 8 files, `LICENSE`, README, handover; then his own uncommitted work of 21-24 September (five files, +239/-32 lines) was committed on his word |
+| RAWCLICVehicleComposition (private) | `276b851`, `98bfcef` | the notice in 6 files; CC0 to CC BY 4.0 |
+| VehicleComposition | `b0e8eb5`, `f3e758b`, `0582865`, `a66f82c` | CC0 to CC BY 4.0; its README says the licence covers his compilation and not the data of other institutions it was built from, and that `Data/DataJRC/` is the project's own data, published on the JRC website; the two tracked `.DS_Store` files were removed with a one-line `.gitignore` (the earlier commit `cb80b23` still holds them); its R Markdown files already carried the notice |
+
+Two of my guesses about authorship were wrong and were corrected by him: file names are not evidence.
+I had named the JRC, VDA and template workbooks as third-party, and then used `Data/DataJRC/` as the
+example of other institutions' data. He put the workbooks together himself, `DataJRC` is the project's
+own, and `VehicleAlloysData.pdf` is the knitted output of his own `VehicleAlloysData.Rmd`.
+
+**All seven git folders are attached on this Mac now** (`/Users/rm/gitdirs/`); the last four on his word.
+The recipe in the section below needs three changes on this Mac, and the four were attached with them:
+`$HOME` in place of `~` after `--git-dir=`, because zsh does not expand it there; `core.worktree` set to the
+working tree's real path, which here is under `~/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/`;
+and no last line, because the pointer file iCloud already synced is left alone. Right afterwards, `git status`
+shows what the working tree holds that GitHub does not: RAWCLICVehicleTractionMotor had five files of
+uncommitted work, and RAWCLICVehicleElectronics has `Data copy/` and `Data copy.zip` untracked and not
+ignored, so never `git add -A` there.
 
 **Open, none of it touched:**
 
@@ -146,24 +175,21 @@ He switched the repository to public on 2026-10-07. Since then, in order:
 - Two settings in `src/params_schema.py`, `traction_composition_dir` and `battery_composition_dir`,
   hold absolute paths of his Mac, and they also appear in `PARAMETER_REFERENCE.md`. `SETUP.md` tells
   a reader to edit them.
-- The GitHub description and topics are empty, here and in RAWCLICRecoveryModel.
+- On GitHub no repository has any topics, and the description is empty here, in RAWCLICRecoveryModel,
+  in RAWCLICVehicleElectronics and in the private RAWCLICVehicleComposition.
 - 04_01 and 04_03 have no description beyond their script headers, and `MODEL_DESCRIPTION.md` dates from
   2026-08-14, before 04_03 and 04_04 existed.
-- **The other repositories got the same, on his word "Do the same in the all other repos"** (all on
-  2026-10-07): RAWCLICVehicleBattery `fe1fac1`, RAWCLICRecoveryModel `a2aefc9`,
-  RAWCLICVehicleElectronics `54386e3` (years "2025 & 2026", as the notice it already had) and
-  RAWCLICVehicleTractionMotor `736069a` carry the notice and are CC BY 4.0. RAWCLICVehicleComposition
-  `276b851` got the notice, and VehicleComposition's R Markdown files already carried it. Both were CC0-1.0
-  and were switched to CC BY 4.0 on his word "switch both": RAWCLICVehicleComposition `98bfcef`, and
-  VehicleComposition `b0e8eb5`, corrected in `f3e758b`: its README says the licence covers his
-  compilation of data from other institutions, not the data it was built from (he said all the workbooks
-  were put together by himself; `VehicleAlloysData.pdf` is the knitted output of his own Rmd). All seven
-  repositories are now CC BY 4.0. Still
-  open there: RecoveryModel's two received engines carry no notice,
-  how to mark them is his decision; RAWCLICVehicleTractionMotor's uncommitted work of 21-24 September
-  was committed on his word (`e8fe1fd`); RAWCLICRecoveryModel's `SETUP.md` still says that repository is
-  private.
+- RAWCLICRecoveryModel: how to mark the two received engines is his decision, and its `SETUP.md` still
+  says that repository is private. RAWCLICVehicleElectronics has no README to say what its licence covers.
 - `mc-correctness-and-bev-electronics` exists on `origin` and is public too; its content was not looked at.
+
+**Next, in the order the notes above leave them:**
+
+1. His answer on the normalisation, A or B, and whether the segment seeding is fixed in the same 03_02
+   rerun (the note of 2026-10-05, later). Nothing is implemented.
+2. The real run: `00_parameters.py`, then `04_04_batteries.py`, which reads the two sodium cells (the first
+   note of 2026-10-05). Then the 36 old `Na_ion*` draw files (8.2 GB) are his to delete.
+3. The small decisions above: the EEA file, the GitHub descriptions, the received engines.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 
