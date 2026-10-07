@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **159** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **170** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -34,7 +34,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
 - [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 48 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 59 parameters
 - [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
@@ -1111,7 +1111,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**48 parameters.**
+**59 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1123,11 +1123,21 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `material_level_key` | `"materialKeyLevel_highest"` |
 | `traction_composition_dir` | `"/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/" "RAWCLICVehi...` |
 | `traction_composition_file_name` | `"TractionMotor_for_stockandflow.xlsx"` |
+| `traction_type_shares` | `default_factory=lambda: { "AB": { 2010: {"PMSM": 91, "EESM": 5, "ASM": 4, "axial": 0, "...` |
+| `traction_synrm_goes_to` | `"PMSM"` |
+| `traction_awd_share` | `{ "AB": 0.061, "CD": 0.386, "EF": 0.755, }` |
+| `traction_twin_pm_share_of_awd` | `default_factory=lambda: {"AB": 0.20, "CD": 0.40, "EF": 0.70}` |
+| `traction_dual_rotor_share` | `0.0` |
+| `traction_segment_fallback` | `default_factory=lambda: {"JA": "JB"}` |
+| `traction_drive_trains` | `("BEV",)` |
+| `traction_figure_first_year` | `2012` |
+| `traction_draws_dir` | `"draws"` |
 | `battery_capacity_levels` | `{ "A": {"levels_kwh": (25.0, 30.0, 35.0), "weights": (0.600, 0.200, 0.200)}, "B": {"lev...` |
 | `battery_capacity_levels_year` | `2024` |
 | `battery_capacity_growth_per_decade` | `default_factory=lambda: {"min": 0.05, "mode": 0.10, "max": 0.20}` |
 | `battery_capacity_plateau_year` | `default_factory=lambda: {"min": 2035.0, "mode": 2040.0, "max": 2050.0}` |
 | `pack_voltage_800v_share` | `default_factory=lambda: { "AB": {2010: (0.0, 0.001, 0.121), 2015: (0.0, 0.003, 0.123), ...` |
+| `pack_voltage_1000v_share` | `default_factory=lambda: { "AB": {2010: (0.0, 0.0, 0.0), 2025: (0.0, 0.0, 0.0), 2030: (0...` |
 | `pack_voltage_segment_groups` | `{ "A": "AB", "B": "AB", "JA": "AB", "JB": "AB", "C": "CD", "D": "CD", "JC": "CD", "JD":...` |
 | `battery_composition_dir` | `"/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/" "RAWCLICVehi...` |
 | `battery_extrapolation_uncertainty_per_100kwh` | `0.10` |
@@ -1135,7 +1145,8 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `battery_chemistry_segment_groups` | `{ "A": "small", "B": "small", "JA": "small", "JB": "small", "C": "medium", "D": "medium...` |
 | `battery_chemistry_scenarios` | `default_factory=lambda: { "S1": { "small": {"LFP": (70, 65, 60, 60), "LMFP": (18, 25, 3...` |
 | `battery_chemistry_file_names` | `{ "LFP": "battLiFP_subsub", "LMFP": "battLiMFP_subsub", "NMC_high": "battLiNMC_highNi",...` |
-| `battery_chemistry_active_material_unknown` | `( "Na_ion", "solid_state")` |
+| `battery_chemistry_active_material_unknown` | `("solid_state",)` |
+| `battery_elements_not_of_interest` | `("N", "F")` |
 | `battery_recovery_draws_dir` | `"battery_recovery_draws"` |
 | `battery_recovery_years` | `tuple(range(2020, 2071, 5))` |
 | `battery_chemistry_share_spread` | `{ "min": 0.70, "mode": 1.00, "max": 1.30, }` |
@@ -1252,6 +1263,202 @@ The file in there that 04_03 reads. Written by that project's
 SAFE TO CHANGE: yes, if that project renames what it writes.
 
 
+### `traction_type_shares`
+
+Default: `default_factory=lambda: { "AB": { 2010: {"PMSM": 91, "EESM": 5, "ASM": 4, "axial": 0, "...`
+
+⚠️ THE REPORT'S OWN SHARES, TRANSCRIBED UNCHANGED, IN ITS OWN CATEGORIES.
+RAWCLIC_BEV_Motors_Comprehensive_Report_V1 §10.2-10.7, base case where it
+offers conservative/base/optimistic (2060 and 2070). Percentages, summing
+to 100 in every row, exactly as printed -- the mapping onto this model's
+five motor types happens in code and is visible there rather than baked
+into the numbers.
+
+⚠️ THEY ARE SCENARIO CONSTRUCTION AND THE REVIEW SAYS SO: "the original
+2030, 2035 and 2040 architecture shares are scenario construction rather
+than confirmed forecasts". Treat the trajectory as an argument, not a
+measurement. The 2025 row is the closest thing to an observation here.
+
+BEFORE 2025 the report says nothing, so the 2025 mix is held constant
+backwards with axial flux at zero -- it was not on the market -- and its
+share given to PMSM. Early Tesla induction is not separately modelled.
+SAFE TO CHANGE: yes. A registration-weighted series would beat all of it.
+
+
+### `traction_synrm_goes_to`
+
+Default: `"PMSM"`
+
+⚠️ WHERE SynRM/PMa GOES, BECAUSE THIS PROJECT DOES NOT MODEL IT.
+Matthias 2026-09-21: "SynRM goes to PMSM for now."
+
+The traction project excluded synchronous reluctance deliberately --
+"demonstrators only, with no bill of material in either source" -- which
+was right while nothing needed a share. The report gives it one, and it is
+not small: 45% of AB by 2070 in the base case.
+
+⚠️ AND THE CHOICE IS NOT NEUTRAL. A PMa-SynRM uses far less magnet than an
+IPM, so sending its share to PMSM keeps the small-car fleet MAGNET-HEAVY
+exactly where the report had it going magnet-light. This is the
+conservative direction for rare-earth demand -- it cannot understate it --
+but it is a real overstatement of AB magnets in the late years, and it is
+the first thing to revisit when a SynRM bill of material exists.
+SAFE TO CHANGE: yes -- "EESM" is the other defensible destination, and it
+would bracket the answer from below.
+
+
+### `traction_awd_share`
+
+Default: `{ "AB": 0.061, "CD": 0.386, "EF": 0.755, }`
+
+⚠️ THE SHARE OF CARS WITH TWO DRIVEN AXLES, MEASURED, BY SEGMENT GROUP.
+EV Database, 1438 models: AWD 576, front 440, rear 422. By group the
+gradient is steep and monotonic -- A and B have essentially none, F is
+80.7%, JF 88.9%.
+
+⚠️ MODEL-WEIGHTED, NOT REGISTRATION-WEIGHTED, and Matthias chose to keep it
+that way 2026-09-21. It counts a 200-unit halo trim the same as a 50,000-
+unit volume seller, and AWD skews to low-volume trims, so the level is
+probably high even though the gradient is certainly right. The critical
+review names the same gap: "eligible public evidence does not provide an EU
+registration-weighted distribution of single-, dual- and multi-motor BEVs
+by segment and year".
+SAFE TO CHANGE: yes, and a registration-weighted series would replace it.
+
+
+### `traction_twin_pm_share_of_awd`
+
+Default: `default_factory=lambda: {"AB": 0.20, "CD": 0.40, "EF": 0.70}`
+
+⚠️ AND OF THOSE TWO-MOTOR CARS, HOW MANY CARRY TWO PERMANENT-MAGNET
+MACHINES RATHER THAN ONE PM AND ONE INDUCTION.
+
+Matthias 2026-09-21: "I assume AWD induction will be the large parts, but
+E and F might have two permanent ones, due to being very heavy cars."
+
+WHY IT DECIDES WHICH CATEGORY THE CAR IS IN. `IMandPMElectricMotors` in the
+source data is the PM-plus-induction configuration; a PM-plus-PM car is
+simply a PM car with more torque, and belongs in `PMElectricMotors`. The
+composition is a function of torque, so a twin-PM car at the vehicle's own
+torque needs no special treatment -- two machines at half the torque carry
+about the same magnet as one at full torque, which is this project's own
+measured finding.
+
+WHAT IT COSTS. The two categories differ by a CONSTANT 1.20 kg of magnet at
+every torque -- the fitted intercepts are +1.107 and -0.093 kg and the
+slopes are identical -- because the second machine in an IM+PM car has no
+magnet in it at all. So every percentage point moved between them is 1.2 kg
+of magnet per car, and in EF that is the single largest lever on
+rare-earth demand in this model.
+
+⚠️ NOT MEASURED. Nothing in the fleet data says which AWD cars are twin-PM.
+These three numbers are Matthias's reading of the market, rising with
+vehicle weight, and they are the only invented figures in this block.
+SAFE TO CHANGE: yes, and this is the one to vary first.
+
+
+### `traction_dual_rotor_share`
+
+Default: `0.0`
+
+⚠️ THE DUAL-ROTOR RADIAL MACHINE GETS NO SHARE, ON PURPOSE.
+The report has no category for it: its "axial" share is YASA-shaped, and
+DeepDrive is a separate bet by a separate company. Giving it a share means
+inventing adoption for a machine with no published composition and no
+registrations. Zero keeps it in the model -- its composition is computed
+and its draws are written -- without fabricating a market.
+SAFE TO CHANGE: yes, and it takes its share from `axial` when it gets one.
+
+
+### `traction_segment_fallback`
+
+Default: `default_factory=lambda: {"JA": "JB"}`
+
+⚠️ SEGMENTS THE COMPOSITION DOES NOT HAVE, AND WHAT TO READ INSTEAD.
+
+The fleet tracker carries twelve segments; the consolidated composition
+carries eleven. The missing one is JA, the smallest light-commercial
+class -- it is not in the Zenodo dataset, so the traction project cannot
+report it without inventing it.
+
+Left alone it was a SILENT LOSS: 5,370 tracker rows and 3.52 million
+vehicle-flows, 0.34% of all BEV flow, cohorts 2011 to 2070, dropped by the
+join and never counted. Small, and still wrong to lose without saying so.
+
+JA reads JB: the next light-commercial size up, and already its partner in
+the AB voltage group. The alternative was A, the passenger car of similar
+size, and JB was preferred because a van's duty cycle and torque sit
+closer to another van's.
+SAFE TO CHANGE: yes, and the entry disappears the day the composition
+covers JA.
+
+
+### `traction_drive_trains`
+
+Default: `("BEV",)`
+
+⚠️ WHICH DRIVE TRAINS HAVE A TRACTION MOTOR OF THIS KIND AT ALL.
+
+The composition describes `elvBEV`, so joining the whole tracker against
+it drops every petrol, diesel and hybrid row -- 42.9% of all vehicle-flow,
+which looks like a catastrophe in a warning line and is simply a diesel
+not having a BEV traction motor. Filtered before the join so the count
+that gets reported is the count that matters.
+
+⚠️ AND PHEV IS A REAL EXCLUSION, NOT A TAUTOLOGY. A plug-in hybrid has a
+traction motor -- 46,392 rows and 42.3 million vehicle-flows of them -- and
+this model does not count it, because the composition covers BEVs only.
+HEV likewise, 65.1 million. That understates European traction-motor
+material demand by however much those motors weigh, and it is a scope
+limit of the source rather than a decision made here.
+SAFE TO CHANGE: yes, the day a composition exists for a hybrid's motor.
+
+
+### `traction_figure_first_year`
+
+Default: `2012`
+
+⚠️ WHERE THE FIGURES START, AND WHY IT IS NOT WHERE THE DATA STARTS.
+
+Matthias 2026-09-21: "Can we start in 2012. 2011 numbers do not make
+sense" -- and then, decisively: "2011 is the initial stock."
+
+⚠️ SO IT IS NOT AN ERROR, IT IS A DIFFERENT QUANTITY. The tracker hands
+this stage 0.2268 million BEVs for 2011 and 0.0545 for 2012, against real
+EU BEV registrations of roughly 0.01 million in 2011. The first figure is
+not a year of registrations at all: it is the BEV fleet that already
+existed when the series begins, injected as the first cohort. BEV alone
+shows it because BEV alone starts mid-model -- diesel, petrol and HEV
+begin in 2006 and PHEV in 2012, each continuous with its second year.
+
+Which is exactly why it must not be DRAWN beside annual registrations: a
+stock and a flow on one line, in the same units, inviting the reader to
+compare them.
+
+⚠️ THE FIGURES ONLY. The data keeps 2011, and deliberately. It is 0.035% of
+cumulative BEV inflow, so it moves no total worth reporting -- and a stage
+that silently dropped a cohort the tracker contains would disagree with
+04_01, 04_02 and 04_04, which all read the same tracker. A figure that
+declines to plot a bad year is honest; a stage that discards data other
+stages keep is a trap for whoever reconciles them.
+
+AND IT MUST STAY IN THE DATA. Those cars are really in the fleet: they
+carry copper and neodymium, and they come back as outflow fifteen to
+twenty years later. Dropping the cohort to tidy a figure would remove real
+material from the stock. SAFE TO CHANGE: yes -- it is a drawing window and
+nothing else.
+
+
+### `traction_draws_dir`
+
+Default: `"draws"`
+
+Where the traction project keeps its 200,000-draw arrays, relative to
+`traction_composition_dir`. 31 mass arrays, 12 chemistry arrays, the
+torque grid and the year x voltage scale table.
+SAFE TO CHANGE: only if that project moves them.
+
+
 ### `battery_capacity_levels`
 
 Default: `{ "A": {"levels_kwh": (25.0, 30.0, 35.0), "weights": (0.600, 0.200, 0.200)}, "B": {"lev...`
@@ -1353,6 +1560,34 @@ large segments first.
 SAFE TO CHANGE: only to track the source workbook.
 
 
+### `pack_voltage_1000v_share`
+
+Default: `default_factory=lambda: { "AB": {2010: (0.0, 0.0, 0.0), 2025: (0.0, 0.0, 0.0), 2030: (0...`
+
+⚠️ AND A THIRD VOLTAGE STATE: 1000 V, WHICH THE BATTERY SIDE DOES NOT HAVE.
+
+Matthias 2026-09-21: "1000V stays separate. I expect 1000V to show up at E
+and F segment in limited numbers and could become more dominant."
+
+The traction composition carries three voltage classes -- 400, 800 and
+1000 -- because copper mass falls with voltage, and `scenario.copper_mass`
+in that project puts 1000 V at 0.585 of the 400 V copper against 800 V's
+0.667. Without a share for it the class exists in the composition and
+never reaches a car.
+
+⚠️ ENTIRELY UNMEASURED, AND THE SHAPE IS MATTHIAS'S. Only BYD ships a
+1000 V-class architecture today, and it is sold mainly outside Europe, so
+there is no European registration base to fit. These numbers say: nothing
+before 2030, EF first and fastest because that is where charging power is
+worth paying for, CD later and smaller, AB barely at all. They are a
+stated expectation written as a curve, not evidence.
+
+THE THREE STATES MUST NOT OVERLAP. 1000 V is taken out of the 800 V
+population, not added on top: a car draws 1000 V first, then 800 V from
+what is left, then 400 V. The code does that; these are the raw shares.
+SAFE TO CHANGE: yes, and the first real registration data replaces it.
+
+
 ### `pack_voltage_segment_groups`
 
 Default: `{ "A": "AB", "B": "AB", "JA": "AB", "JB": "AB", "C": "CD", "D": "CD", "JC": "CD", "JD":...`
@@ -1403,10 +1638,11 @@ Default: `(2025, 2035, 2050, 2070)`
 ⚠️ CHEMISTRY SHARES TO 2070, three scenarios. ASSUMPTION, NOT DATA --
 the observed record ends in 2026 and everything after it is judgement.
 
-WRITTEN-DOWN COPY of RAWCLICVehicleBattery's src/scenarios.py, on the same
-footing as the voltage table above: copied so this repo runs without that
-one present, and IF THAT PROJECT CHANGES ITS SCENARIOS THIS MUST BE
-UPDATED BY HAND.
+WRITTEN-DOWN COPY of RAWCLICVehicleBattery's scenario_1, scenario_2 and
+scenario_3 (src/params_schema.py there), on the same footing as the voltage
+table above: copied so this repo runs without that one present, and IF THAT
+PROJECT CHANGES ITS SCENARIOS THIS MUST BE UPDATED BY HAND. Last copied
+2026-10-05, when sodium became two chemistries there.
 
 Values are percentages at the anchor years, interpolated between and held
 flat outside, then renormalised per group and year.
@@ -1415,10 +1651,17 @@ S1  LFP volume, NMC premium, LMFP growing, nothing new ever arrives
 S2  sodium enters the small segments, NMC shrinks to a niche
 S3  S2 plus bipolar solid-state from 2040, large segments first
 
-⚠️ Na_ion and solid_state HAVE NO COMPOSITION. Their share is carried and
-reported as a gap rather than silently dropped -- under S3 that is most of
-the market by 2070, and a total that quietly fell would read as a collapse
-in demand rather than a hole in the data.
+SODIUM IS TWO CHEMISTRIES, Na_ion_prussian_white and Na_ion_layered, each with
+a composition of its own that the battery project builds from the literature.
+The split is by segment group: small cars (A, B, JA, JB) use Prussian white and
+layered oxide rises to 20% of the sodium by 2070; medium cars (C, D, JC, JD) are
+half and half; large cars (E, F, JE, JF) are layered oxide only. The two shares
+add up to the single sodium share these scenarios had before.
+
+⚠️ ONLY solid_state HAS NO COMPOSITION. Its share is carried and reported as a
+gap rather than silently dropped -- under S3 that is a large part of the market
+by 2070, and a total that quietly fell would read as a collapse in demand rather
+than a hole in the data.
 SAFE TO CHANGE: yes, to track the battery project.
 
 
@@ -1447,25 +1690,36 @@ SAFE TO CHANGE: only to match the composition files.
 
 ### `battery_chemistry_active_material_unknown`
 
-Default: `( "Na_ion", "solid_state")`
+Default: `("solid_state",)`
 
 ⚠️ CHEMISTRIES WHOSE ACTIVE MATERIAL NOBODY HAS DESCRIBED.
 
-These two DO have a composition file, and it is real: the casing, the
-separator, the cables, the terminals, the enclosure, the frame, the
-thermal conductor and both current collectors, at the mass of the pack
-they are modelled on. What it does not have is the cathode, the anode and
-the electrolyte -- the cell itself -- because nobody has published one
-that survives scrutiny, and a plausible number borrowed from a lithium
-chemistry would be a claim nobody made.
+Solid-state DOES have a composition file, and it is real: the cables, the
+enclosure, the frame, the thermal conductor and both current collectors, at
+the mass of the pack it is modelled on. What it does not have is the cathode,
+the anode and the electrolyte -- the cell itself -- because nobody has
+published one that survives scrutiny, and a plausible number borrowed from a
+lithium chemistry would be a claim nobody made.
 
-In their arrays the active materials are ZERO, and zero there means NOT
-DESCRIBED rather than none present. This list is what stops that zero
-being read as a fact: the cars carrying these chemistries are reported as
-a gap, at the same share as before they had any composition at all. What
-changed is that their steel, aluminium and copper now reach the totals.
+In its arrays the active materials are ZERO, and zero there means NOT
+DESCRIBED rather than none present. This list is what stops that zero being
+read as a fact: the cars carrying it are reported as a gap. (Sodium-ion was on
+this list until 2026-10-05; the battery project now builds both of its cells.)
 SAFE TO CHANGE: remove a name the day a real composition arrives for it,
 and not before.
+
+
+### `battery_elements_not_of_interest`
+
+Default: `("N", "F")`
+
+⚠️ ELEMENTS NOBODY ASKS ABOUT, left out of the figures and of the recovery export.
+The per-draw arrays keep them. Of the elements only the two sodium cells carry --
+sodium, nitrogen and fluorine -- sodium is the one of interest: nitrogen is the
+Prussian-white cathode's cyanide and fluorine is the electrolyte salt's, and he said
+on 2026-10-05 that neither matters here. Oxygen is left out of the figures on its own
+account (04_04 says why) but is still exported.
+SAFE TO CHANGE: yes. Take a name out of the list and rerun 04_04 to export it.
 
 
 ### `battery_recovery_draws_dir`

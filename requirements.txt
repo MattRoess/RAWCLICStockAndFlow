@@ -1,0 +1,23 @@
+# Stock-and-flow model dependencies. Python 3.14, no conda.
+#
+# Setup (from the project root):
+#   python3 -m venv .venv
+#   ./.venv/bin/pip install -r requirements.txt
+#
+# Versions are pinned to the environment the recorded results were produced in
+# (Python 3.14.4, see .python-version). The pipeline is sensitive to pandas
+# behaviour: do not relax a pin without rerunning the checks in README.md.
+
+pandas==3.0.3
+numpy==2.5.0
+scipy==1.18.0
+
+# Reading the Excel inputs (data/raw/usedvehicles_v1.2.xlsx, data/raw/composition/*.xlsx)
+# and the sibling projects' workbooks, and writing code/params.xlsx.
+openpyxl==3.1.5
+
+# 04_01 caches its composition histograms as parquet.
+pyarrow==25.0.0
+
+# Figures.
+matplotlib==3.11.0
