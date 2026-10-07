@@ -155,9 +155,10 @@ He switched the repository to public on 2026-10-07. Since then, in order:
   RAWCLICVehicleTractionMotor `736069a` carry the notice and are CC BY 4.0. RAWCLICVehicleComposition
   `276b851` got the notice, and VehicleComposition's R Markdown files already carried it. Both were CC0-1.0
   and were switched to CC BY 4.0 on his word "switch both": RAWCLICVehicleComposition `98bfcef`, and
-  VehicleComposition `b0e8eb5`, whose README names the third-party files it does not cover (the JRC
-  workbooks, the VDA workbook, the alloys PDF, the FutuRaM WP3 template, all by file name; he was asked
-  which of its other 17 workbooks are his and did not say). All seven repositories are now CC BY 4.0. Still
+  VehicleComposition `b0e8eb5`, corrected in `f3e758b`: its README says the licence covers his
+  compilation of data from other institutions, not the data it was built from (he said all the workbooks
+  were put together by himself; `VehicleAlloysData.pdf` is the knitted output of his own Rmd). All seven
+  repositories are now CC BY 4.0. Still
   open there: RecoveryModel's two received engines carry no notice,
   how to mark them is his decision; RAWCLICVehicleTractionMotor's uncommitted work of 21-24 September
   was committed on his word (`e8fe1fd`); RAWCLICRecoveryModel's `SETUP.md` still says that repository is
