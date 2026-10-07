@@ -155,8 +155,8 @@ He switched the repository to public on 2026-10-07. Since then, in order:
   RAWCLICVehicleTractionMotor `736069a` carry the notice and are CC BY 4.0. RAWCLICVehicleComposition
   `276b851` got the notice; it and VehicleComposition stay CC0-1.0, and VehicleComposition's R Markdown
   files already carried it. Still open there: RecoveryModel's two received engines carry no notice,
-  how to mark them is his decision; RAWCLICVehicleTractionMotor holds uncommitted work of his from
-  21-24 September in five files; RAWCLICRecoveryModel's `SETUP.md` still says that repository is
+  how to mark them is his decision; RAWCLICVehicleTractionMotor's uncommitted work of 21-24 September
+  was committed on his word (`e8fe1fd`); RAWCLICRecoveryModel's `SETUP.md` still says that repository is
   private.
 - `mc-correctness-and-bev-electronics` exists on `origin` and is public too; its content was not looked at.
 
