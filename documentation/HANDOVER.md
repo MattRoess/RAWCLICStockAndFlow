@@ -149,11 +149,15 @@ He switched the repository to public on 2026-10-07. Since then, in order:
 - The GitHub description and topics are empty, here and in RAWCLICRecoveryModel.
 - 04_01 and 04_03 have no description beyond their script headers, and `MODEL_DESCRIPTION.md` dates from
   2026-08-14, before 04_03 and 04_04 existed.
-- RAWCLICRecoveryModel, RAWCLICVehicleBattery, RAWCLICVehicleElectronics and
-  RAWCLICVehicleTractionMotor have no licence on GitHub and, bar one file in Electronics, no copyright
-  notice. VehicleComposition is CC0-1.0, and its R Markdown files carry the notice. He was asked whether
-  the notice should go into the others as well and has not answered. RAWCLICRecoveryModel's `SETUP.md`
-  still says that repository is private.
+- **The other repositories got the same, on his word "Do the same in the all other repos"** (all on
+  2026-10-07): RAWCLICVehicleBattery `fe1fac1`, RAWCLICRecoveryModel `a2aefc9`,
+  RAWCLICVehicleElectronics `54386e3` (years "2025 & 2026", as the notice it already had) and
+  RAWCLICVehicleTractionMotor `736069a` carry the notice and are CC BY 4.0. RAWCLICVehicleComposition
+  `276b851` got the notice; it and VehicleComposition stay CC0-1.0, and VehicleComposition's R Markdown
+  files already carried it. Still open there: RecoveryModel's two received engines carry no notice,
+  how to mark them is his decision; RAWCLICVehicleTractionMotor holds uncommitted work of his from
+  21-24 September in five files; RAWCLICRecoveryModel's `SETUP.md` still says that repository is
+  private.
 - `mc-correctness-and-bev-electronics` exists on `origin` and is public too; its content was not looked at.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
