@@ -145,3 +145,16 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 | [RAWCLICVehicleElectronics](https://github.com/MattRoess/RAWCLICVehicleElectronics) | Electronics composition per car, read by 04_02 |
 | [RAWCLICVehicleTractionMotor](https://github.com/MattRoess/RAWCLICVehicleTractionMotor) | Traction-motor composition, read by 04_03 |
 | [RAWCLICVehicleBattery](https://github.com/MattRoess/RAWCLICVehicleBattery) | Battery composition by capacity and chemistry, read by 04_04 |
+
+## Licence
+
+The code and the documentation in this repository are licensed under
+[Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/)
+(CC BY 4.0): you may share and adapt them, commercially too, as long as you give credit,
+link to the licence and say if you changed anything. The full text is in
+[LICENSE](LICENSE), and every source file carries the notice
+`Copyright © 2026 Empa, Matthias Roesslein`.
+
+The licence covers what was written for this repository. `data/raw/EEA_final_data.csv` is the
+European Environment Agency's data and stays under the EEA's own terms; the inputs a clone does
+not contain are not part of this repository and are not covered by it.

@@ -1,4 +1,4 @@
-# Handover — updated 2026-10-05
+# Handover — updated 2026-10-07
 
 Where the work stands, what is safe, what is not, and what to do next.
 
@@ -118,6 +118,43 @@ needs the same 03_02 rerun, and he has not been asked.
 
 **Next:** ask him A or B, and whether the segment seeding is to be fixed in the same rerun, since both
 force a 03_02 run. Edit neither without his answer.
+
+## 2026-10-07 — the repository is public, documented, marked and licensed
+
+He switched the repository to public on 2026-10-07. Since then, in order:
+
+- **`a285d13` — the documentation.** `README.md`, `requirements.txt` (pins taken from the `.venv`
+  the results came from: pandas 3.0.3, numpy 2.5.0, scipy 1.18.0, matplotlib 3.11.0, openpyxl 3.1.5,
+  pyarrow 25.0.0), `documentation/SETUP.md`, an index that lists every document and which covers
+  which stage, and `PARAMETER_REFERENCE.md` regenerated (170 parameters; the one of 21 September had
+  159 and lacked the traction ones). Checked from a fresh clone: `00_parameters.py` runs and
+  `test_stage04_03_export.py` passes; the other two checks need data or the electronics project, and
+  say so.
+- **`6ab4fa2` — the copyright notice.** `**Copyright notice:** Copyright © 2026 Empa, Matthias
+  Roesslein` is in all 40 source files (39 Python files, `src/archive/` included, and the
+  `pre-commit` hook), in the module docstring after the title block. **A new source file must get it
+  too**; the year is the one the history starts in, 2026.
+- **This commit — the licence.** CC BY 4.0, chosen by him: `LICENSE` holds the official text
+  (word for word the one GitHub offers), and the README says what it covers. It covers the code and the
+  documentation, not the EEA file or the inputs. A Creative Commons licence cannot be withdrawn
+  for copies already made.
+
+**Open, none of it touched:**
+
+- `data/raw/EEA_final_data.csv` (0.67 MB) is tracked and downloadable now. The `.gitignore` says why;
+  it goes against his no-data-in-git rule, and whether it stays is his decision.
+- Two settings in `src/params_schema.py`, `traction_composition_dir` and `battery_composition_dir`,
+  hold absolute paths of his Mac, and they also appear in `PARAMETER_REFERENCE.md`. `SETUP.md` tells
+  a reader to edit them.
+- The GitHub description and topics are empty, here and in RAWCLICRecoveryModel.
+- 04_01 and 04_03 have no description beyond their script headers, and `MODEL_DESCRIPTION.md` dates from
+  2026-08-14, before 04_03 and 04_04 existed.
+- RAWCLICRecoveryModel, RAWCLICVehicleBattery, RAWCLICVehicleElectronics and
+  RAWCLICVehicleTractionMotor have no licence on GitHub and, bar one file in Electronics, no copyright
+  notice. VehicleComposition is CC0-1.0, and its R Markdown files carry the notice. He was asked whether
+  the notice should go into the others as well and has not answered. RAWCLICRecoveryModel's `SETUP.md`
+  still says that repository is private.
+- `mc-correctness-and-bev-electronics` exists on `origin` and is public too; its content was not looked at.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 
