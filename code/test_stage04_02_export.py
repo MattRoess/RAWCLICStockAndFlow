@@ -1,6 +1,8 @@
 """
 test_stage04_02_export.py -- what a 04_02 run actually leaves in the draw folder.
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
     .venv/bin/python code/test_stage04_02_export.py
 
 RUN THIS AFTER ANY CHANGE to the export block in `04_02_BEVelectronics.py`. It

@@ -2,6 +2,8 @@
 src/battery_capacity.py
 =======================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 What a BEV of a given segment carries, in kWh, per Monte Carlo draw and year.
 
     from src.battery_capacity import capacity_draws

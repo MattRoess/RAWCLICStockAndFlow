@@ -2,6 +2,8 @@
 test_04_04_figures.py
 =====================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 A BENCH TOOL, NOT A PIPELINE STAGE. Redraws 04_04's figures from the draws
 already on disk, without rerunning the stage.
 

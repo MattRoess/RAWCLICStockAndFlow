@@ -2,6 +2,8 @@
 materials.py
 =============
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Core quantification library used by all four stage-04 notebooks (`src.materials`).
 
 ======================================================================

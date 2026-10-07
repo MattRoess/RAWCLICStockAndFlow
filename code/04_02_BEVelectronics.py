@@ -2,6 +2,8 @@
 04_02_BEVelectronics.py -- how much electronics material the BEV fleet takes in,
 gives back, and hands to recycling, year by year, with full uncertainty.
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 WHAT THIS STAGE DOES
 --------------------
 Two separate studies meet here.

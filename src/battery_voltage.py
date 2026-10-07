@@ -2,6 +2,8 @@
 src/battery_voltage.py
 ======================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Whether a BEV carries a 400 V or an 800 V pack, per Monte Carlo draw and year.
 
     from src.battery_voltage import voltage_draws

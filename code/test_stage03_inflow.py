@@ -2,6 +2,8 @@
 test_stage03_inflow.py -- regression tests for how stage 02's inflow uncertainty is
 carried into stage 03_02.
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
     .venv/bin/python code/test_stage03_inflow.py
 
 RUN THIS AFTER ANY CHANGE to the composition block in `03_02_adjustedflows.py`, to

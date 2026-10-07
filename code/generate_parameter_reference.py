@@ -2,6 +2,8 @@
 generate_parameter_reference.py -- build documentation/PARAMETER_REFERENCE.md from
 src/params_schema.py.
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 WHY THIS IS GENERATED AND NOT WRITTEN BY HAND. A hand-written parameter reference
 drifts the moment a parameter is added, and drifts silently, because nothing checks
 it. The previous one did exactly that: it described 46 of the 129 parameters that

@@ -2,6 +2,8 @@
 data_prep.py
 =============
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 The real implementation behind 01_data_prep.py: parses REMIND scenario `.mif` output
 into a tidy long-format table, aggregates vehicle stock by region/technology, and cleans
 EU used-vehicle export/import trade data.

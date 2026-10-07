@@ -1,6 +1,8 @@
 """
 PROOF ONLY -- writes nothing, modifies nothing, runs no stage.
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Question: what happens to 04_03's uncertainty bands when the per-draw vehicle
 counts in data/processed/bev_draws/ are used, instead of being collapsed to a
 deterministic scalar at src/traction_draws.py:222?

@@ -2,6 +2,8 @@
 src/traction.py
 ===============
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 How the fleet splits across traction motor types and voltage classes.
 
     from src.traction import type_shares, voltage_shares

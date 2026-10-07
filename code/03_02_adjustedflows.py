@@ -2,6 +2,8 @@
 03_02_adjustedflows.py
 ========================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Stage 03, part 2: takes `flows_03` (03_01's baseline flow-driven output) and re-runs the
 flow-driven model under a series of ALTERNATIVE inflow-composition scenarios (different
 drivetrain mixes, different BEV segment-size profiles), to explore sensitivity of the

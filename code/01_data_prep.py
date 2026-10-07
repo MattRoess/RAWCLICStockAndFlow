@@ -2,6 +2,8 @@
 01_data_prep.py
 ================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Loads REMIND scenario output and EU vehicle-export data, reshapes REMIND's variable
 structure into a usable stock/inflow/outflow table, and persists the artifacts that
 stage 02 (stock-flow) consumes:

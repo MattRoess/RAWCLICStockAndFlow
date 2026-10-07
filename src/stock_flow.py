@@ -2,6 +2,8 @@
 stock_flow.py
 ==============
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Three utilities: `prepare_backcasting_state` (the pre-t0 cohort-age-structure
 reconstruction stage 02 depends on), and two optional manual scenario-exploration
 tools not currently wired into any pipeline stage: `warp_bev_transition_all_segments`

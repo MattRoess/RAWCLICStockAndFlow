@@ -2,6 +2,8 @@
 monte_carlo.py
 ================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Generic Monte Carlo infrastructure: probability distributions, and a utility to sample
 many perturbed variations of a (possibly deeply-nested, frozen-dataclass) parameter
 tree without touching any consuming code.

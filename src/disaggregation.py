@@ -2,6 +2,8 @@
 disaggregation.py
 ===================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Segment/drivetrain-splitting and materials-tracker-construction library used by stage 03
 (`03_01_flowdriven.py`, `03_02_adjustedflows.py`).
 

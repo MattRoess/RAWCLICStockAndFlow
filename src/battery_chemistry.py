@@ -2,6 +2,8 @@
 battery_chemistry.py
 ====================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Which battery chemistry the cars of a segment group carry, in a given year,
 under a given scenario.
 

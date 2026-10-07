@@ -2,6 +2,8 @@
 src/params_schema.py
 ======================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Defines every parameter dataclass used by 00_parameters.py, and the `Params` object
 that gets pickled as the `params` artifact.
 

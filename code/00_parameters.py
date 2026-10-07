@@ -2,6 +2,8 @@
 00_parameters.py
 =================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Builds, validates, and persists the central `Params` object for the EVmodel pipeline.
 
 STRUCTURE

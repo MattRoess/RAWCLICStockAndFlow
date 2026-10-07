@@ -2,6 +2,8 @@
 04_01_carcomposition.py
 =========================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Stage 04, part 1: combines the "tracker" (per-flow, per-cohort vehicle/segment counts
 from stage 03) with COMPONENT-MATERIAL (C-M) composition data for a given drivetrain and
 segment, producing total material MASS by year/flow/drivetrain/material, WITH combined

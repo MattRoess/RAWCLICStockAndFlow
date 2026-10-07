@@ -1,5 +1,7 @@
 #!/bin/sh
 #
+# Copyright notice: Copyright © 2026 Empa, Matthias Roesslein
+#
 # pre-commit -- run a test suite before allowing a commit that touches the files it
 # protects. Two guards, independent: the stage-03 inflow rule, and 04_02's export.
 #

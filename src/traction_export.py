@@ -2,6 +2,8 @@
 src/traction_export.py
 ======================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Writes the traction-motor draws in the layout `RAWCLICRecoveryModel` reads.
 
 ⚠️ THE DRAWS, NOT THE PERCENTILES. 04_03 computes a 200 000-long distribution

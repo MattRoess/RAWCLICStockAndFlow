@@ -2,6 +2,8 @@
 src/traction_draws.py
 =====================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Traction-motor material and element flows from the 200,000 draws themselves.
 
     from src.traction_draws import DrawLibrary

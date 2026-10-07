@@ -2,6 +2,8 @@
 04_04_batteries.py
 ==================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Battery material flows for BEVs: what enters the fleet, what leaves it, and
 what is actually collected from it, in tonnes of each element, per year, per
 chemistry, under each chemistry scenario.

@@ -1,6 +1,8 @@
 """
 test_stage04_03_export.py -- what a 04_03 run leaves in the draw folder.
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
     .venv/bin/python code/test_stage04_03_export.py
 
 RUN THIS AFTER ANY CHANGE to `src/traction_export.py`. It calls `_write` for

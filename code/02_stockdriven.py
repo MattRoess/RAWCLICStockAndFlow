@@ -2,6 +2,8 @@
 02_stockdriven.py
 ==================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Implements a **stock-driven cohort-survival model**: given a prescribed total vehicle
 stock trajectory per (region, drivetrain) from stage 01, works out the annual inflow
 required to hit that prescribed stock each year, accounting for retirement via a

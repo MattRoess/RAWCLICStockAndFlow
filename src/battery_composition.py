@@ -2,6 +2,8 @@
 src/battery_composition.py
 ==========================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 What a battery of a drawn capacity, voltage and chemistry is made of, per draw.
 
     from src.battery_composition import CompositionAtCapacity

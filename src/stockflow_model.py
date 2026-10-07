@@ -2,6 +2,8 @@
 stockflow_model.py
 =====================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 THE cohort-survival stock-driven model -- the actual math. Moved here from
 02_stockdriven.py so that stage 03 (and any future stage) can import and reuse it
 properly, the same way every other pipeline stage already imports `data_prep.py`,

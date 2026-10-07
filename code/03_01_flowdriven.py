@@ -2,6 +2,8 @@
 03_01_flowdriven.py
 ====================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Stage 03, part 1: takes stage 02's aggregate stock-driven results and:
 
   1. Splits each drivetrain's survival outflow into "collected" / "unknown fate" /

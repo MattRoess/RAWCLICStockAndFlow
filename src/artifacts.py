@@ -2,6 +2,8 @@
 artifacts.py
 ============
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Central artifact registry + pickle-based persistence layer for the EVmodel pipeline.
 
 PURPOSE

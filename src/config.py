@@ -2,6 +2,8 @@
 config.py
 =========
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Small, self-contained project-path resolver. This is what `get_paths()` (imported by
 `artifacts.py`) actually is.
 

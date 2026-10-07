@@ -2,6 +2,8 @@
 plotting.py
 =============
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Visualization library for the EVmodel pipeline (`src.plotting`).
 
 FIXES APPLIED THIS ROUND

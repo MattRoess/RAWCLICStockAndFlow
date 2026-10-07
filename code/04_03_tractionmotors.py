@@ -2,6 +2,8 @@
 04_03_tractionmotors.py
 =======================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Stage 04, part 3: traction-motor material and element flows.
 
     .venv/bin/python code/04_03_tractionmotors.py

@@ -3,6 +3,8 @@ cohort_flow_mc.py
 ====================
 Generic, vectorized Monte Carlo cohort-flow engine.
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 WHAT THIS MODELS
 ------------------
 A set of independent cohort populations (one per unique combination of

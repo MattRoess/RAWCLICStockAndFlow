@@ -2,6 +2,8 @@
 battery_vintage.py
 ==================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 WHERE THE CARS LEAVING THE FLEET WERE BUILT.
 
 A battery scrapped in 2050 was built around 2034 and carries the chemistry and

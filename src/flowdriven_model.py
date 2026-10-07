@@ -2,6 +2,8 @@
 flowdriven_model.py
 =====================
 
+**Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
+
 Core flow-driven cohort model used by stage 03 (`03_01_flowdriven.py`,
 `03_02_adjustedflows.py`). This is the module (`fdm`) referenced but not previously
 available in earlier rounds of this review -- now fully annotated below.
