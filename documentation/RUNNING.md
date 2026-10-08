@@ -44,7 +44,7 @@ Times are for 200,000 Monte Carlo draws on a 16 GB machine.
 | `04_01_carcomposition.py` | Turns vehicles into materials — steel, aluminium, copper, battery chemistry. | long | high |
 | `04_02_BEVelectronics.py` | BEV electronics material flows, from both studies' real draws. | ~2 min | ~600 MB |
 | `04_03_tractionmotors.py` | Traction motor material flows. | minutes | moderate |
-| `04_04_batteries.py` | BEV battery material flows: three flows, three chemistry scenarios, elements and components, **every year**. Writes nine figures at the end. | **~47 min** | **~13 GB** |
+| `04_04_batteries.py` | BEV battery material flows: three flows, three chemistry scenarios, elements and components, **every year**. Writes nine figures at the end. | **~6 h** (six chemistries; 47 min with five) | **~13 GB** |
 
 `code/test_04_04_figures.py` redraws 04_04's figures from the draws already on
 disk in ~30 s, without rerunning the stage. It is a bench tool, not a stage, and

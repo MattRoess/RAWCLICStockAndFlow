@@ -14,7 +14,7 @@ band.
 Reported **every year**, 2020 to 2070.
 
 ```bash
-.venv/bin/python code/04_04_batteries.py     # an hour or more at 200,000 draws (47 min with five chemistries), writes the figures too
+.venv/bin/python code/04_04_batteries.py     # about six hours at 200,000 draws with six chemistries (47 min with five), writes the figures too
 .venv/bin/python code/test_04_04_figures.py  # ~30 s, redraws them from the saved draws
 ```
 
