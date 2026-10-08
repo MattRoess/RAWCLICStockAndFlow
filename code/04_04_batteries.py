@@ -61,6 +61,10 @@ WHAT IS WRITTEN
   04_04_battery_material_flows.pkl
         mean, median and the 95% band, taken FROM those draws. A convenience
         summary for reading and plotting, never an input to further maths.
+  data/processed/<materials.battery_recovery_draws_dir>/<chemistry>/<scenario>/<flow>/
+        what RAWCLICRecoveryModel reads: one folder PER CHEMISTRY (it was one
+        folder summed over them until 2026-10-08), eleven years, kilotonnes, the
+        element within its component and the component totals.
 
 The draws are written because recovery is a RATIO of two of these numbers, and
 a ratio of percentiles is not the percentile of a ratio. Secondary supply has
@@ -130,6 +134,10 @@ def write_recovery_export(directory: Path, flow: str, scenario: str,
     `<element>__<component>`. Nothing here is summarised: the recovery model
     multiplies these by drawn transfer coefficients, and a mean times a mean is
     not the mean of the product.
+
+    `directory` is ONE CHEMISTRY's folder, `<export>/<chemistry>`; the scenario
+    and the flow are written below it. A chemistry is written only for the
+    scenarios it has a share in, so S1 has no sodium folder at all.
     """
     target = directory / scenario / flow
     target.mkdir(parents=True, exist_ok=True)
@@ -452,23 +460,41 @@ def main() -> dict:
         # electrode foil go through different processes, so an element total
         # could not be given a coefficient that is right for both.
         #
-        # Summed over the chemistries, because a recycler receives the mix.
+        # ONE CHEMISTRY AT A TIME, NOT SUMMED (2026-10-08). Until then the
+        # chemistries were added together here, "because a recycler receives the
+        # mix" -- which fixed one treatment for all of them: a lithium iron
+        # phosphate cell and a nickel-manganese-cobalt cell went down the same
+        # road at the same rates. A recycler treats them differently, so
+        # RAWCLICRecoveryModel has a case per chemistry and adds the cases up
+        # itself, per draw, after each has been treated. The arrays written are
+        # exactly the ones that used to be added: summing the chemistries of a
+        # scenario gives the old export back.
+        #
         # Its own pass rather than a branch inside the ones above: it runs on
         # eleven years instead of fifty-one, so it costs about a fifth of one.
         # ------------------------------------------------------------------
         if recovery_years:
-            union: dict[str, int] = {}
-            for level, prefix in (("component", "__component__"), ("pair", "")):
-                for file_name in named.values():
+            # The names each chemistry has, in the order its files are written.
+            # An element nobody asks about is not exported. Its mass is still in
+            # its component's total.
+            own: dict[str, dict[str, int]] = {}
+            for chemistry, file_name in named.items():
+                here: dict[str, int] = {}
+                for level, prefix in (("component", "__component__"), ("pair", "")):
                     for name in composition.names(file_name, level):
-                        # An element nobody asks about is not exported. Its mass is
-                        # still in its component's total.
                         if level == "pair" and name.partition("|")[0] in ignored:
                             continue
-                        union.setdefault(f"{prefix}|{name}" if prefix else name,
-                                         len(union))
-            totals = {scenario: np.zeros((n_draws, len(recovery_years), len(union)),
-                                         dtype=np.float32) for scenario in scenarios}
+                        here.setdefault(f"{prefix}|{name}" if prefix else name,
+                                        len(here))
+                own[chemistry] = here
+            # One array per chemistry AND scenario, made the first time the
+            # chemistry has a share in that scenario. A chemistry a scenario never
+            # uses gets NO array and no folder: S1 has no sodium, and a folder of
+            # zeros would say it does. Held in memory together: about 0.25 GB each
+            # at 200,000 draws, so 3.4 GB for the fourteen there are today (three
+            # chemistries in S1, five in S2, six in S3) -- the accumulators of the
+            # passes above are gone by now.
+            totals: dict[tuple[str, str], np.ndarray] = {}
 
             for segment in segments:
                 vehicles = vehicles_by_segment.get(segment)
@@ -493,11 +519,16 @@ def main() -> dict:
                               for scenario in scenarios}
                     if all(share is None for share in shares.values()):
                         continue
+                    for scenario in scenarios:
+                        if shares[scenario] is not None and (chemistry, scenario) not in totals:
+                            totals[(chemistry, scenario)] = np.zeros(
+                                (n_draws, len(recovery_years), len(own[chemistry])),
+                                dtype=np.float32)
                     for level, prefix in (("component", "__component__"), ("pair", "")):
                         names = composition.names(file_name, level)
                         keep = [i for i, n in enumerate(names)
-                                if (f"{prefix}|{n}" if prefix else n) in union]
-                        columns = [union[f"{prefix}|{names[i]}" if prefix else names[i]]
+                                if (f"{prefix}|{n}" if prefix else n) in own[chemistry]]
+                        columns = [own[chemistry][f"{prefix}|{names[i]}" if prefix else names[i]]
                                    for i in keep]
                         per_car = np.stack([
                             composition.masses(
@@ -523,20 +554,18 @@ def main() -> dict:
                                                    * weights[:, year_position, :])
                                     piece = np.einsum("dv,dve->de", coefficient,
                                                       per_car, optimize=True)
-                                totals[scenario][:, year_position, columns] += piece
+                                totals[(chemistry, scenario)][:, year_position, columns] += piece
                         del per_car
                 del weights, group_shares
                 print(f"  {flow:<9} recovery  {segment:<3} done "
                       f"({time.time()-started:5.0f}s)")
 
-            names = list(union)
-            for scenario in scenarios:
-                written = write_recovery_export(recovery_dir, flow, scenario,
-                                                recovery_years, names,
-                                                totals[scenario])
-            totals.clear()
-            print(f"    recovery export: {written} arrays per scenario, "
+            for (chemistry, scenario), array in sorted(totals.items()):
+                write_recovery_export(recovery_dir / chemistry, flow, scenario,
+                                      recovery_years, list(own[chemistry]), array)
+            print(f"    recovery export: {len(totals)} chemistry x scenario folders, "
                   f"{len(recovery_years)} years, kilotonnes")
+            totals.clear()
 
         # The share whose ACTIVE MATERIAL nobody has described, reported rather
         # than dropped. Solid-state carries its packaging -- frame, enclosure,

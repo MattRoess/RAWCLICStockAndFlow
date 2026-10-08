@@ -55,7 +55,7 @@ import pandas as pd
 
 # ⚠️ KILOGRAMS IN, KILOTONNES OUT. 04_03 works in kg -- vehicle counts in
 # millions times 1e6, times kg per vehicle -- and the recovery model's upstream
-# contract is kilotonnes, as `battery_recovery_draws` is written. Exporting kg
+# contract is kilotonnes, as the battery's recovery export is written. Exporting kg
 # was silently a factor of a million: the traction total at 2050 read
 # 9.43e8 against the battery's 4281, where the real ratio is a ~100 kg motor
 # against a ~400 kg pack. Caught by comparing magnitudes with the battery, not

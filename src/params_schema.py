@@ -2113,23 +2113,32 @@ class MaterialsParams:
     battery_elements_not_of_interest: tuple[str, ...] = ("N", "F")
 
     # WHERE 04_04 WRITES THE DRAWS THE RECOVERY MODEL READS, under
-    # data/processed/. One folder per chemistry scenario, then per flow:
+    # data/processed/. One folder per CHEMISTRY, then per chemistry scenario, then
+    # per flow:
     #
-    #     <scenario>/<flow>/years.npy
-    #     <scenario>/<flow>/__component____<component>.npy   (draws, years)
-    #     <scenario>/<flow>/<element>__<component>.npy       (draws, years)
+    #     <chemistry>/<scenario>/<flow>/years.npy
+    #     <chemistry>/<scenario>/<flow>/__component____<component>.npy   (draws, years)
+    #     <chemistry>/<scenario>/<flow>/<element>__<component>.npy       (draws, years)
     #
     # In KILOTONNES, which is the unit RAWCLICRecoveryModel's `src/upstream.py`
-    # expects, and summed over the chemistries: a recycler receives the mix, not
-    # one chemistry at a time.
+    # expects. NOT SUMMED OVER THE CHEMISTRIES -- it was, until 2026-10-08, "because
+    # a recycler receives the mix". A recycler treats a lithium iron phosphate cell,
+    # a nickel-manganese-cobalt cell and a sodium-ion cell differently, so the
+    # recovery model has a case per chemistry and adds the cases up itself, per
+    # draw, after treating each. A chemistry is written only for the scenarios it
+    # has a share in: S1 has no sodium folder.
     #
     # WHY THE CROSS AND NOT THE ELEMENT TOTAL. Copper in a cable and copper in
     # an electrode foil go through different processes and are recovered at
     # different rates. An element total cannot be given one coefficient that is
     # right for both, so the recovery model is handed the element WITHIN the
     # component and decides per component.
-    # SAFE TO CHANGE: yes, it is only a folder name.
-    battery_recovery_draws_dir: str = "battery_recovery_draws"
+    # SAFE TO CHANGE: yes, it is only a folder name -- but the recovery model's
+    # cases name it as `upstream_dir` in their source tables, so change it there
+    # too. The folder this setting used to name, `battery_recovery_draws` (the sum),
+    # is not written any more; the copy on disk is read only by that model's old
+    # `data/battery` case.
+    battery_recovery_draws_dir: str = "battery_recovery_draws_by_chemistry"
 
     # WHICH YEARS OF THAT EXPORT TO WRITE.
     #

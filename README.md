@@ -86,8 +86,9 @@ nothing under them is ever written:
 Everything the stages write goes under `data/processed/`: `intermediate/` (every
 summary the pipeline reads back), `figures/`, `bev_draws/` (03_02), `carcomposition_draws/`
 (04_01), `element_draws/` (04_02), `traction/` and `traction_recovery_draws/` (04_03),
-`battery_draws/` and `battery_recovery_draws/` (04_04). The recovery model reads
-`element_draws/`, `traction_recovery_draws/` and `battery_recovery_draws/`.
+`battery_draws/` and `battery_recovery_draws_by_chemistry/` (04_04, one folder per
+chemistry). The recovery model reads `element_draws/`, `traction_recovery_draws/` and
+`battery_recovery_draws_by_chemistry/`.
 
 ## Settings
 
