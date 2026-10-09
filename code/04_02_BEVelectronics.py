@@ -63,7 +63,6 @@ OUTPUTS
 
 from __future__ import annotations
 
-import pickle
 import sys
 import zlib
 from pathlib import Path
@@ -90,7 +89,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.artifacts import load_many, save_many  # type: ignore
 from src.config import get_paths  # type: ignore
-from src.monte_carlo import summarize_distribution  # type: ignore
 
 # vehicles are in MILLIONS, material in GRAMS per vehicle:
 #   1e6 vehicles x 1 g = 1e6 g = 1 tonne, so the raw product is already tonnes.
@@ -1039,7 +1037,6 @@ def fig_vehicles(fleet, keep, years, segments, n_draws, path: Path) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
-
 def fig_domain_recovery(by_series_by_flow, years, series, path: Path) -> None:
     """
     FIGURE 10 -- how much of each kind of electronics is actually recovered.
@@ -1075,7 +1072,6 @@ def fig_domain_recovery(by_series_by_flow, years, series, path: Path) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
-
 def _unit(peak: float) -> tuple[float, str]:
     """Pick kt, t or kg so an axis reads in human numbers rather than 0.00004 kt."""
     if peak >= 1.0:
@@ -1083,34 +1079,6 @@ def _unit(peak: float) -> tuple[float, str]:
     if peak >= 1e-3:
         return 1e3, "t"
     return 1e6, "kg"
-
-
-def fig_element_total(el_by_flow, years, element, path: Path, n_draws: int) -> None:
-    """
-    All three flows for ONE element, summed over every domain that contains it.
-
-    This is the recycling view: what enters the fleet, what leaves it, and what is
-    actually collected, for the element itself rather than for a bag of electronics.
-    """
-    peak = max(el_by_flow[f][element]["total"]["p97_5"].max() for f in FLOWS)
-    k, unit = _unit(peak)
-    fig, ax = plt.subplots(figsize=(11, 6))
-    for flow in FLOWS:
-        color = FLOW_COLOR[flow]
-        df = el_by_flow[flow][element]["total"]
-        ax.plot(years, df["median"] * k, color=color, linewidth=1.8,
-                label=f"{flow} ({FLOW_LABEL[flow]})")
-        ax.fill_between(years, df["p2_5"] * k, df["p97_5"] * k, color=color,
-                        alpha=0.20, linewidth=0)
-    ax.set_title(f"{element} in BEV electronics -- median and 95% band "
-                 f"(n={n_draws:,})", fontsize=12)
-    ax.set_xlabel("Year")
-    ax.set_ylabel(f"{element} [{unit}/year]")
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
-    ax.legend(frameon=False)
-    plt.tight_layout()
-    fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
 def fig_element_domains(el_by_flow, years, element, flow, path: Path) -> None:
@@ -1523,9 +1491,10 @@ def main() -> dict[str, Any]:
     # near-identical charts is not more information, it is less, because nobody
     # reads them.
     #
-    # `fig_element_total` and `fig_element_domains` are kept -- copper still uses
-    # the second one above -- so putting a named element back on its own page is
-    # one appended job, not new plotting code.
+    # `fig_element_domains` is kept -- copper uses it above -- so putting a named
+    # element back on its own page is one appended job, not new plotting code.
+    # (`fig_element_total` was kept for the same reason until 2026-10-09; nothing
+    # called it, and it was removed.)
 
     for name, fn in jobs:
         path = fig_dir / name

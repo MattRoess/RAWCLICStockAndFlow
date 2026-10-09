@@ -1,4 +1,4 @@
-# Handover — updated 2026-10-08
+# Handover — updated 2026-10-09
 
 Where the work stands, what is safe, what is not, and what to do next.
 
@@ -26,8 +26,8 @@ folder, exit 0, all nine figures drawn, the lithium totals identical to his last
 **To run it:** `00_parameters.py` first (04_04 refuses a saved file that predates the schema), then
 04_04. Expect about 48 GB, not 40 GB: six chemistries, not five -- and, as it turned out on 2026-10-08, about
 six hours, not 47 minutes.
-The 36 old `Na_ion*` files in `data/processed/battery_draws/` (8.2 GB) are not read any more and are
-his to delete.
+The 36 old `Na_ion*` files in `data/processed/battery_draws/` (8.2 GB) are not read any more; their
+removal was approved on 2026-10-09 (the entry "dead code, dead data and dead figures" below).
 
 **Open:** the recovery export now carries one element it did not, Na, and a component,
 `batteryCellUnitemised`, that RAWCLICRecoveryModel's battery case has no process or coefficient
@@ -189,8 +189,8 @@ ignored, so never `git add -A` there.
 1. His answer on the normalisation, A or B, and whether the segment seeding is fixed in the same 03_02
    rerun (the note of 2026-10-05, later). Nothing is implemented.
 2. **Done 2026-10-08:** the real run of `00_parameters.py` and `04_04_batteries.py`, which reads the two
-   sodium cells (the note of 2026-10-08 below). The 36 old `Na_ion*` draw files (8.2 GB) are still his to
-   delete.
+   sodium cells (the note of 2026-10-08 below). The 36 old `Na_ion*` draw files (8.2 GB): removal approved
+   2026-10-09, below.
 3. The small decisions above: the EEA file, the GitHub descriptions, the received engines.
 4. **Fixed 2026-10-09, in the code:** the `hash(segment)` seeds in `battery_capacity.py` and
    `battery_voltage.py` (the note of 2026-10-08 below), and the shared seeds: every random stream in the
@@ -267,8 +267,8 @@ about 03_02's fleet draws; this is the pack size and the voltage inside 04_04.
 `code/generate_parameter_reference.py` -- not by `00_parameters.py`, as this entry first said -- and only
 `battery_recovery_draws_dir` changed. The open item of 2026-10-05, that the export carries sodium and
 `batteryCellUnitemised` and the recovery model had no case for them, is closed on that side:
-`data/battery_sodium` has both. Still his to delete: the old single-sodium `Na_ion*` files in
-`battery_draws/` (8.2 GB) and, once `data/battery` is retired, the old summed export (2.8 GB).
+`data/battery_sodium` has both. The old single-sodium `Na_ion*` files in `battery_draws/` (8.2 GB): removal approved
+2026-10-09 (below). Still his: the old summed export (2.8 GB), once `data/battery` is retired.
 
 ## 2026-10-09 — the hash seeds are fixed, and every random stream in the battery modules has its own tag
 
@@ -352,7 +352,8 @@ moved without finding all eight. RAWCLICRecoveryModel already keeps its figures 
 - `README.md`, `RUNNING.md` and the seven images of `BATTERY_MATERIAL_FLOWS.md` say and point to the new place.
 - **The old folder is not touched and not written to any more.** Last night's 104 figures were COPIED into
   `figures/` (18 MB, byte for byte, checked), so the folder is not empty until the next run of each stage and the
-  images in the documents resolve.
+  images in the documents resolve. (Its removal was approved the same day; see "dead code, dead data and dead
+  figures" below.)
 
 **Checked.** A scratch script, red then green: before, eight stage files defined the old folder and
 `Paths.figures` did not exist; after, none does, all eight ask the resolver, and it says `<repository>/figures`.
@@ -361,10 +362,62 @@ folder, which proves the 04_04 path end to end. **Not run: the other seven stage
 change is the one import and the one line, checked statically only.
 
 **One thing that went wrong on the way, and was corrected.** Those nine figures, redrawn at 07:04, were drawn
-from `battery_draws/` while a 04_04 run that was not started by the work here was rewriting its `inflow` files, so
+from `battery_draws/` while a 04_04 run (the one he stopped at 07:19 to switch the computer off) was rewriting its `inflow` files, so
 they mixed two runs (five of the nine differed from last night's by 0.5 to 6 % of their pixels, the four that read
 only `collected` did not). They were replaced by last night's, byte for byte. **Do not trust a figure drawn from
 `battery_draws/` while a stage is writing it.**
+
+## 2026-10-09, later — dead code, dead data and dead figures
+
+**His words:** *"There are old data and also old figures left after the last modification of the code. All this
+has to be cleaned up. I do NOT want dead code, dead data and dead figures!!"* The entry above says "the old
+folder is not touched", which is how it started. I listed what was dead, item by item with the evidence, and he
+said yes to all of it. RAWCLICRecoveryModel's handover of the same date has that repository's part.
+
+**Code, removed in this commit.** "Dead" is a scan of every Python file in `code/` and `src/` for a loaded name,
+an attribute, a keyword argument, an imported name or a short string that matches, a function's own recursion
+discounted, repeated until nothing was left. Then, on a scratch clone and not in the folder his run reads: every
+file compiled, every module of `src/` imported, `Params()` built and validated, no module reading a name nothing
+defines, and the two code-only checks run (`test_battery_seeds.py` 9 of 9, `test_stage04_03_export.py` 9 of 9).
+
+- `src/archive/`: three old copies of `params_schema.py`. Nothing imported them.
+- **51 functions, classes and methods that nothing called:** 16 in `plotting.py` (all but its three flow plots),
+  9 in `flowdriven_model.py`, 4 in `materials.py` (it keeps one helper), 12 in `monte_carlo.py` (the `Fixed`,
+  `Uniform`, `Normal` and `Empirical` distributions, the path sampler and the histogram plot; it keeps
+  `Triangular` and the summaries), 3 in `disaggregation.py`, and seven singles: `warp_bev_transition_all_segments`,
+  `percentiles`, `_resolve_entity_param`, and in the stages `build_segment_stock_table`, `make_shades`,
+  `bootstrap_composition_draws` and `fig_element_total`. Four constants, 18 unused import names and the docstrings
+  that described all of it went with them.
+- **14 settings that nothing read.** `00_parameters.py` wrote them to the saved file and `PARAMETER_REFERENCE.md`
+  told people they were safe to change: `data_prep.composition_extend_from_year`, `accelerating_year`,
+  `target_class_detail`, `attribute_list`, `key_names`; `disaggregation.synthetic_eea_seed` (the generator is
+  called with a literal 42); `materials.average_battery_capacity_kwh`, `bev_electronics_standard_fleet_weighted`,
+  `material_level_key`, `material_mc_time_resolution`; and `monte_carlo.stockflow_n_draws`, `stockflow_seed`,
+  `stockflow_lifetime_spread`, `stockflow_share_spread`, the settings of a standalone script that is not in the
+  repository. Five of them were validated and never used. Two looked like the seed of something and were not.
+  `PARAMETER_REFERENCE.md` is regenerated: **156 parameters, not 170.** The saved parameter file of 10-08 still
+  carries the 14; nothing reads them, so nothing needs `00_parameters.py` to be pressed again for this.
+- 11 names of the artifact registry that no stage saves or loads: `stock_2005`, `composition_extended`,
+  `ev_share_long`, `bev_surv_outflow`, `mass_by_year_elem_dict`, `combined`, `ratio_df`, `stock_disagg_df`,
+  `export_prob_by_age_drv`, `tracker_keyed_new` and `EXPORT_SHARE_BY_DRV`, with its open question.
+
+**Data and figures: approved, and done when his 04_04 has ended.** That run started at 09:04 and writes
+`battery_draws/`, the export and `figures/`, so nothing in them is touched while it runs: the 36 old `Na_ion*`
+files in `battery_draws/` (8.8 GB), `data/processed/figures/` (the 104 figures that are also in `figures/`,
+18 MB) and the 17 `... 2.png` older versions (09-01) of the 04_02 figures that are in both. The old files are
+named by exact name: `Na_ion*` also matches the two live sodium cells.
+
+**The run of 06:24 that ended at 07:19** was stopped by him to switch the computer off. An earlier entry called it a
+run he had not started; it was not a stray. It had rewritten the inflow before it stopped, which is why the export
+was a mixture until the run of 09:04 replaced it.
+
+**Not removed, his call.** `data/processed/battery_recovery_draws/` (2.8 GB) is read by RAWCLICRecoveryModel's
+`data/battery`, which is still in its `combine.cases`. Stage 04_03 writes the grades `EH`, `SH` and `UH` (680 MB)
+that the recovery model never reads; it reads `mix`. `code/test_04_04_figures.py` and
+`code/proof_0403_vehicle_draws.py`, and `documentation/superseded/`. And **seven functions take parameters they
+never read**, the largest `run_flow_driven_model_with_outflow_disaggregation` with six (`age_bins`,
+`export_rate`, `export_total_by_year`, `outflow_value_col`, `segment_shares_by_drv`, `allowed_export_segments`);
+removing them changes signatures and the stages that pass them.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 

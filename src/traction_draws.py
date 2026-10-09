@@ -152,13 +152,6 @@ class DrawLibrary:
         return float(match["scale"].iloc[0])
 
 
-def percentiles(draws: np.ndarray) -> tuple[float, float, float]:
-    """Mean, p025 and p975 of one draw vector -- percentiles OF a distribution."""
-    return (float(np.mean(draws)),
-            float(np.percentile(draws, 2.5)),
-            float(np.percentile(draws, 97.5)))
-
-
 # ======================================================================
 # THE DETERMINISTIC SIDE
 # ======================================================================

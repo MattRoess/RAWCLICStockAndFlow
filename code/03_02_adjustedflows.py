@@ -51,7 +51,7 @@ across that boundary rather than resampling independently -- see
 
 `lifetime_scale_lambda_relative_spread` can be passed as EITHER a single
 float (a "general" scenario -- the same uncertainty spread applied to every
-drivetrain, e.g. `params.monte_carlo.stockflow_lifetime_spread`'s 0.15) OR a
+drivetrain, e.g. 0.15) OR a
 dict keyed by drivetrain (a "specific" scenario -- e.g. "BEV's lifetime is
 far less certain than Diesel's"), so both kinds of scenario can be modeled
 without touching the engine. This stage defaults to the per-drivetrain dict
@@ -157,8 +157,6 @@ from __future__ import annotations
 
 import sys
 import time
-import math
-import importlib
 from pathlib import Path
 from typing import Any
 
@@ -167,8 +165,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")  # never opens an interactive window -- always saves to file
 import matplotlib.pyplot as plt
-from matplotlib.colors import to_rgb
-from matplotlib.patches import Patch
 
 
 def _find_project_root(start: Path) -> Path:

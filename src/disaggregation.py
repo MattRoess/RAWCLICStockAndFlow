@@ -23,7 +23,7 @@ Previously, THREE different (and mutually inconsistent) formulas existed for
   - `split_liquids_outflows_afterwards`: `out_survival + out_export` (2-term, missing
     out_unknown -- a third, independently wrong variant)
   - `split_hybrid_flows_afterwards` / `split_liquids_flows_afterwards` (both dead code,
-    never called by either notebook): same 2-term formula as above
+    never called by either notebook, removed 2026-10-09): same 2-term formula as above
 
 Using the real `00_parameters.py` shares, the resulting `out_total` in the persisted
 `matrices_by_key` artifact was inflated by +8% to +51% depending on drivetrain (see Fix
@@ -723,84 +723,6 @@ def split_hybrid_outflows_afterwards(
     matrices_by_key.update(out)
 
 
-def split_hybrid_flows_afterwards(
-    matrices_by_key: dict,
-    split_hp: pd.DataFrame,
-    region: str = "EUR",
-    base_drv: str = "Hybrid",
-    keep_original: bool = True,
-) -> None:
-    # CONFIRMED NEVER CALLED by either 03_01_flowdriven.py or 03_02_adjustedflows.py --
-    # both notebooks import and use split_hybrid_inflow_afterwards +
-    # split_hybrid_outflows_afterwards instead. This function appears to be an
-    # alternative/superseded single-call combined version (it also has a `keep_original`
-    # flag to remove the "Hybrid" parent key after splitting -- something neither called
-    # function does, meaning "Hybrid" and "Liquids" currently remain in matrices_by_key
-    # alongside their HEV/PHEV and Diesel/Petrol children; see the consolidated review
-    # for the double-counting risk this creates in plotting.py's age-statistics
-    # functions). Its own out_total formula (`out_survival + out_export`, 2-term) is yet
-    # a FOURTH variant, differing from all three call sites actually in use -- moot
-    # since this function is dead code, but illustrates the same underlying confusion
-    # about what "out_total" should mean recurring across the file.
-    base_key = (region, base_drv)
-    if base_key not in matrices_by_key:
-        raise KeyError(f"Missing {base_key} in matrices_by_key.")
-
-    base = matrices_by_key[base_key]
-    years = base["flows_df"].index
-    split_hp = split_hp.reindex(years).ffill().bfill().fillna(0.0)
-
-    def _scale_outflow_by_cohort(matrix_df: pd.DataFrame, share_by_year: pd.Series) -> pd.DataFrame:
-        cohort_year = pd.to_numeric(pd.Index(matrix_df.columns), errors="coerce")
-        col_shares = share_by_year.reindex(cohort_year).ffill().bfill().fillna(0.0).to_numpy(dtype=float)
-        return matrix_df.mul(col_shares, axis=1)
-
-    out = {}
-    for sub in (children if children is not None else ["HEV", "PHEV"]):
-        s = split_hp[sub]
-        mats_sub = {}
-        for name in ["outflow_coll_df", "outflow_exp_df", "outflow_unk_df", "outflow_surv_df"]:
-            if name in base:
-                mats_sub[name] = _scale_outflow_by_cohort(base[name], s)
-
-        flows_sub = base["flows_df"].copy()
-
-        if "inflow" in flows_sub.columns:
-            flows_sub["inflow"] = flows_sub["inflow"].mul(s, axis=0)
-
-        if "outflow_surv_df" in mats_sub and "out_survival" in flows_sub.columns:
-            flows_sub["out_survival"] = mats_sub["outflow_surv_df"].sum(axis=1)
-        elif "out_survival" in flows_sub.columns:
-            flows_sub["out_survival"] = flows_sub["out_survival"].mul(s, axis=0)
-
-        if "outflow_exp_df" in mats_sub and "out_export" in flows_sub.columns:
-            flows_sub["out_export"] = mats_sub["outflow_exp_df"].sum(axis=1)
-        elif "out_export" in flows_sub.columns:
-            flows_sub["out_export"] = flows_sub["out_export"].mul(s, axis=0)
-
-        if "outflow_unk_df" in mats_sub and "out_unknown" in flows_sub.columns:
-            flows_sub["out_unknown"] = mats_sub["outflow_unk_df"].sum(axis=1)
-        elif "out_unknown" in flows_sub.columns:
-            flows_sub["out_unknown"] = flows_sub["out_unknown"].mul(s, axis=0)
-
-        if "outflow_coll_df" in mats_sub and "out_collected" in flows_sub.columns:
-            flows_sub["out_collected"] = mats_sub["outflow_coll_df"].sum(axis=1)
-        elif "out_collected" in flows_sub.columns:
-            flows_sub["out_collected"] = flows_sub["out_collected"].mul(s, axis=0)
-
-        if "out_total" in flows_sub.columns and {"out_survival", "out_export"}.issubset(flows_sub.columns):
-            flows_sub["out_total"] = flows_sub["out_survival"]  # [FIXED, resolves C9]
-        elif "out_total" in flows_sub.columns:
-            flows_sub["out_total"] = flows_sub["out_total"].mul(s, axis=0)
-
-        mats_sub["flows_df"] = flows_sub
-        out[(region, sub)] = mats_sub
-
-    matrices_by_key.update(out)
-    if not keep_original:
-        matrices_by_key.pop(base_key, None)
-
-
 def build_segment_share_wide(segment_shares_ext: pd.DataFrame) -> dict[str, pd.DataFrame]:
     seg_wide: dict[str, pd.DataFrame] = {}
     for drv, group in segment_shares_ext.groupby("Drive Train"):
@@ -1018,95 +940,6 @@ def split_liquids_outflows_afterwards(
     matrices_by_key.update(out)
 
 
-def split_liquids_flows_afterwards(
-    matrices_by_key: dict,
-    liquids_split: pd.DataFrame,
-    region: str = "EUR",
-    base_drv: str = "Liquids",
-    keep_original: bool = True,
-) -> None:
-    # CONFIRMED NEVER CALLED, same situation as split_hybrid_flows_afterwards above --
-    # split_liquids_inflow_afterwards + split_liquids_outflows_afterwards are the
-    # functions actually imported and used.
-    base_key = (region, base_drv)
-    if base_key not in matrices_by_key:
-        raise KeyError(f"Missing {base_key} in matrices_by_key.")
-
-    base = matrices_by_key[base_key]
-    years = base["flows_df"].index
-    split = liquids_split.reindex(years).ffill().bfill().fillna(0.0)
-
-    def _scale_outflow_by_cohort(matrix_df: pd.DataFrame, share_by_year: pd.Series) -> pd.DataFrame:
-        cohort_year = pd.to_numeric(pd.Index(matrix_df.columns), errors="coerce")
-        col_shares = share_by_year.reindex(cohort_year).ffill().bfill().fillna(0.0).to_numpy(dtype=float)
-        return matrix_df.mul(col_shares, axis=1)
-
-    out = {}
-    for fuel in (children if children is not None else ["Diesel", "Petrol"]):
-        if fuel not in split.columns:
-            continue
-
-        s = split[fuel]
-        mats_sub = {}
-        for name in ["outflow_coll_df", "outflow_exp_df", "outflow_unk_df", "outflow_surv_df"]:
-            if name in base:
-                mats_sub[name] = _scale_outflow_by_cohort(base[name], s)
-
-        flows_sub = base["flows_df"].copy()
-
-        if "inflow" in flows_sub.columns:
-            flows_sub["inflow"] = flows_sub["inflow"].mul(s, axis=0)
-
-        if "outflow_surv_df" in mats_sub and "out_survival" in flows_sub.columns:
-            flows_sub["out_survival"] = mats_sub["outflow_surv_df"].sum(axis=1)
-        elif "out_survival" in flows_sub.columns:
-            flows_sub["out_survival"] = flows_sub["out_survival"].mul(s, axis=0)
-
-        if "outflow_exp_df" in mats_sub and "out_export" in flows_sub.columns:
-            flows_sub["out_export"] = mats_sub["outflow_exp_df"].sum(axis=1)
-        elif "out_export" in flows_sub.columns:
-            flows_sub["out_export"] = flows_sub["out_export"].mul(s, axis=0)
-
-        if "outflow_unk_df" in mats_sub and "out_unknown" in flows_sub.columns:
-            flows_sub["out_unknown"] = mats_sub["outflow_unk_df"].sum(axis=1)
-        elif "out_unknown" in flows_sub.columns:
-            flows_sub["out_unknown"] = flows_sub["out_unknown"].mul(s, axis=0)
-
-        if "outflow_coll_df" in mats_sub and "out_collected" in flows_sub.columns:
-            flows_sub["out_collected"] = mats_sub["outflow_coll_df"].sum(axis=1)
-        elif "out_collected" in flows_sub.columns:
-            flows_sub["out_collected"] = flows_sub["out_collected"].mul(s, axis=0)
-
-        if "out_total" in flows_sub.columns and {"out_survival", "out_export"}.issubset(flows_sub.columns):
-            flows_sub["out_total"] = flows_sub["out_survival"]  # [FIXED, resolves C9]
-        elif "out_total" in flows_sub.columns:
-            flows_sub["out_total"] = flows_sub["out_total"].mul(s, axis=0)
-
-        mats_sub["flows_df"] = flows_sub
-
-        out[(region, fuel)] = mats_sub
-
-    matrices_by_key.update(out)
-    if not keep_original:
-        matrices_by_key.pop(base_key, None)
-
-
-def alloc_matrix_yearwise(matrix_df: pd.DataFrame, share_wide: pd.DataFrame) -> pd.DataFrame:
-    share_wide = share_wide.reindex(matrix_df.index).ffill().bfill().fillna(0.0)
-    out_parts = []
-    for seg in share_wide.columns:
-        scaled = matrix_df.mul(share_wide[seg], axis=0)
-        long = (
-            scaled.stack()
-            .rename("value")
-            .reset_index()
-            .rename(columns={"level_0": "year", "level_1": "cohort_year"})
-        )
-        long["Segment"] = seg
-        out_parts.append(long)
-    return pd.concat(out_parts, ignore_index=True)
-
-
 def alloc_matrix_cohort_yearwise(matrix_df: pd.DataFrame, share_wide: pd.DataFrame) -> pd.DataFrame:
     # NOTE (positive finding): outflow matrices are allocated to segments using the
     # segment-share profile AT THE COHORT'S VINTAGE YEAR (via `cohort_year =
@@ -1196,7 +1029,6 @@ def disaggregate_model_to_segments(
         "outflow_unk_segments": pd.concat(outflow_unk_parts, ignore_index=True) if outflow_unk_parts else pd.DataFrame(),
         "inflow_segments": pd.concat(inflow_parts, ignore_index=True) if inflow_parts else pd.DataFrame(),
     }
-
 
 
 def build_tracker_from_disaggregated(

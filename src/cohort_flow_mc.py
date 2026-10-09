@@ -77,7 +77,7 @@ UNCERTAINTY CONVENTION
     across the board") OR as a dict keyed by entity (a "specific" scenario,
     e.g. "BEV lifetime is far more uncertain than Diesel's"). See
     `resolve_lifetime_spread`/`as_spread_pair`.
-  - Destination shares vary per draw via `monte_carlo.Normal(point, std)`
+  - Destination shares vary per draw as a Normal(point, std)
     clipped to [0, 1] -- matches `params_schema.py`'s `unknown_whereabouts_
     share_std` / `export_share_std` convention. If two shares for the same
     entity would sum to more than 1 for a given draw, both are rescaled down
@@ -85,22 +85,14 @@ UNCERTAINTY CONVENTION
     for the 2-share case used today -- generalizing to N shares that must
     jointly sum to <=1 would need a different sampling scheme, e.g. a
     Dirichlet, if a future product needs more than 2 named destination flows).
-  - Both distributions are this project's OWN `monte_carlo.Triangular` /
-    `monte_carlo.Normal` classes (imported, not reimplemented) -- `monte_carlo.
-    py` is itself explicitly product-agnostic, so reusing it here doesn't
-    couple this module to anything vehicle-specific, and keeps exactly one
-    implementation of each distribution's sampling math in the codebase.
-    NOTE: `monte_carlo.sample_scalars()` is NOT used here even though it looks
-    like the obvious fit -- it takes a plain `int` seed internally (builds its
-    own `np.random.SeedSequence(seed)`), which can't accept an already-spawned
-    `SeedSequence` as input. This module needs exactly that: a multi-level
-    spawn hierarchy (scenario -> group -> entity, established by callers like
-    `03_02_adjustedflows.py`) so every level's draws are independently seeded
-    without correlation. `Triangular`/`Normal(...).sample(rng, n=...)` are
-    called directly instead, with `rng` built from a spawned child
-    `SeedSequence` -- same distribution classes, just composed into the
-    existing seed hierarchy rather than through the top-level convenience
-    wrapper that assumes it owns the whole seed tree itself.
+  - The lifetime draws use this project's OWN `monte_carlo.Triangular` class
+    (imported, not reimplemented) -- `monte_carlo.py` is itself explicitly
+    product-agnostic, so reusing it here doesn't couple this module to anything
+    vehicle-specific. `Triangular(...).sample(rng, n=...)` is called directly,
+    with `rng` built from a spawned child `SeedSequence`: this module needs a
+    multi-level spawn hierarchy (scenario -> group -> entity, established by
+    callers like `03_02_adjustedflows.py`) so every level's draws are
+    independently seeded without correlation.
 
 PER-DRAW INFLOW OVERRIDE (opt-in, off by default)
 ---------------------------------------------------
@@ -136,11 +128,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-# Reuses this project's own generic distribution primitives (`Triangular`,
-# `Normal`) instead of reimplementing the sampling math here -- `monte_carlo.py`
-# is itself explicitly product-agnostic (see its own module docstring), so this
-# is "product-agnostic library A depends on product-agnostic library B for its
-# distribution primitives", not a coupling to anything vehicle-specific.
+# Reuses this project's own distribution primitive (`Triangular`) instead of
+# reimplementing the sampling math here -- `monte_carlo.py` is itself explicitly
+# product-agnostic (see its own module docstring), so this is "product-agnostic
+# library A depends on product-agnostic library B for its distribution
+# primitive", not a coupling to anything vehicle-specific.
 import src.monte_carlo as _monte_carlo
 
 # A lifetime relative-spread specification: a single float (symmetric), a
@@ -171,29 +163,6 @@ def _weibull_hazard_vec(shape_k: np.ndarray, scale_lambda: np.ndarray, max_age: 
     hazard[:, :-1] = np.where(valid, 1.0 - ratio, 0.0)
     hazard[:, -1] = 1.0
     return np.clip(hazard, 0.0, 1.0)
-
-
-def _resolve_entity_param(
-    value: float | dict[str, float] | None, entity: str, default: float = 0.0
-) -> float:
-    """
-    Resolve a parameter that may be given EITHER as a single scalar (applied
-    uniformly to every entity -- a "general" scenario, e.g. "assume 15%
-    lifetime uncertainty across the board") OR as a dict keyed by entity (a
-    per-entity value -- a "specific" scenario, e.g. "BEV lifetime is much more
-    uncertain than Diesel's"). A dict missing some entities falls back to
-    `default` for those. This lets callers switch between a quick general-
-    uncertainty run and a detailed per-entity one without changing which
-    sampling code path runs -- only which value(s) they pass in.
-
-    Used for SYMMETRIC parameters only (e.g. share stds). For the lifetime
-    spread, which can be asymmetric, see `resolve_lifetime_spread` below.
-    """
-    if value is None:
-        return default
-    if isinstance(value, dict):
-        return float(value.get(entity, default))
-    return float(value)
 
 
 def as_spread_pair(value) -> tuple[float, float]:
@@ -235,9 +204,8 @@ def resolve_lifetime_spread(
 ) -> tuple[float, float]:
     """
     Resolve the lifetime relative-spread specification for one entity into a
-    `(lower_spread, upper_spread)` pair. Same general/per-entity dual mode as
-    `_resolve_entity_param`, but each resolved value can ALSO be asymmetric
-    (see `as_spread_pair`):
+    `(lower_spread, upper_spread)` pair. A general/per-entity dual mode, and
+    each resolved value can ALSO be asymmetric (see `as_spread_pair`):
       - `None` -> `default` (no uncertainty)
       - a single float `s`, or an asymmetric spread object/tuple, applied
         uniformly to every entity (a "general" scenario)

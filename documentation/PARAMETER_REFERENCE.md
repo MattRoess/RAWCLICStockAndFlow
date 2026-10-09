@@ -8,7 +8,7 @@ Regenerate with:
 .venv/bin/python code/generate_parameter_reference.py
 ```
 
-Covers all **170** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
+Covers all **156** parameters. It is generated precisely because the previous hand-written reference described 46 of them and silently omitted two entire pipeline stages.
 
 ## How to change a parameter
 
@@ -30,12 +30,12 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 
 ## Sections
 
-- [Stage 01 — Data preparation](#stage-01-data-preparation) — `DataPrepParams`, 32 parameters
+- [Stage 01 — Data preparation](#stage-01-data-preparation) — `DataPrepParams`, 27 parameters
 - [Stage 02 — Stock-driven flows](#stage-02-stock-driven-flows) — `StockFlowParams`, 26 parameters
-- [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 11 parameters
+- [Stage 03_01 — Disaggregation](#stage-03_01-disaggregation) — `DisaggregationParams`, 10 parameters
 - [Stage 03_02 — Adjusted flows / scenarios](#stage-03_02-adjusted-flows-scenarios) — `AdjustedFlowsParams`, 7 parameters
-- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 59 parameters
-- [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 9 parameters
+- [Stage 04 — Materials, car composition, BEV electronics](#stage-04-materials-car-composition-bev-electronics) — `MaterialsParams`, 55 parameters
+- [Monte Carlo — cross-cutting](#monte-carlo-cross-cutting) — `MonteCarloParams`, 5 parameters
 - [Shared building block](#shared-building-block) — `AsymmetricSpread`, 2 parameters
 - [Shared building block](#shared-building-block) — `WeibullLifetime`, 2 parameters
 - [Shared building block](#shared-building-block) — `LifetimeOverride`, 4 parameters
@@ -52,7 +52,7 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 
 > The very first stage: reads the raw REMIND fleet projections and the trade data, trims them to Europe, fills in the years REMIND does not supply, and hands a clean fleet trajectory to stage 02. The setting that matters most here is `scenario` -- it decides which possible future the entire pipeline is built on.
 
-**32 parameters.**
+**27 parameters.**
 
 | parameter | default |
 |---|---|
@@ -63,8 +63,6 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 | `end_year_model` | `2070` |
 | `start_year_plotting` | `2015` |
 | `end_year_plotting` | `2070` |
-| `composition_extend_from_year` | `2050` |
-| `accelerating_year` | `2026` |
 | `threshold` | `1e-4` |
 | `prefix` | `"Stock|Transport|Pass|Road|LDV"` |
 | `eu_countries` | `( "Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czech Republic", "Denmark", "...` |
@@ -78,9 +76,6 @@ For how the model actually works, and why defaults are what they are, see `MODEL
 | `pre2015_history_target_scenarios` | `("ssp2L", "ssp2M", "ssp1")` |
 | `pre2015_history_donor_scenarios` | `("b650", "npi25")` |
 | `pre2015_history_splice_year` | `2015` |
-| `target_class_detail` | `( "Large Car and SUV", "Van", "Compact Car", "Midsize Car", "Mini Car", "Subcompact Car...` |
-| `attribute_list` | `("Region", "technology")` |
-| `key_names` | `("Region", "Drivetrain")` |
 | `input_dir` | `"../data/raw/"` |
 | `output_dir` | `"../data/processed/"` |
 | `export_data_file_name` | `"usedvehicles_v1.2.xlsx"` |
@@ -159,23 +154,6 @@ Default: `2070`
 
 The first and last year drawn on this stage's charts. Display only -- the model
 still computes the full range above.
-SAFE TO CHANGE: yes.
-
-
-### `composition_extend_from_year`
-
-Default: `2050`
-
-From this year onward, vehicle composition is held constant at its last known
-value -- nobody has credible material-composition forecasts beyond it.
-SAFE TO CHANGE: yes, but pushing it later means inventing composition trends.
-
-
-### `accelerating_year`
-
-Default: `2026`
-
-The year from which the model applies the accelerated fleet-turnover assumption.
 SAFE TO CHANGE: yes.
 
 
@@ -296,30 +274,6 @@ Default: `2015`
 The year where borrowed history stops and each scenario's own data takes over.
 SAFE TO CHANGE: yes, but it must match where the donor data actually ends, or the
 join leaves a visible step in the fleet curve.
-
-
-### `target_class_detail`
-
-Default: `( "Large Car and SUV", "Van", "Compact Car", "Midsize Car", "Mini Car", "Subcompact Car...`
-
-The vehicle size classes used in the source data, before they are mapped onto
-this model's A-F / JA-JF segments.
-SAFE TO CHANGE: no, unless the source data changes its class names.
-
-
-### `attribute_list`
-
-Default: `("Region", "technology")`
-
-Which columns of the REMIND data identify a row, and what to call them here.
-SAFE TO CHANGE: no, unless the source format changes.
-
-
-### `key_names`
-
-Default: `("Region", "Drivetrain")`
-
-*Explained in the description of `DataPrepParams` at the top of this section.*
 
 
 ### `input_dir`
@@ -797,7 +751,7 @@ SAFE TO CHANGE: yes. 0 reproduces the older, uncoupled behaviour.
 
 `DisaggregationParams` in `src/params_schema.py` — read by code/03_01_flowdriven.py.
 
-**11 parameters.**
+**10 parameters.**
 
 | parameter | default |
 |---|---|
@@ -808,7 +762,6 @@ SAFE TO CHANGE: yes. 0 reproduces the older, uncoupled behaviour.
 | `year_plot_start` | `2015` |
 | `year_plot_end` | `2070` |
 | `use_synthetic_eea_fallback` | `False` |
-| `synthetic_eea_seed` | `42` |
 | `introduction_year_by_drv` | `{ "BEV": 2011, "HEV": 2000, "PHEV": 2012, }` |
 | `hev_carved_from_liquids` | `True` |
 | `hev_share_phaseout_end_year` | `2035` |
@@ -903,15 +856,6 @@ Set to True ONLY as a temporary bridge when that file is missing and you want to
 check the rest of the pipeline runs. The stage then generates a clearly labelled
 SYNTHETIC placeholder instead of stopping with an error.
 SAFE TO CHANGE: yes -- but never report numbers produced with this set to True.
-
-
-### `synthetic_eea_seed`
-
-Default: `42`
-
-Fixes the random numbers used to generate that stand-in data, so the placeholder
-is at least reproducible. Irrelevant while the setting above is False.
-SAFE TO CHANGE: yes, any whole number.
 
 
 ### `introduction_year_by_drv`
@@ -1111,7 +1055,7 @@ nothing else; the stage discovers it automatically. A misspelled name in
 
 > Turns vehicles into materials: how much steel, aluminium, copper, battery chemistry and so on the fleet contains, and therefore how much becomes available for recovery when those vehicles are scrapped. Most settings here point at the workbooks holding composition data, or translate between this model's names and the codes used inside those files. The ones that genuinely change results are the battery sizes and the choice of detail level.
 
-**59 parameters.**
+**55 parameters.**
 
 | parameter | default |
 |---|---|
@@ -1120,7 +1064,6 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `region` | `"EUR"` |
 | `drivetrains` | `("BEV", "HEV", "PHEV", "Diesel", "Petrol")` |
 | `composition_parameter_code` | `"m-c"` |
-| `material_level_key` | `"materialKeyLevel_highest"` |
 | `traction_composition_dir` | `"/Users/rm/Library/Mobile Documents/com~apple~CloudDocs/Documents/GitHub/" "RAWCLICVehi...` |
 | `traction_composition_file_name` | `"TractionMotor_for_stockandflow.xlsx"` |
 | `traction_type_shares` | `default_factory=lambda: { "AB": { 2010: {"PMSM": 91, "EESM": 5, "ASM": 4, "axial": 0, "...` |
@@ -1151,12 +1094,10 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `battery_recovery_years` | `tuple(range(2020, 2071, 5))` |
 | `battery_chemistry_share_spread` | `{ "min": 0.70, "mode": 1.00, "max": 1.30, }` |
 | `battery_chemistry_share_spread_years` | `(2020, 2070)` |
-| `average_battery_capacity_kwh` | `60.0` |
 | `composition_summary_file_name` | `"36_MonteCarlo_Summary.xlsx"` |
 | `composition_scalar_statistic` | `"mean"` |
 | `histogram_file_name` | `"37_MonteCarlo_Histograms.xlsx"` |
 | `histogram_sheet_names_by_drv` | `{ "Petrol": ["componentCarPetrol"], "Diesel": ["componentCarDiesel"], "BEV": ["componen...` |
-| `material_mc_time_resolution` | `"period"` |
 | `materials_mc_n_draws` | `200_000` |
 | `materials_mc_seed` | `42` |
 | `persist_mc_mass_draws` | `False` |
@@ -1164,7 +1105,6 @@ nothing else; the stage discovers it automatically. A misspelled name in
 | `bev_electronics_series` | `("Total", "Wiring", "Sensors", "PCB", "Motors")` |
 | `bev_electronics_segment_pairs` | `( ("AB", "A", "B"), ("CD", "C", "D"), ("EF", "E", "F"), )` |
 | `bev_electronics_segment_tilt` | `0.2` |
-| `bev_electronics_standard_fleet_weighted` | `True` |
 | `bev_electronics_year_min` | `2020` |
 | `bev_electronics_year_max` | `2070` |
 | `bev_electronics_element_draws_dir` | `"../../RAWCLICVehicleElectronics/Composition/element_draws"` |
@@ -1221,14 +1161,6 @@ Which level of detail to read from the car-composition file:
 "m-c"  material per component  (current -- what this project needs)
 "e-m"  individual chemical elements (finer, much larger)
 SAFE TO CHANGE: yes, but "m-c" is the level the rest of this analysis assumes.
-
-
-### `material_level_key`
-
-Default: `"materialKeyLevel_highest"`
-
-Which column in the composition file holds the material name to group by.
-SAFE TO CHANGE: no, unless the file's own column naming changes.
 
 
 ### `traction_composition_dir`
@@ -1808,14 +1740,6 @@ the full spread above. Linear between.
 SAFE TO CHANGE: yes. The first year is "what we can see now".
 
 
-### `average_battery_capacity_kwh`
-
-Default: `60.0`
-
-Fallback battery size used when a vehicle's segment is unknown.
-SAFE TO CHANGE: yes. Ideally it stays near the middle of the map above.
-
-
 ### `composition_summary_file_name`
 
 Default: `"36_MonteCarlo_Summary.xlsx"`
@@ -1851,17 +1775,6 @@ Default: `{ "Petrol": ["componentCarPetrol"], "Diesel": ["componentCarDiesel"], 
 Which sheet inside that workbook belongs to which drivetrain.
 SAFE TO CHANGE: only if the workbook's sheet names change. A wrong name here
 means the material composition of the wrong vehicle type is used.
-
-
-### `material_mc_time_resolution`
-
-Default: `"period"`
-
-How finely material results are reported over time:
-"period"  one figure per reporting window  (current -- far smaller and faster)
-"year"    a figure for every single year   (much larger, much slower)
-SAFE TO CHANGE: yes, but "year" combined with 200,000 draws produces very large
-files -- the existing per-scenario ones already run to several GB.
 
 
 ### `materials_mc_n_draws`
@@ -1997,18 +1910,6 @@ drifts is visible rather than assumed.
 
 SAFE TO CHANGE: yes -- this is the dial you are most likely to adjust. Any
 value from 0 up to the ceiling described above.
-
-
-### `bev_electronics_standard_fleet_weighted`
-
-Default: `True`
-
-The "standard" case: one average BEV rather than twelve segment-specific
-ones, built as a mixture across A-F so it comes out as a full
-distribution, not a single number.
-True  -- weight each segment by how many vehicles are actually in it
-False -- weight all six equally
-SAFE TO CHANGE: yes.
 
 
 ### `bev_electronics_year_min`
@@ -2249,17 +2150,13 @@ SAFE TO CHANGE: yes.
 
 > Settings for the uncertainty analysis, shared by every stage that runs one. Turning this off does not change any stage's ordinary single-run results -- it only decides whether the stages ALSO do the extra uncertainty pass on top.
 
-**9 parameters.**
+**5 parameters.**
 
 | parameter | default |
 |---|---|
 | `enabled` | `True` |
 | `n_draws` | `200000` |
 | `seed` | `42` |
-| `stockflow_n_draws` | `200_000` |
-| `stockflow_seed` | `42` |
-| `stockflow_lifetime_spread` | `0.15` |
-| `stockflow_share_spread` | `0.15` |
 | `chunk_size` | `20_000` |
 | `output_periods` | `default_factory=lambda: [(1975, 2070)]` |
 
@@ -2294,62 +2191,6 @@ Fixes the random numbers, so re-running reproduces identical results.
 SAFE TO CHANGE: yes, any whole number. Change it only if you deliberately want a
 different random sample. Setting it to None gives a different sample every run,
 which makes results non-reproducible -- avoid that for anything you report.
-
-
-### `stockflow_n_draws`
-
-Default: `200_000`
-
----- Separate budget for the standalone stock-and-flow uncertainty script -----
-`mc_stockflow_uncertainty.py` varies lifetime, unknown-whereabouts share and
-export share for every drivetrain at once. It has its OWN draw count and seed so
-that running a quick demo elsewhere can never accidentally start a 200,000-draw
-job here.
-SAFE TO CHANGE: yes -- same meaning as `n_draws` / `seed` above.
-
-
-### `stockflow_seed`
-
-Default: `42`
-
-*Documented together with the parameter(s) above it:*
-
----- Separate budget for the standalone stock-and-flow uncertainty script -----
-`mc_stockflow_uncertainty.py` varies lifetime, unknown-whereabouts share and
-export share for every drivetrain at once. It has its OWN draw count and seed so
-that running a quick demo elsewhere can never accidentally start a 200,000-draw
-job here.
-SAFE TO CHANGE: yes -- same meaning as `n_draws` / `seed` above.
-
-
-### `stockflow_lifetime_spread`
-
-Default: `0.15`
-
-How wide the uncertainty is for that standalone script, as a fraction:
-0.15 means "give or take 15%".
-lifetime spread -> Triangular(base x 0.85, base, base x 1.15)
-share spread    -> Normal(base, base x 0.15), kept within 0-1
-IMPORTANT: these two are PLACEHOLDERS. They are not measured uncertainties -- no
-real ones have been supplied. Replace them once you have real ranges; everything
-downstream works identically whatever the numbers are.
-SAFE TO CHANGE: yes. Each must stay above 0 and below 1.
-
-
-### `stockflow_share_spread`
-
-Default: `0.15`
-
-*Documented together with the parameter(s) above it:*
-
-How wide the uncertainty is for that standalone script, as a fraction:
-0.15 means "give or take 15%".
-lifetime spread -> Triangular(base x 0.85, base, base x 1.15)
-share spread    -> Normal(base, base x 0.15), kept within 0-1
-IMPORTANT: these two are PLACEHOLDERS. They are not measured uncertainties -- no
-real ones have been supplied. Replace them once you have real ranges; everything
-downstream works identically whatever the numbers are.
-SAFE TO CHANGE: yes. Each must stay above 0 and below 1.
 
 
 ### `chunk_size`

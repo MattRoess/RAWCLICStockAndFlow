@@ -4,29 +4,21 @@ stock_flow.py
 
 **Copyright notice:** Copyright © 2026 Empa, Matthias Roesslein
 
-Three utilities: `prepare_backcasting_state` (the pre-t0 cohort-age-structure
-reconstruction stage 02 depends on), and two optional manual scenario-exploration
-tools not currently wired into any pipeline stage: `warp_bev_transition_all_segments`
-(accelerates a BEV adoption curve) and `plot_bev_stock_compare_grouped` (visual
-scenario comparison).
+Two utilities: `prepare_backcasting_state` (the pre-t0 cohort-age-structure
+reconstruction stage 02 depends on) and `plot_bev_stock_compare_grouped` (visual
+scenario comparison). A third, `warp_bev_transition_all_segments` (accelerated a BEV
+adoption curve), was wired into no stage and was removed on 2026-10-09.
 
 FIXES APPLIED THIS ROUND
 --------------------------
 - **Import order** (L15-class issue): `import numpy as np` used to appear textually
-  AFTER `warp_bev_transition_all_segments`'s and `plot_bev_stock_compare_grouped`'s own
-  definitions. Not a runtime bug (Python resolves function-body names at call time, and
+  AFTER the definitions of `warp_bev_transition_all_segments` (since removed) and
+  `plot_bev_stock_compare_grouped`. Not a runtime bug (Python resolves function-body names at call time, and
   the whole module finishes importing before any external caller can invoke these
   functions) -- but moved to the top with the other imports for clarity and to remove
   any doubt.
-- **`warp_bev_transition_all_segments` no longer mutates its `stock_dict` argument in
-  place** (was M24 in the review). It now builds and returns a NEW dict, leaving the
-  caller's original untouched. This matters specifically for Monte Carlo / repeated
-  scenario exploration: a sampler calling this function many times against the same
-  base `stock_dict` must not have to worry about accumulated mutation from a previous
-  call, or about remembering to deep-copy first.
-- **Added input validation** to both `warp_bev_transition_all_segments` and
-  `plot_bev_stock_compare_grouped`: previously, calling either with no `warp_end_year`/
-  `end_year_plotting` (both default `None`) would fail deep inside with a confusing
+- **Added input validation** to `plot_bev_stock_compare_grouped`: previously, calling it
+  with no `end_year_plotting` (default `None`) would fail deep inside with a confusing
   `TypeError` from `int(None)`. Now raises a clear `ValueError` at the top of the
   function instead.
 - **`plot_bev_stock_compare_grouped` now returns `(fig, ax)`** instead of
@@ -58,102 +50,11 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
 
-def warp_bev_transition_all_segments(
-    stock_dict: dict[tuple[str, str], pd.DataFrame],
-    region: str = "EUR",
-    bev_label: str = "BEV",
-    accelerating_year: int = 2026,
-    warp_gamma: float = 0.6,
-    warp_end_year: int | None = None,
-    end_year_plotting: int | None = None,
-) -> dict[tuple[str, str], pd.DataFrame]:
-    """
-    Return a NEW stock_dict where the BEV share-of-total curve for `region` is
-    "warped" to front-load its rise: for years between `accelerating_year` and
-    `warp_end_year`, the BEV share at year t is replaced by the share the ORIGINAL
-    (unwarped) curve reaches at a later year `t_warp`, computed as:
-
-        u = (t - accelerating_year) / (warp_end_year - accelerating_year)   in [0, 1]
-        u_warp = u ** warp_gamma                                             (gamma < 1 -> front-loads)
-        t_warp = accelerating_year + u_warp * (warp_end_year - accelerating_year)
-        new_share(t) = original_share(t_warp)   (via linear interpolation)
-
-    `warp_gamma < 1` pulls later values earlier (front-loads the ramp); `warp_gamma > 1`
-    would back-load it. The warped share is floored at the original share
-    (`np.maximum`) so warping never produces a DIP below the unwarped curve. The
-    remaining (1 - BEV) share is redistributed across every other drivetrain in
-    proportion to their original relative shares, then converted back to absolute
-    stock using the original (unwarped) total.
-
-    Does NOT mutate `stock_dict` -- returns a new dict. Every drivetrain not present in
-    `region`, or if `bev_label` isn't one of `region`'s drivetrains, the function
-    returns a dict of unchanged copies (still new objects, still safe to mutate
-    independently of the input).
-
-    NOTE: `accelerating_year`, `warp_gamma`, `warp_end_year` are NOT currently sourced
-    from `params_schema.py` -- this function isn't wired into any pipeline stage yet
-    (per the original review's M23 finding). If/when it is, thread these from params
-    rather than relying on the defaults here, so there's one source of truth.
-    """
-    if warp_end_year is None:
-        warp_end_year = end_year_plotting
-    if warp_end_year is None:
-        raise ValueError(
-            "warp_bev_transition_all_segments: either warp_end_year or "
-            "end_year_plotting must be provided (both are None)."
-        )
-
-    keys = [k for k in stock_dict.keys() if k[0] == region]
-    if not keys:
-        return {k: v.copy() for k, v in stock_dict.items()}
-
-    drvs = sorted({k[1] for k in keys})
-    if bev_label not in drvs:
-        return {k: v.copy() for k, v in stock_dict.items()}
-
-    df = pd.concat({d: stock_dict[(region, d)]["stock"] for d in drvs}, axis=1).sort_index()
-    total = df.sum(axis=1)
-    shares = df.div(total.replace(0, np.nan), axis=0).fillna(0.0)
-    s = shares[bev_label].clip(0.0, 1.0).copy()
-
-    years = s.index.to_numpy(dtype=int)
-    ta = int(accelerating_year)
-    Te = int(min(warp_end_year, years.max()))
-
-    s_new = s.copy()
-    mask = (years >= ta) & (years <= Te)
-    if np.any(mask):
-        t = years[mask].astype(float)
-        u = (t - ta) / max(1.0, (Te - ta))
-        u_warp = np.power(u, float(warp_gamma))
-        t_warp = ta + u_warp * (Te - ta)
-        s_warp = np.interp(t_warp, years.astype(float), s.to_numpy())
-        s_new.loc[mask] = s_warp
-        s_new.loc[mask] = np.maximum(s_new.loc[mask], s.loc[mask])
-
-    others = [d for d in drvs if d != bev_label]
-    other_base = shares[others].sum(axis=1).replace(0, np.nan)
-    new_shares = shares.copy()
-    new_shares[bev_label] = s_new
-    for d in others:
-        new_shares[d] = (1.0 - s_new) * (shares[d] / other_base)
-    new_shares = new_shares.fillna(0.0)
-    new_df = new_shares.mul(total, axis=0)
-
-    # [FIXED] build a NEW dict rather than mutating stock_dict's values in place.
-    result: dict[tuple[str, str], pd.DataFrame] = {k: v.copy() for k, v in stock_dict.items()}
-    for d in drvs:
-        out = result[(region, d)].copy()
-        out["stock"] = new_df[d].to_numpy()
-        result[(region, d)] = out
-    return result
-
-
 def plot_bev_stock_compare_grouped(
     scenario_map: dict[str, pd.DataFrame],
     # [REMOVED, per user request] `bev_acc: pd.Series` -- the accelerated-BEV
     # reference curve this function used to plot as a black dashed line
-    # (previously sourced from `warp_bev_transition_all_segments`) -- gone,
+    # (previously sourced from `warp_bev_transition_all_segments`, since removed) -- gone,
     # along with all the drawing/legend code that rendered it. See
     # `selected_scenario` below for the replacement: this plot now marks
     # WHICH of the real scenarios is actually selected, instead of showing a

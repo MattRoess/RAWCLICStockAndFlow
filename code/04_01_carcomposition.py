@@ -44,9 +44,9 @@ SCOPE (confirmed with the user):
     combine_flow_and_composition_draws(direct=True)
     below, plus the comparison plots this enables (04_01_standard_vs_segments_*.png).
   - For now, only the FIRST available year's composition data per drivetrain is used
-    (temporal resolution is currently every 5 years; will become annual later). This is
-    controlled by `params.materials.material_mc_time_resolution` (currently only
-    "period" is implemented -- "annual"/"both" are placeholders for later).
+    (temporal resolution is currently every 5 years; will become annual later). Only
+    per-period results exist: a setting for a per-year resolution,
+    `material_mc_time_resolution`, was removed on 2026-10-09 because nothing read it.
   - Both a scalar path (point estimate, using `composition_scalar_statistic`, default
     "mean") and a fully vectorized Monte Carlo path (combining vehicle-count draws from
     stage 03_02 with composition draws bootstrapped from the histogram file) must work.
@@ -54,12 +54,13 @@ SCOPE (confirmed with the user):
 BUILD PROGRESS (step by step, per user's request to test alongside):
   [x] Step 1: `params_schema.py` -- `MaterialsParams` fields for the new data model
       (composition_summary_file_name, composition_scalar_statistic, histogram_file_name,
-      histogram_sheet_names_by_drv, material_mc_time_resolution). DONE, verified.
+      histogram_sheet_names_by_drv). DONE, verified.
   [x] Step 2: `load_composition_summary()` below -- tidy loader for the summary-stats
       file, used by the scalar path. DONE, verified against the real uploaded file.
   [x] Step 3: `load_histogram_data()` -- streaming + Parquet-cached histogram loader.
       DONE, verified (real sample file + synthetic multi-sheet file).
-  [x] Step 4: `bootstrap_composition_draws()` / `_bootstrap_from_bins()` -- vectorized
+  [x] Step 4: `bootstrap_composition_draws()` (since replaced by
+      `bootstrap_mixed_composition_draws()`) / `_bootstrap_from_bins()` -- vectorized
       bootstrap sampler. DONE, verified (matches real file's own mean/std).
   [x] Step 5: `combine_flow_and_composition_draws()` (MC path, bootstraps vehicle-count
       draws from stage 03_02's SAVED `mc_stage03_02_summary` histograms -- raw draws are
@@ -630,7 +631,7 @@ def _bootstrap_from_bins(
 ) -> np.ndarray:
     """
     Shared low-level bootstrap primitive, used by BOTH the composition-histogram
-    bootstrap (`bootstrap_composition_draws`, weights = pre-normalized `frequency`
+    bootstrap (`bootstrap_mixed_composition_draws`, weights = pre-normalized `frequency`
     values from the C-M histogram file) and the vehicle-count-histogram bootstrap
     (`bootstrap_vehicle_count_draws_from_summary`, weights = raw integer `frequencies`
     from stage 03_02's saved MC summary) -- same math, same technique, deliberately
@@ -664,107 +665,6 @@ def _bootstrap_from_bins(
     lows = np.asarray(bin_lower)[bin_idx]
     highs = np.asarray(bin_upper)[bin_idx]
     return lows + rng.random(n_draws) * (highs - lows)
-
-
-def bootstrap_composition_draws(
-    histogram_df: pd.DataFrame,
-    n_draws: int,
-    rng: np.random.Generator,
-    group_cols: tuple[str, ...] = ("components", "material", "segment", "year", "drivetrain"),
-    expected_n_bins: int | None = 50,
-    verbose: bool = True,
-    progress_every: int = 500,
-) -> dict[tuple, np.ndarray]:
-    """
-    Vectorized bootstrap sampler: for each (component, material, segment, year,
-    drivetrain) group in `histogram_df` (50 histogram-bin rows per group, as returned
-    by `load_histogram_data`), draw `n_draws` samples matching that group's empirical
-    binned distribution -- the composition-uncertainty half of the combined MC draws
-    (the other half being stage 03_02's vehicle-count draws).
-
-    THE MATH MODEL:
-      1. Bin selection: pick a bin index per draw, weighted by that bin's `frequency`,
-         via inverse-CDF sampling on the cumulative frequency (`np.searchsorted`) --
-         vectorized across all `n_draws` at once per group (no per-draw Python loop).
-      2. Within-bin position: for a draw that landed in bin i, sample uniformly within
-         [bin_lower_i, bin_upper_i) -- reconstructs a continuous distribution matching
-         the binned empirical histogram. Confirmed on the real sample file: bins are
-         contiguous and equal-width within a group, and `frequency` sums to 1.0 exactly
-         (`frequency == count / sum(count)`), so this is a faithful bootstrap of the
-         underlying (unobserved) continuous draws that produced the histogram.
-
-    One `rng.random(n_draws)` call per group for bin selection and one more for the
-    within-bin position -- both fully vectorized (no Python-level loop over draws), only
-    the loop over GROUPS is in Python, which is unavoidable since each group has its own
-    bin edges/weights.
-
-    Parameters
-    ----------
-    histogram_df : output of `load_histogram_data` (optionally for multiple drivetrains
-        concatenated together -- `drivetrain` is part of `group_cols` so groups never
-        cross drivetrains unless the caller explicitly drops that column)
-    n_draws : number of bootstrap draws per group
-    rng : numpy Generator (caller controls seeding -- same seed-spawning convention as
-        the rest of the MC engine)
-    group_cols : columns identifying one histogram (one material's mass distribution
-        for one component/segment/year/drivetrain)
-    expected_n_bins : if not None, raises if any group's bin count doesn't match this
-        (malformed/truncated histogram data, not something to silently paper over);
-        pass None to skip this check
-    verbose : default True -- prints a running progress line every `progress_every`
-        groups (a full drivetrain can have thousands of (component, material, segment,
-        year) groups, so this loop is not always instant). Set False to silence.
-    progress_every : how many groups between progress prints
-
-    Returns
-    -------
-    dict mapping each `group_cols` tuple -> an (n_draws,) float array of bootstrapped
-    values (kg of that material in that component, per vehicle).
-
-    Raises
-    ------
-    ValueError if a group's bin count doesn't match `expected_n_bins`, or its
-    frequencies sum to (near) zero.
-    """
-    t_start = time.time()
-    n_groups_total = histogram_df[list(group_cols)].drop_duplicates().shape[0]
-    if verbose:
-        print(f"[bootstrap_composition_draws] {n_groups_total:,} groups to bootstrap "
-              f"(n_draws={n_draws:,} each)...", flush=True)
-
-    draws_by_group: dict[tuple, np.ndarray] = {}
-    for i, (group_key, group_df) in enumerate(histogram_df.groupby(list(group_cols), sort=False), start=1):
-        if verbose and i % progress_every == 0:
-            elapsed = time.time() - t_start
-            print(f"  ... {i:,}/{n_groups_total:,} groups bootstrapped "
-                  f"({elapsed:.1f}s elapsed, {i / max(elapsed, 1e-9):,.0f} groups/s)", flush=True)
-        group_df = group_df.sort_values("bin_lower")
-        n_bins = len(group_df)
-        if expected_n_bins is not None and n_bins != expected_n_bins:
-            raise ValueError(
-                f"bootstrap_composition_draws: group {group_key} has {n_bins} bins, "
-                f"expected {expected_n_bins}."
-            )
-
-        frequency = group_df["frequency"].to_numpy(dtype=float)
-        freq_sum = frequency.sum()
-        if freq_sum <= 0:
-            raise ValueError(f"bootstrap_composition_draws: group {group_key} has zero total frequency.")
-        if not np.isclose(freq_sum, 1.0, atol=1e-6):
-            # Defensive re-normalization -- warn rather than silently ignoring a data issue.
-            print(f"[bootstrap_composition_draws] WARNING: group {group_key} frequencies "
-                  f"sum to {freq_sum:.6f}, not 1.0 -- renormalizing.")
-
-        bin_lower = group_df["bin_lower"].to_numpy(dtype=float)
-        bin_upper = group_df["bin_upper"].to_numpy(dtype=float)
-
-        draws_by_group[group_key] = _bootstrap_from_bins(bin_lower, bin_upper, frequency, n_draws, rng)
-
-    if verbose:
-        print(f"[bootstrap_composition_draws] done: {len(draws_by_group):,} groups in "
-              f"{time.time() - t_start:.1f}s.", flush=True)
-
-    return draws_by_group
 
 
 # -----------------------------------------------------------------------------------
@@ -849,7 +749,7 @@ def bootstrap_vehicle_count_draws_from_summary(
     """
     Bootstrap vehicle-count draws from ONE entry of the saved `mc_stage03_02_summary`
     dict (build the key with `mc_summary_key`), using the same
-    `_bootstrap_from_bins` primitive as `bootstrap_composition_draws`.
+    `_bootstrap_from_bins` primitive as `bootstrap_mixed_composition_draws`.
 
     Parameters
     ----------
@@ -1317,7 +1217,6 @@ def compute_cohort_year_weights(
             weights[(drivetrain, segment)] = {y: v / total for y, v in year_totals.items()}
 
     return weights
-
 
 
 # -----------------------------------------------------------------------------------
@@ -2395,7 +2294,6 @@ def _scenario_color_map(scenario_names: list[str]) -> dict[str, Any]:
     always gets the same color, using matplotlib's default 'tab10' cycle."""
     cmap = plt.get_cmap("tab10")
     return {name: cmap(i % 10) for i, name in enumerate(scenario_names)}
-
 
 
 # ---------------------------------------------------------------------------

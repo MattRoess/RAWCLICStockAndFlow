@@ -20,9 +20,9 @@ parameters are accepted but NEVER READ inside the function body:
 Confirmed by reading the entire function body (see the function itself, further down,
 for exactly where each becomes dead). Practical consequences:
 
-- The elaborate age-bucket export-allocation machinery in this same file
-  (`allocate_exports_bucket_rates`, `build_export_probability_lookup`) is NEVER CALLED
-  by the model. Exports are actually allocated as a flat, age-independent proportional
+- The elaborate age-bucket export-allocation machinery that used to sit in this same
+  file (`allocate_exports_bucket_rates`, `build_export_probability_lookup`; removed
+  2026-10-09) was NEVER CALLED by the model. Exports are actually allocated as a flat, age-independent proportional
   split: `out_export = out_survival * export_share_by_drivetrain[drv]` -- the same
   share for every cohort/age, regardless of how old it is. The entire "export
   probability by age" empirical analysis computed and plotted in `03_02_adjustedflows.py`
@@ -38,7 +38,6 @@ for exactly where each becomes dead). Practical consequences:
 ======================================================================
 """
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -48,186 +47,6 @@ import pandas as pd
 # itself (not just the project root) were on `sys.path`, which it isn't;
 # every stage script only appends PROJECT_ROOT.
 import src.cohort_flow_mc as _cohort_flow_mc
-
-
-def build_export_probability_lookup(
-    export_prob_by_age_drv_mapped: pd.DataFrame,
-) -> dict[tuple[str, str, int], float]:
-    """
-    Build lookup:
-    {
-        (Region, Drive Train, age): export_probability
-    }
-
-    CONFIRMED ORPHANED: this function's output is never passed into
-    `run_flow_driven_model_with_outflow_disaggregation` (grep-confirmed across both
-    03_01 and 03_02 call sites) -- the age-based export probabilities computed and
-    plotted in `03_02_adjustedflows.py` (`export_prob_by_age_drv`) exist purely for
-    visual inspection and have no effect on the model. See module docstring.
-    """
-    required = {"Region", "Drive Train", "age", "export_probability"}
-    missing = required - set(export_prob_by_age_drv_mapped.columns)
-    if missing:
-        raise KeyError(
-            f"Missing required columns in export_prob_by_age_drv_mapped: {sorted(missing)}"
-        )
-
-    df = export_prob_by_age_drv_mapped.copy()
-    df["age"] = pd.to_numeric(df["age"], errors="coerce").astype(int)
-    df["export_probability"] = (
-        pd.to_numeric(df["export_probability"], errors="coerce")
-        .fillna(0.0)
-        .clip(0.0, 1.0)
-    )
-
-    lookup: dict[tuple[str, str, int], float] = {}
-    for _, row in df.iterrows():
-        key = (
-            str(row["Region"]),
-            str(row["Drive Train"]),
-            int(row["age"]),
-        )
-        lookup[key] = float(row["export_probability"])
-
-    return lookup
-
-def prepare_full_inflow_table(
-    synthetic_pre_2005_inflows: pd.DataFrame,
-    inflow_segments_scenario: pd.DataFrame,
-) -> pd.DataFrame:
-    cols = ["Region", "Drive Train", "Segment", "year", "value"]
-
-    pre = synthetic_pre_2005_inflows[cols].copy()
-    scen = inflow_segments_scenario[cols].copy()
-
-    df = pd.concat([pre, scen], ignore_index=True)
-
-    df["year"] = pd.to_numeric(df["year"], errors="coerce").astype(int)
-    df["value"] = pd.to_numeric(df["value"], errors="coerce").fillna(0.0)
-
-    df = (
-        df.groupby(["Region", "Drive Train", "Segment", "year"], as_index=False)["value"]
-        .sum()
-        .sort_values(["Region", "Drive Train", "Segment", "year"])
-        .reset_index(drop=True)
-    )
-    return df
-
-
-def build_segmented_starting_stock_and_synthetic_inflows(
-    stock_inspect_df: pd.DataFrame,
-    split_hp: pd.DataFrame,
-    liquids_split: pd.DataFrame,
-    segment_shares_ext: pd.DataFrame,
-    params: dict,
-    region: str = "EUR",
-    base_year: int = 2005,
-    backcast_start_year: int = 1975,
-    drivetrains: tuple[str, ...] = ("BEV", "HEV", "PHEV", "Diesel", "Petrol"),
-    display_fn=None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Build target stock by drivetrain and segment for base_year,
-    then backcast synthetic pre-base-year inflows.
-    """
-    if stock_inspect_df is None or stock_inspect_df.empty:
-        raise ValueError("stock_inspect_df is missing or empty.")
-    if split_hp is None or liquids_split is None:
-        raise ValueError("split_hp or liquids_split missing.")
-    if segment_shares_ext is None or segment_shares_ext.empty:
-        raise ValueError("segment_shares_ext is missing.")
-
-    stock_base = stock_inspect_df[
-        stock_inspect_df["Region"].eq(region) & stock_inspect_df["year"].eq(base_year)
-    ].copy()
-    if stock_base.empty:
-        raise ValueError(f"No stock data found for {region} in {base_year}.")
-
-    starting_total = float(stock_base["stock"].sum())
-    shares_by_drv = stock_base.groupby("Drive Train", as_index=True)["stock"].sum()
-
-    bev_share = float(shares_by_drv.get("BEV", 0.0))
-    hybrid_share = float(
-        shares_by_drv.get("Hybrid", shares_by_drv.get("HEV", 0.0) + shares_by_drv.get("PHEV", 0.0))
-    )
-    liquids_share = float(
-        shares_by_drv.get("Liquids", shares_by_drv.get("Diesel", 0.0) + shares_by_drv.get("Petrol", 0.0))
-    )
-
-    share_sum = bev_share + hybrid_share + liquids_share
-    if share_sum <= 0:
-        raise ValueError(f"Could not build BEV/Hybrid/Liquids shares for {base_year}.")
-
-    base_shares = pd.Series(
-        {
-            "BEV": bev_share / share_sum,
-            "Hybrid": hybrid_share / share_sum,
-            "Liquids": liquids_share / share_sum,
-        }
-    )
-    base_stock = base_shares * starting_total
-
-    if base_year not in split_hp.index or base_year not in liquids_split.index:
-        raise ValueError(f"Missing {base_year} in split_hp or liquids_split.")
-
-    hybrid_internal = split_hp.loc[base_year, ["HEV", "PHEV"]].astype(float)
-    hybrid_internal = hybrid_internal / hybrid_internal.sum()
-
-    liquids_internal = liquids_split.loc[base_year, ["Diesel", "Petrol"]].astype(float)
-    liquids_internal = liquids_internal / liquids_internal.sum()
-
-    starting_stock = pd.Series(
-        {
-            "BEV": base_stock["BEV"],
-            "HEV": base_stock["Hybrid"] * hybrid_internal["HEV"],
-            "PHEV": base_stock["Hybrid"] * hybrid_internal["PHEV"],
-            "Diesel": base_stock["Liquids"] * liquids_internal["Diesel"],
-            "Petrol": base_stock["Liquids"] * liquids_internal["Petrol"],
-        },
-        name="value",
-    )
-
-    segment_shares_base = (
-        segment_shares_ext[segment_shares_ext["Year"] == base_year]
-        .pivot(index="Drive Train", columns="Segment", values="segment_share")
-        .fillna(0.0)
-    )
-
-    segment_shares_base = segment_shares_base.loc[
-        [drv for drv in starting_stock.index if drv in segment_shares_base.index]
-    ]
-
-    starting_stock_segments = (
-        segment_shares_base.mul(starting_stock, axis=0)
-        .stack()
-        .reset_index()
-        .rename(columns={0: "value"})
-    )
-    starting_stock_segments["Region"] = region
-    starting_stock_segments = starting_stock_segments[
-        ["Region", "Drive Train", "Segment", "value"]
-    ].copy()
-
-    mapped = build_p02_mapped_inputs(params["02_stock_flow"], drivetrains=drivetrains)
-
-    synthetic_pre_baseyear_inflows = build_synthetic_pre_baseyear_inflows(
-        starting_stock_segments=starting_stock_segments,
-        lifetime_by_drv=mapped["lifetime_by_drv"],
-        base_year=base_year,
-        backcast_start_year=backcast_start_year,
-        group_cols=["Region", "Drive Train", "Segment"],
-        value_col="value",
-    )
-
-    if display_fn:
-        display_fn(f"Starting total stock ({region}, {base_year}): {starting_total:,.3f}")
-        display_fn(f"Segmented total stock ({region}, {base_year}): {starting_stock_segments['value'].sum():,.3f}")
-        display_fn(f"Synthetic inflow total: {synthetic_pre_baseyear_inflows['value'].sum():,.3f}")
-
-    return starting_stock_segments, synthetic_pre_baseyear_inflows
-
-
-
 
 
 def build_stock_by_segment_at_base_year(
@@ -483,40 +302,6 @@ def build_starting_stock_by_cohort_lookup(
     return lookup
 
 
-def plot_relative_split(
-    df_split: pd.DataFrame,
-    *,
-    title: str,
-    year_plot_start: int | None = None,
-    year_plot_end: int | None = None,
-) -> None:
-    """
-    Plot the relative share of columns in a DataFrame over time, normalized per row.
-    """
-    d = df_split.copy()
-    d.index = d.index.astype(int)
-
-    if year_plot_start is not None and year_plot_end is not None:
-        d = d[(d.index >= int(year_plot_start)) & (d.index <= int(year_plot_end))]
-
-    d = d.div(d.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
-
-    _, ax = plt.subplots(figsize=(10, 5))
-    d.plot(ax=ax, linewidth=2)
-    ax.set_title(title)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Relative share")
-    ax.set_ylim(0, 1)
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(frameon=False, title="")
-    plt.tight_layout()
-    plt.show()
-
-
-
-
 def build_p02_mapped_inputs(
     p02: dict,
     drivetrains: tuple[str, ...] = ("BEV", "HEV", "PHEV", "Diesel", "Petrol"),
@@ -536,14 +321,10 @@ def build_p02_mapped_inputs(
         hardcoded default `[(0, 4), (5, 9), (10, 30)]`.
     In other words: two of this function's four outputs are, in practice, NEVER
     configurable from `00_parameters.py` -- they always resolve to the hardcoded
-    defaults below, regardless of what anyone edits in the params file. This matters
-    because `export_r_by_drv` and `age_bins` are the inputs to
-    `allocate_exports_bucket_rates` (age-weighted export allocation) -- which, per the
-    module docstring above, is never even called by the model. So this silent fallback
-    currently has no downstream numerical consequence (the age-bucket allocation path is
-    dead entirely) -- but if that code path is ever activated, anyone editing
-    `00_parameters.py` expecting to control it would find their edits have no effect,
-    with no error or warning anywhere.
+    defaults below, regardless of what anyone edits in the params file. This had no
+    numerical consequence: `export_r_by_drv` and `age_bins` were the inputs to
+    `allocate_exports_bucket_rates` (age-weighted export allocation), which the model
+    never called and which was removed on 2026-10-09.
     """
     lifetime_by_drv: dict[str, dict[str, float]] = {}
     for drv in drivetrains:
@@ -585,68 +366,6 @@ def build_p02_mapped_inputs(
     }
 
 
-def calculate_starting_stock_by_segment(
-    stock_inspect_df: pd.DataFrame,
-    split_hp: pd.DataFrame,
-    liquids_split: pd.DataFrame,
-    segment_shares_ext: pd.DataFrame,
-    region: str,
-    year: int,
-) -> pd.DataFrame:
-    """
-    Calculate starting stock by drivetrain and segment for a given year and region.
-    Returns a DataFrame with columns: Drive Train, Segment, stock
-    """
-    stock_year = stock_inspect_df[
-        stock_inspect_df["Region"].eq(region) & stock_inspect_df["year"].eq(year)
-    ].copy()
-    if stock_year.empty:
-        raise ValueError(f"No stock data found for {region} in {year}.")
-
-    starting_total = float(stock_year["stock"].sum())
-    shares_by_drv = stock_year.groupby("Drive Train", as_index=True)["stock"].sum()
-    bev_share = float(shares_by_drv.get("BEV", 0.0))
-    hybrid_share = float(shares_by_drv.get("Hybrid", shares_by_drv.get("HEV", 0.0) + shares_by_drv.get("PHEV", 0.0)))
-    liquids_share = float(shares_by_drv.get("Liquids", shares_by_drv.get("Diesel", 0.0) + shares_by_drv.get("Petrol", 0.0)))
-    base_share_sum = bev_share + hybrid_share + liquids_share
-    if base_share_sum <= 0:
-        raise ValueError("Could not build BEV/Hybrid/Liquids shares for year.")
-    base_shares = pd.Series({
-        "BEV": bev_share / base_share_sum,
-        "Hybrid": hybrid_share / base_share_sum,
-        "Liquids": liquids_share / base_share_sum,
-    })
-    base_stock = base_shares * starting_total
-    if year not in split_hp.index or year not in liquids_split.index:
-        raise ValueError(f"Missing {year} in split_hp or liquids_split.")
-    hybrid_internal = split_hp.loc[year, ["HEV", "PHEV"]].astype(float)
-    hybrid_internal = hybrid_internal / hybrid_internal.sum()
-    liquids_internal = liquids_split.loc[year, ["Diesel", "Petrol"]].astype(float)
-    liquids_internal = liquids_internal / liquids_internal.sum()
-    starting_stock = pd.Series({
-        "BEV": base_stock["BEV"],
-        "HEV": base_stock["Hybrid"] * hybrid_internal["HEV"],
-        "PHEV": base_stock["Hybrid"] * hybrid_internal["PHEV"],
-        "Diesel": base_stock["Liquids"] * liquids_internal["Diesel"],
-        "Petrol": base_stock["Liquids"] * liquids_internal["Petrol"],
-    }, name=f"starting_stock_{year}")
-    segment_shares_year = (
-        segment_shares_ext[segment_shares_ext["Year"] == year]
-        .pivot(index="Drive Train", columns="Segment", values="segment_share")
-        .fillna(0.0)
-    )
-    segment_shares_year = segment_shares_year.loc[
-        [drv for drv in starting_stock.index if drv in segment_shares_year.index]
-    ]
-    starting_stock_segments = (
-        segment_shares_year.mul(starting_stock, axis=0)
-        .stack()
-        .reset_index()
-        .rename(columns={0: "stock", "Drive Train": "Drive Train", "Segment": "Segment"})
-    )
-    return starting_stock_segments
-
-
 def weibull_survival_lookup(*, shape_k: float, scale_lambda: float, max_age: int) -> np.ndarray:
     ages = np.arange(max_age + 1, dtype=float)
     survival = np.exp(-((ages / scale_lambda) ** shape_k))
@@ -663,115 +382,6 @@ def weibull_hazard_lookup(*, shape_k: float, scale_lambda: float, max_age: int) 
     hazard[-1] = 1.0
 
     return np.clip(hazard, 0.0, 1.0)
-
-
-def allocate_exports_bucket_rates(
-    stock_available: np.ndarray,
-    ages: np.ndarray,
-    total_export: float,
-    age_bins: list[tuple[int, int]],
-    r_weights: np.ndarray,
-) -> np.ndarray:
-    # CONFIRMED NEVER CALLED anywhere in flowdriven_model.py itself, nor in either
-    # 03_01_flowdriven.py or 03_02_adjustedflows.py. This age-bucket-weighted export
-    # allocation (bucket i's export total is proportional to stock_b[i]*r_weights[i],
-    # then distributed within the bucket proportional to each cohort's share of that
-    # bucket's stock) is fully implemented but orphaned -- the model actually in use
-    # allocates exports with a flat per-cohort proportional share instead (see
-    # run_flow_driven_model_with_outflow_disaggregation's docstring, point 3).
-    out = np.zeros_like(stock_available, dtype=float)
-
-    if total_export <= 0:
-        return out
-
-    stock_available = np.asarray(stock_available, dtype=float)
-    ages = np.asarray(ages, dtype=float)
-    r_weights = np.asarray(r_weights, dtype=float)
-
-    bucket_cols: list[np.ndarray] = []
-    stock_b = np.zeros(len(age_bins), dtype=float)
-
-    for i, (age_min, age_max) in enumerate(age_bins):
-        cols = np.where((ages >= age_min) & (ages <= age_max) & (ages >= 0))[0]
-        bucket_cols.append(cols)
-        stock_b[i] = stock_available[cols].sum() if cols.size else 0.0
-
-    denom = np.sum(stock_b * r_weights)
-    if denom <= 0:
-        return out
-
-    k = total_export / denom
-    e_b = k * r_weights
-
-    for i, cols in enumerate(bucket_cols):
-        if cols.size == 0 or stock_b[i] <= 0:
-            continue
-
-        export_b = stock_b[i] * e_b[i]
-        avail = stock_available[cols]
-        avail_sum = avail.sum()
-
-        if avail_sum <= 0:
-            continue
-
-        out[cols] = export_b * (avail / avail_sum)
-
-    return out
-
-
-def aggregate_group_year_totals(
-    frame: pd.DataFrame | None,
-    *,
-    group_cols: list[str],
-    year_col: str,
-    value_col: str,
-) -> dict[tuple, float]:
-    if frame is None or frame.empty:
-        return {}
-
-    required = set(group_cols + [year_col, value_col])
-    missing = required - set(frame.columns)
-    if missing:
-        raise KeyError(f"Missing required columns for outflow table: {sorted(missing)}")
-
-    tmp = frame[group_cols + [year_col, value_col]].copy()
-    tmp[year_col] = tmp[year_col].astype(int)
-    tmp[value_col] = tmp[value_col].astype(float)
-
-    grouped = tmp.groupby(group_cols + [year_col], as_index=False)[value_col].sum()
-
-    key_map: dict[tuple, float] = {}
-    for _, row in grouped.iterrows():
-        key = tuple(row[col] for col in group_cols) + (int(row[year_col]),)
-        key_map[key] = float(row[value_col])
-
-    return key_map
-
-
-def aggregate_group_totals(
-    frame: pd.DataFrame | None,
-    *,
-    group_cols: list[str],
-    value_col: str,
-) -> dict[tuple, float]:
-    if frame is None or frame.empty:
-        return {}
-
-    required = set(group_cols + [value_col])
-    missing = required - set(frame.columns)
-    if missing:
-        raise KeyError(f"Missing required columns for initial stock table: {sorted(missing)}")
-
-    tmp = frame[group_cols + [value_col]].copy()
-    tmp[value_col] = tmp[value_col].astype(float)
-    grouped = tmp.groupby(group_cols, as_index=False)[value_col].sum()
-
-    key_map: dict[tuple, float] = {}
-    for _, row in grouped.iterrows():
-        key = tuple(row[col] for col in group_cols)
-        key_map[key] = float(row[value_col])
-
-    return key_map
 
 
 def build_synthetic_pre_baseyear_inflows(
@@ -869,15 +479,6 @@ def build_synthetic_pre_baseyear_inflows(
 
     return pd.DataFrame(rows)
 
-
-def build_segment_distribution(df: pd.DataFrame) -> dict[str, list[str]]:
-    return (
-        df.dropna(subset=["Segment"])
-        .groupby("Drive Train")["Segment"]
-        .unique()
-        .apply(list)
-        .to_dict()
-    )
 
 def run_flow_driven_model_with_outflow_disaggregation(
     df: pd.DataFrame,

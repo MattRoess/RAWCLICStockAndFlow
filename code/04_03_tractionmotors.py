@@ -170,11 +170,11 @@ def quantify_parallel(tracker_keyed: dict, composition: pd.DataFrame,
     kilograms of this material would flow" -- so the 15 states stand side by
     side and none of them has been believed yet.
 
-    ⚠️ THE JOIN IS THE SAME ONE `materials.quantify_elements_from_tracker` MAKES
-    -- tracker `key` and `cohort_year` against `productKeyLevel2` and
-    `productionYear` -- but it is done here because that helper drops
-    `voltageClass` and `materialClass` on the way through, and adding them to a
-    shared helper would change 04_01 and 04_04 as well.
+    ⚠️ THE JOIN IS tracker `key` and `cohort_year` against `productKeyLevel2`
+    and `productionYear`. `materials.quantify_elements_from_tracker` made the
+    same join (it was removed on 2026-10-09: nothing called it) and dropped
+    `voltageClass` and `materialClass` on the way through, which is why it is
+    done here.
 
     ⚠️ AND IT IS A LEFT JOIN THAT REPORTS WHAT DID NOT MATCH. The shared helper
     uses an inner join, which silently drops any tracker row with no composition

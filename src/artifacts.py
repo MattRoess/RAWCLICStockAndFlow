@@ -75,14 +75,8 @@ ARTIFACT_FILES: dict[str, str] = {
     "matrices_by_key": "02_matrices_by_key.pkl",
     "tracker_keyed": "03_tracker_keyed.pkl",
     "disaggregated": "03_disaggregated.pkl",
-    "stock_2005": "03_stock_2005.pkl",
     "segment_shares_ext": "03_segment_shares_ext.pkl",
     "liquids_shares_ext": "03_liquids_shares_ext.pkl",
-    "composition_extended": "04_composition_extended.pkl",
-    "ev_share_long": "04_ev_share_long.pkl",
-    "bev_surv_outflow": "04_bev_surv_outflow.pkl",
-    "mass_by_year_elem_dict": "04_mass_by_year_elem_dict.pkl",
-    "combined": "04_combined.pkl",
     "mc_stage02_draws": "02_mc_draws.pkl",
     # [NEW] Raw per-drivetrain, per-draw Monte Carlo arrays from 02_stockdriven.py
     # (cumulative_inflow, cumulative_out_survival, and the scale_lambda draws that
@@ -174,14 +168,10 @@ ARTIFACT_FILES: dict[str, str] = {
     # invisible to `artifact_status()` by design -- a real, deliberately-deferred option
     # to register them (e.g. a wildcard/prefix-based registry) is flagged there, not
     # implemented unasked.
-    "ratio_df": "05_ratio_df.pkl",
-    "stock_disagg_df": "05_stock_disagg_df.pkl",
     "synthetic_pre_2005_inflows": "03_synthetic_pre_2005_inflows.pkl",
     "starting_stock_2005_segments": "03_starting_stock_2005_segments.pkl",
-    "export_prob_by_age_drv": "03_export_prob_by_age_drv.pkl",
     "flows_03": "03_flows_03.pkl",
     "seg_share_by_drv": "03_seg_share_by_drv.pkl",
-    "tracker_keyed_new": "03_tracker_keyed_new.pkl",
     "tracker_keyed_BAU": "03_tracker_keyed_BAU.pkl",
     "tracker_keyed_BEV_only": "03_tracker_keyed_BEV_only.pkl",
     "tracker_keyed_BEV_A_F": "03_tracker_keyed_BEV_A_F.pkl",
@@ -195,22 +185,6 @@ ARTIFACT_FILES: dict[str, str] = {
     "tracker_keyed_unknownwhereabouts_normal": "03_tracker_keyed_unknownwhereabouts_normal.pkl",
     "tracker_keyed_losses_zero": "03_tracker_keyed_losses_zero.pkl",
     "tracker_keyed_losses_high": "03_tracker_keyed_losses_high.pkl",
-    "EXPORT_SHARE_BY_DRV": "03_EXPORT_SHARE_BY_DRV.pkl",
-    # [STILL OPEN -- needs your input, not resolved here]: this name is identical to
-    # params["02_stock_flow"]["EXPORT_SHARE_BY_DRV"] defined in 00_parameters.py. Two
-    # readings are both plausible and I can't tell which from this file alone:
-    #   (a) this artifact IS that same dict, persisted as-is for stage 03's convenience
-    #       (in which case registering it separately here is redundant -- stage 03 could
-    #       just read it from the "params" artifact instead of needing its own copy), or
-    #   (b) this artifact is a DERIVED/adjusted version -- e.g. stage 03 recomputes or
-    #       overrides some drivetrain's export share before saving it under this name,
-    #       in which case the two are legitimately different objects that happen to
-    #       share a name, and whichever stage-03 code writes this artifact should say so
-    #       in a comment there.
-    # I don't have visibility into which stage-03 code path actually writes this
-    # artifact, so I can't resolve this without you telling me the intent -- happy to
-    # rename this entry (e.g. to "export_share_by_drv_stage03") if (b) is correct, to
-    # remove the naming collision.
 }
 
 

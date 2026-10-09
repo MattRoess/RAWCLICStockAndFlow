@@ -69,8 +69,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")  # never opens an interactive window -- always saves to file
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
-from matplotlib.colors import to_rgb
 
 
 def _find_project_root(start: Path) -> Path:
@@ -168,46 +166,6 @@ BEV_SEGMENT_SHARES_BAU = {
     "JA": 0.00341, "JB": 0.07498, "JC": 0.25116, "JD": 0.15162, "JE": 0.02108, "JF": 0.00481,
 }
 segment_shares_by_drv = {"BEV": BEV_SEGMENT_SHARES_BAU}
-
-
-# ---------------------------------------------------------------------------
-# Shared plotting helpers
-# ---------------------------------------------------------------------------
-# FLAGGED (DRY violation, verified across both notebooks): `make_shades`,
-# `add_clean_legends`, and `build_segment_stock_table` are each (re)defined 2-4 times
-# across `03_01_flowdriven.ipynb` and `03_02_adjustedflows.ipynb` (grep-confirmed: 4
-# copies of `make_shades`/`make_shades_exports`, 3 of `add_clean_legends`, 3 of
-# `build_segment_stock_table`). They're defined once here; if you already have a shared
-# `src/plotting.py` (referenced by 03_02) that contains equivalents, these should move
-# there instead of staying duplicated per-notebook.
-def make_shades(base_color: str, n: int) -> list[np.ndarray]:
-    """Generate `n` shades of `base_color`, fading toward white."""
-    base = np.array(to_rgb(base_color))
-    white = np.array([1, 1, 1])
-    return [base * (1 - (i / max(n - 1, 1)) * 0.75) + white * ((i / max(n - 1, 1)) * 0.75) for i in range(n)]
-
-
-SEGMENT_ORDER = ["A", "B", "C", "D", "E", "F", "JA", "JB", "JC", "JD", "JE", "JF"]
-BASE_DRV_COLORS = {"BEV": "#1b9e77", "HEV": "#f2d27d", "PHEV": "#d9b44a", "Diesel": "#4c78a8", "Petrol": "#9ecae1"}
-
-
-def build_segment_stock_table(flows_df: pd.DataFrame, drv_order: list[str], year_start: int = 2010, year_end: int | None = None):
-    """Pivot a flows table into a (year x drivetrain-segment) stock table for area plotting."""
-    segment_shades = {drv: dict(zip(SEGMENT_ORDER, make_shades(col, len(SEGMENT_ORDER)))) for drv, col in BASE_DRV_COLORS.items()}
-    tmp = flows_df.groupby(["year", "Drive Train", "Segment"], as_index=False)["stock"].sum()
-    tmp = tmp[tmp["year"].between(year_start, year_end)] if year_end is not None else tmp[tmp["year"] >= year_start]
-    pivot = tmp.pivot_table(index="year", columns=["Drive Train", "Segment"], values="stock", aggfunc="sum", fill_value=0.0).sort_index()
-    ordered_cols, ordered_colors = [], []
-    for drv in drv_order:
-        if drv not in pivot.columns.get_level_values(0):
-            continue
-        for seg in SEGMENT_ORDER:
-            if (drv, seg) in pivot.columns:
-                ordered_cols.append((drv, seg))
-                ordered_colors.append(segment_shades.get(drv, {}).get(seg, "#999999"))
-    pivot = pivot.reindex(columns=ordered_cols, fill_value=0.0)
-    pivot.columns = [f"{drv}-{seg}" for drv, seg in pivot.columns]
-    return pivot, ordered_colors
 
 
 def main() -> dict[str, Any]:

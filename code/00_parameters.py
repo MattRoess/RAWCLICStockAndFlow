@@ -32,7 +32,6 @@ WHAT'S STILL A PLACEHOLDER / OPEN (see EVmodel_review_consolidated.md for full h
 ------------------------------------------------------------------------------------------
 - `stock_flow.export_share_by_drv["FCEV"]` / `["Gases"]`: still `0.08`, matching every
   other non-BEV drivetrain -- not a verified real export share.
-- `data_prep.accelerating_year = 2026`: no cited source/derivation (L2).
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ import pandas as pd
 from src.params_schema import Params  # type: ignore
 
 try:
-    from src.artifacts import save_many, artifact_status  # type: ignore
+    from src.artifacts import save_many
     _ARTIFACTS_AVAILABLE = True
 except ImportError:
     _ARTIFACTS_AVAILABLE = False

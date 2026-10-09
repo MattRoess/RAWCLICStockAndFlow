@@ -258,9 +258,8 @@ def main() -> dict[str, Path]:
     # [REMOVED, per user request] Previously also plotted a synthetic "Accelerated
     # BEV" reference curve (a manual what-if, built via `warp_bev_transition_all_
     # segments` above this block) as a black dashed line -- that computation and its
-    # line/legend entry are both gone. `warp_bev_transition_all_segments` itself is
-    # untouched in `src/stock_flow.py` (still a standalone, documented utility) but
-    # is no longer called from anywhere in this pipeline as of this change.
+    # line/legend entry are both gone, and so is `warp_bev_transition_all_segments`
+    # itself (src/stock_flow.py), which nothing called any more (2026-10-09).
     # -----------------------------------------------------------------------
     if ("EUR", "BEV") in stock_dict:
         fig, ax = plot_bev_stock_compare_grouped(

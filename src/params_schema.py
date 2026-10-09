@@ -377,15 +377,6 @@ class DataPrepParams:
     start_year_plotting: int = 2015
     end_year_plotting: int = 2070
 
-    # From this year onward, vehicle composition is held constant at its last known
-    # value -- nobody has credible material-composition forecasts beyond it.
-    # SAFE TO CHANGE: yes, but pushing it later means inventing composition trends.
-    composition_extend_from_year: int = 2050
-
-    # The year from which the model applies the accelerated fleet-turnover assumption.
-    # SAFE TO CHANGE: yes.
-    accelerating_year: int = 2026
-
     # Numbers smaller than this are treated as zero when tidying the REMIND data.
     # Guards against meaningless dust like 0.0000001 vehicles.
     # SAFE TO CHANGE: rarely needed. Too large a value would delete real small
@@ -464,19 +455,6 @@ class DataPrepParams:
     # SAFE TO CHANGE: yes, but it must match where the donor data actually ends, or the
     # join leaves a visible step in the fleet curve.
     pre2015_history_splice_year: int = 2015
-
-    # The vehicle size classes used in the source data, before they are mapped onto
-    # this model's A-F / JA-JF segments.
-    # SAFE TO CHANGE: no, unless the source data changes its class names.
-    target_class_detail: tuple[str, ...] = (
-        "Large Car and SUV", "Van", "Compact Car", "Midsize Car", "Mini Car", "Subcompact Car",
-    )
-
-    # Which columns of the REMIND data identify a row, and what to call them here.
-    # SAFE TO CHANGE: no, unless the source format changes.
-    attribute_list: tuple[str, ...] = ("Region", "technology")
-
-    key_names: tuple[str, ...] = ("Region", "Drivetrain")
 
     # Where raw input data is read from, and where processed results are written.
     # Both are relative to the `code/` directory.
@@ -1226,11 +1204,6 @@ class DisaggregationParams:
     # SAFE TO CHANGE: yes -- but never report numbers produced with this set to True.
     use_synthetic_eea_fallback: bool = False
 
-    # Fixes the random numbers used to generate that stand-in data, so the placeholder
-    # is at least reproducible. Irrelevant while the setting above is False.
-    # SAFE TO CHANGE: yes, any whole number.
-    synthetic_eea_seed: int = 42
-
     # The real-world year each drivetrain first went on sale.
     # This is a documented historical fact, not a modelling assumption, and it is used
     # in two places that must agree: filling gaps in the registration data, and
@@ -1562,10 +1535,6 @@ class MaterialsParams:
     #     "e-m"  individual chemical elements (finer, much larger)
     # SAFE TO CHANGE: yes, but "m-c" is the level the rest of this analysis assumes.
     composition_parameter_code: str = "m-c"
-
-    # Which column in the composition file holds the material name to group by.
-    # SAFE TO CHANGE: no, unless the file's own column naming changes.
-    material_level_key: str = "materialKeyLevel_highest"
 
     # ⚠️ WHERE THE TRACTION-MOTOR PROJECT KEEPS WHAT IT PRODUCES, read where it
     # lies. Matthias 2026-09-21: traction motor information lives in
@@ -2184,10 +2153,6 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes. The first year is "what we can see now".
     battery_chemistry_share_spread_years: tuple[int, int] = (2020, 2070)
 
-    # Fallback battery size used when a vehicle's segment is unknown.
-    # SAFE TO CHANGE: yes. Ideally it stays near the middle of the map above.
-    average_battery_capacity_kwh: float = 60.0
-
     # The workbook holding the pre-computed composition statistics (means and spreads)
     # that this stage reads instead of recomputing them.
     # SAFE TO CHANGE: yes, when a newer version arrives.
@@ -2214,13 +2179,6 @@ class MaterialsParams:
         "HEV": ["componentCarHEV"],
         "PHEV": ["componentCarPHEV"],
     })
-
-    # How finely material results are reported over time:
-    #     "period"  one figure per reporting window  (current -- far smaller and faster)
-    #     "year"    a figure for every single year   (much larger, much slower)
-    # SAFE TO CHANGE: yes, but "year" combined with 200,000 draws produces very large
-    # files -- the existing per-scenario ones already run to several GB.
-    material_mc_time_resolution: str = "period"
 
     # How many uncertainty draws this stage runs. Same meaning as `n_draws` in the
     # Monte Carlo section, but kept separate so this stage can be run at a different
@@ -2345,14 +2303,6 @@ class MaterialsParams:
     # SAFE TO CHANGE: yes -- this is the dial you are most likely to adjust. Any
     # value from 0 up to the ceiling described above.
     bev_electronics_segment_tilt: float = 0.2
-
-    # The "standard" case: one average BEV rather than twelve segment-specific
-    # ones, built as a mixture across A-F so it comes out as a full
-    # distribution, not a single number.
-    # True  -- weight each segment by how many vehicles are actually in it
-    # False -- weight all six equally
-    # SAFE TO CHANGE: yes.
-    bev_electronics_standard_fleet_weighted: bool = True
 
     # First and last year to report. The electronics study itself only covers
     # 2020-2070, so asking for earlier years would have nothing to multiply.
@@ -2584,11 +2534,6 @@ class MaterialsParams:
                 f"materials.composition_scalar_statistic={self.composition_scalar_statistic!r} "
                 f"is not one of ['mean', 'median', 'mode']."
             )
-        if self.material_mc_time_resolution not in {"period", "annual", "both"}:
-            issues.append(
-                f"materials.material_mc_time_resolution={self.material_mc_time_resolution!r} "
-                f"is not one of ['period', 'annual', 'both']."
-            )
         missing_histogram_drvs = set(self.drivetrains) - set(self.histogram_sheet_names_by_drv)
         if missing_histogram_drvs:
             issues.append(
@@ -2608,15 +2553,6 @@ class MaterialsParams:
             issues.append(
                 f"materials.composition_parameter_code={self.composition_parameter_code!r} "
                 f"is not one of ['m-c', 'e-m']."
-            )
-        valid_levels = {
-            "materialKeyLevel0", "materialKeyLevel1", "materialKeyLevel2",
-            "materialKeyLevel3", "materialKeyLevel4", "materialKeyLevel_highest",
-        }
-        if self.material_level_key not in valid_levels:
-            issues.append(
-                f"materials.material_level_key={self.material_level_key!r} is not one "
-                f"of {sorted(valid_levels)}."
             )
         levels = self.battery_capacity_levels
         missing_levels = set(self.segment_map) - set(levels)
@@ -2698,26 +2634,6 @@ class MonteCarloParams:
     # which makes results non-reproducible -- avoid that for anything you report.
     seed: int | None = 42
 
-    # ---- Separate budget for the standalone stock-and-flow uncertainty script -----
-    # `mc_stockflow_uncertainty.py` varies lifetime, unknown-whereabouts share and
-    # export share for every drivetrain at once. It has its OWN draw count and seed so
-    # that running a quick demo elsewhere can never accidentally start a 200,000-draw
-    # job here.
-    # SAFE TO CHANGE: yes -- same meaning as `n_draws` / `seed` above.
-    stockflow_n_draws: int = 200_000
-    stockflow_seed: int | None = 42
-
-    # How wide the uncertainty is for that standalone script, as a fraction:
-    # 0.15 means "give or take 15%".
-    #     lifetime spread -> Triangular(base x 0.85, base, base x 1.15)
-    #     share spread    -> Normal(base, base x 0.15), kept within 0-1
-    # IMPORTANT: these two are PLACEHOLDERS. They are not measured uncertainties -- no
-    # real ones have been supplied. Replace them once you have real ranges; everything
-    # downstream works identically whatever the numbers are.
-    # SAFE TO CHANGE: yes. Each must stay above 0 and below 1.
-    stockflow_lifetime_spread: float = 0.15
-    stockflow_share_spread: float = 0.15
-
     # How many draws to process at a time, to keep memory under control.
     # Pure performance setting -- it does NOT affect results in any way. Smaller means
     # less memory and slightly slower; larger means more memory and slightly faster.
@@ -2770,12 +2686,6 @@ class MonteCarloParams:
         issues: list[str] = []
         if self.n_draws <= 0:
             issues.append(f"monte_carlo.n_draws={self.n_draws} must be positive.")
-        if self.stockflow_n_draws <= 0:
-            issues.append(f"monte_carlo.stockflow_n_draws={self.stockflow_n_draws} must be positive.")
-        if not (0.0 < self.stockflow_lifetime_spread < 1.0):
-            issues.append(f"monte_carlo.stockflow_lifetime_spread={self.stockflow_lifetime_spread} must be in (0, 1).")
-        if not (0.0 < self.stockflow_share_spread < 1.0):
-            issues.append(f"monte_carlo.stockflow_share_spread={self.stockflow_share_spread} must be in (0, 1).")
         if self.chunk_size <= 0:
             issues.append(f"monte_carlo.chunk_size={self.chunk_size} must be positive.")
         if not self.output_periods:
