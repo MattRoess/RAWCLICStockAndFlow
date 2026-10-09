@@ -43,7 +43,7 @@ found this way (not from reading the code, from running it) and fixed:
 - Project-root resolution: upward-searching `_find_project_root`.
 - `root=PROJECT_ROOT` threaded into every `load_many`/`save_many` call.
 - `_plot_stockdriven_vs_flowdriven_outflow`'s `plt.show()` replaced with a saved PNG
-  (`data/processed/figures/03_01_stockdriven_vs_flowdriven.png`).
+  (`figures/03_01_stockdriven_vs_flowdriven.png`).
 - `fdm.build_p02_mapped_inputs` receives `params.to_nested_dict()["02_stock_flow"]` (a
   plain dict) -- CONFIRMED necessary and correct by reading `flowdriven_model.py`'s
   actual source: `build_p02_mapped_inputs` does `p02["lifetime_by_drv"]` internally,
@@ -92,6 +92,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 import src.flowdriven_model as fdm  # type: ignore
 import src.disaggregation as disagg  # type: ignore
 import src.artifacts as artifacts  # type: ignore
+from src.config import get_paths  # type: ignore
 from src.monte_carlo import (  # type: ignore
     summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
 )
@@ -664,7 +665,7 @@ def main() -> dict[str, Any]:
     # -----------------------------------------------------------------------
     # Validation: stock-driven (stage 02) vs flow-driven (stage 03) outflow comparison
     # -----------------------------------------------------------------------
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
+    fig_dir = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
     fig_dir.mkdir(parents=True, exist_ok=True)
     fig_path = fig_dir / "03_01_stockdriven_vs_flowdriven.png"
     _plot_stockdriven_vs_flowdriven_outflow(disaggregated, flows_03, YEAR_PLOT_START, YEAR_PLOT_END, fig_path)

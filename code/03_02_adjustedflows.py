@@ -145,7 +145,7 @@ FIXES APPLIED THIS ROUND
 - **[NEW] Integrated diagnostic plot**: `plot_flows_split_collected_unknown_all_trackers`
   (from `src/plotting.py`, now fixed to save instead of forcing `plt.show()`) is called
   automatically at the end of `main()`, saving
-  `data/processed/figures/03_02_flows_all_scenarios.png` -- inflow/outflow split for
+  `figures/03_02_flows_all_scenarios.png` -- inflow/outflow split for
   all 11 scenarios side by side. This is the most direct visual confirmation that the
   C6 fix produced genuinely different scenarios, not just five more silent BAU copies.
 
@@ -184,6 +184,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import src.flowdriven_model as fdm  # type: ignore
 import src.artifacts as artifacts  # type: ignore
+from src.config import get_paths  # type: ignore
 import src.plotting as plotting  # type: ignore
 from src.disaggregation import (  # type: ignore
     build_tracker_from_disaggregated, add_keys_to_tracker_dict,
@@ -1609,7 +1610,7 @@ def main() -> dict[str, Any]:
     # every scenario that had MC enabled. `fig_dir` stays defined here since the
     # MC-only figures below (boxplots, tornado, scenario comparison) also need it.
     # -----------------------------------------------------------------------
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
+    fig_dir = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------------

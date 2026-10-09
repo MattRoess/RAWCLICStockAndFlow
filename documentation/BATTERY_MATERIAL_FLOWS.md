@@ -37,7 +37,7 @@ group (small / medium / large), in `src/params_schema.py`.
 | **S2** sodium enters | Sodium-ion takes the small segments (68 % by 2070, as Prussian white and layered oxide), NMC shrinks to a niche. | nobody — 0 % throughout |
 | **S3** sodium and solid-state | S2, plus bipolar solid-state from 2040, large segments first (70 % of them by 2070). | solid-state: about 48 % of new cars by 2070 |
 
-![chemistry scenarios](../data/processed/figures/04_04_1_chemistry_scenarios.png)
+![chemistry scenarios](../figures/04_04_1_chemistry_scenarios.png)
 
 ## The one thing to know before reading any number
 
@@ -53,7 +53,7 @@ figure carries the uncovered share next to the curves for that reason, and says 
 its face that it is an open item rather than an oversight. Full account:
 [DESIGN_chemistries_without_composition.md](DESIGN_chemistries_without_composition.md).
 
-![uncovered share](../data/processed/figures/04_04_4_uncovered_share.png)
+![uncovered share](../figures/04_04_4_uncovered_share.png)
 
 ## Two levels, because the elements do not add up to the pack
 
@@ -74,7 +74,7 @@ do not add up to each other and a single frame would invite summing them.
 | `battery_material_flows` | 14 elements. Fe, C, Al, O, Cu, P, Mn, Ni, Li, Si, Co, and the sodium cells' Na, N and F |
 | `battery_component_flows` | 13 components. Cathode and anode active material, the two current collectors, support frame, thermal conductor, module enclosure, cables, cell terminals, electrolyte, casing, separator, and the sodium cells' unitemised cell mass |
 
-![components](../data/processed/figures/04_04_7_components_collected.png)
+![components](../figures/04_04_7_components_collected.png)
 
 Oxygen is in the data and out of the element figures: it is bound in the cathode
 oxides and the phosphate, never leaves as oxygen, and nothing recovers it.
@@ -169,7 +169,7 @@ being scrapped were built when lithium chemistries still dominated, while the ne
 are not. The figure below shows the result, and the difference between its two lines is
 what never arrives.
 
-![secondary supply](../data/processed/figures/04_04_5_secondary_supply.png)
+![secondary supply](../figures/04_04_5_secondary_supply.png)
 
 **What the reconstruction cannot do.** 03_02 reports a year's outflow as one
 number, not as a matrix by build year, so the vintage mixture is rebuilt from the
@@ -186,7 +186,7 @@ measured rather than assumed:
 
 ## Reading the comparison
 
-![scenario comparison](../data/processed/figures/04_04_2_scenario_comparison.png)
+![scenario comparison](../figures/04_04_2_scenario_comparison.png)
 
 Lithium demand peaks around 2040 in every scenario (S1: 111 kt, copper 561 kt);
 what separates them is what happens after. The 95 % band widens with distance —
@@ -194,7 +194,7 @@ lithium from 21 % of the median in 2020 to 59 % in 2070, copper from 8 % to 51 %
 — because capacity growth, plateau year, voltage, the mass-improvement factor and
 the extrapolation above 100 kWh all compound.
 
-![chemistry contribution](../data/processed/figures/04_04_3_chemistry_contribution.png)
+![chemistry contribution](../figures/04_04_3_chemistry_contribution.png)
 
 ### Every element
 
@@ -210,7 +210,7 @@ a constant. Sulphur and vanadium sit in the arrays as columns of zeros — the
 element axis is the union over the chemistry files, and none of the six contains
 them.
 
-![all elements](../data/processed/figures/04_04_6_all_elements_inflow.png)
+![all elements](../figures/04_04_6_all_elements_inflow.png)
 
 Cobalt comes only from NMC, so its return is NMC's own, which is why it is left out of
 the secondary-supply figure. Lithium and copper moved within 6 pp of each other in the

@@ -86,6 +86,7 @@ if str(PROJECT_ROOT) not in sys.path:
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 from src.artifacts import load_many, save_many  # type: ignore
+from src.config import get_paths  # type: ignore
 from src.data_prep import (  # type: ignore
     build_stock_dict,
     clean_export_data,
@@ -247,7 +248,7 @@ def main() -> dict[str, Path]:
 
     print("stock_dict keys (region, technology):", list(stock_dict.keys()))
 
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
+    fig_dir = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------------

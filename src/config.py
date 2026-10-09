@@ -25,6 +25,14 @@ FIX LOG (this round -- see EVmodel_review_consolidated.md, Fix Log, for the full
   mistakenly used "scripts" instead of the actual folder name -- corrected here.
 
 NOTE ON THIS FILE otherwise: no other logic changed, only comments added/updated.
+
+WHERE THE FIGURES GO (2026-10-09). `Paths.figures` is `<project root>/figures`: ONE folder, at
+the top of the repository, for every stage. They used to be `data/processed/figures`, which is
+three folders down and beside 55 GB of draws, and each stage wrote its own copy of that path,
+so the folder was hidden by seven stages at once. Said the same day: *"some code still hides
+the figures deep in the folder structure. It should be much easier to find."* A stage asks
+`get_paths(start=PROJECT_ROOT).figures` and does not spell the path out. The folder is not
+created here, as the artifacts folder is: a stage that draws creates it when it draws.
 """
 
 from __future__ import annotations
@@ -45,6 +53,7 @@ class Paths:
     data_raw: Path
     data_processed: Path
     artifacts: Path
+    figures: Path
 
 
 def find_project_root(start: Path | None = None) -> Path:
@@ -101,4 +110,5 @@ def get_paths(start: Path | None = None) -> Paths:
         data_raw=data_raw,
         data_processed=data_processed,
         artifacts=artifacts,
+        figures=root / "figures",       # the top of the repository, not under data/: see the docstring
     )

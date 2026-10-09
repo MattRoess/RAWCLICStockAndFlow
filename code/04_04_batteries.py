@@ -99,6 +99,7 @@ from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 from src.artifacts import load_many, save_many  # noqa: E402
+from src.config import get_paths  # noqa: E402
 from src.battery_capacity import capacity_draws  # noqa: E402
 from src.battery_chemistry import (chemistry_share,  # noqa: E402
                                    chemistry_share_draws)
@@ -626,7 +627,7 @@ def main() -> dict:
 # more often than a result is recomputed. That file is a bench tool, marked
 # `test_` because the numeric prefix belongs to stages that produce results.
 # ===========================================================================
-FIGURE_DIR = PROJECT_ROOT / "data" / "processed" / "figures"
+FIGURE_DIR = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
 DRAWS_DIR = PROJECT_ROOT / "data" / "processed" / "battery_draws"
 
 SCENARIO_TITLES = {

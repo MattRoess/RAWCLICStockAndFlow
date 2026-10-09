@@ -71,6 +71,7 @@ if str(PROJECT_ROOT) not in sys.path:
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 from src.artifacts import load_many, artifact_status  # type: ignore
+from src.config import get_paths  # type: ignore
 import src.materials as materials  # type: ignore
 import src.traction as traction  # type: ignore
 
@@ -1036,7 +1037,7 @@ def main() -> dict[str, Any]:
             for name, frames in scenario_outputs.items()}))
 
     # ------------------------------------------------------------- figures
-    figure_dir = out_dir / "figures"
+    figure_dir = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
     figure_dir.mkdir(parents=True, exist_ok=True)
     # ⚠️ THE FIGURES START AFTER THE FIRST YEAR OF THE SERIES. The tracker's
     # 2011 BEV inflow is about twenty times the real one -- see

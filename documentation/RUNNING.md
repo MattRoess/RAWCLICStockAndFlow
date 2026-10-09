@@ -158,7 +158,7 @@ trailing " 2" in the filename; both are gone, and `find data/processed -name
 nothing reads it back.
 
 
-Figures land in `data/processed/figures/`.
+Figures land in `figures/`, at the top of the repository (until 2026-10-09: `data/processed/figures/`).
 
 ---
 

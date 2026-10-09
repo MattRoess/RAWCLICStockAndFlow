@@ -201,6 +201,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # for its per-scenario outputs) -- used by `main()`, imported here (top-level, after
 # PROJECT_ROOT/sys.path setup) for consistency with every other numbered stage script.
 import src.artifacts as artifacts  # type: ignore
+from src.config import get_paths  # type: ignore
 import src.materials as materials  # type: ignore
 
 load_many = artifacts.load_many
@@ -3106,7 +3107,7 @@ def main() -> dict[str, Any]:
     Persistence: scalar tables and MC draws dicts are saved per-scenario via
     `save_unregistered_scenario_outputs` (same helper the OLD 04_01_materials.py used
     for its per-scenario outputs -- no `ARTIFACT_FILES` registry entry needed). Plots
-    are saved as PNGs under `data/processed/figures/`.
+    are saved as PNGs under `figures/`.
     """
     t_start_main = time.time()
     print("=" * 76)
@@ -3207,7 +3208,7 @@ def main() -> dict[str, Any]:
 
     mc_summary = load_many("mc_stage03_02_summary", root=PROJECT_ROOT)["mc_stage03_02_summary"]
 
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
+    fig_dir = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
     fig_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir = PROJECT_ROOT / "data" / "processed" / "intermediate"
 

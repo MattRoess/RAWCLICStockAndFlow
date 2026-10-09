@@ -211,6 +211,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.artifacts import load_many, save_many, artifact_status  # type: ignore
+from src.config import get_paths  # type: ignore
 from src.monte_carlo import (  # type: ignore
     summarize_distribution, sum_by_period, sensitivity_correlations, plot_tornado,
 )
@@ -649,7 +650,7 @@ def main() -> dict[str, Path]:
     # only thing this chart needs). See MATH_MODELS.md §2.3 for what to look for.
     # -----------------------------------------------------------------------
     fig, ax = plot_stock_vs_target(matrices_by_key, region="EUR")
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
+    fig_dir = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
     fig_dir.mkdir(parents=True, exist_ok=True)
     fig_path = fig_dir / "02_1_stock_vs_target.png"
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")

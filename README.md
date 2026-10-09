@@ -84,8 +84,12 @@ nothing under them is ever written:
 | 04_03 | `RAWCLICVehicleTractionMotor/data/consolidated` | `materials.traction_composition_dir` (**absolute: edit it**) |
 | 04_04 | `RAWCLICVehicleBattery/data/consolidated` | `materials.battery_composition_dir` (**absolute: edit it**) |
 
-Everything the stages write goes under `data/processed/`: `intermediate/` (every
-summary the pipeline reads back), `figures/`, `bev_draws/` (03_02), `carcomposition_draws/`
+**The figures are the one exception: every stage draws them into `figures/`, at the top of this
+repository** (they were `data/processed/figures/` until 2026-10-09, beside the draws, and each stage
+spelled that path out itself; now one line, `Paths.figures` in `src/config.py`, says where). The
+old folder is left as it was, with last night's figures in it, and is not written to any more.
+Everything else the stages write goes under `data/processed/`: `intermediate/` (every
+summary the pipeline reads back), `bev_draws/` (03_02), `carcomposition_draws/`
 (04_01), `element_draws/` (04_02), `traction/` and `traction_recovery_draws/` (04_03),
 `battery_draws/` and `battery_recovery_draws_by_chemistry/` (04_04, one folder per
 chemistry). The recovery model reads `element_draws/`, `traction_recovery_draws/` and

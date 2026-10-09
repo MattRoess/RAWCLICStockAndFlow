@@ -58,7 +58,7 @@ INPUTS
 OUTPUTS
 -------
   data/processed/intermediate/04_02_bev_electronics_summary.pkl
-  data/processed/figures/04_02_*.png   (see FIGURES below)
+  figures/04_02_*.png   (see FIGURES below)
 """
 
 from __future__ import annotations
@@ -89,6 +89,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.artifacts import load_many, save_many  # type: ignore
+from src.config import get_paths  # type: ignore
 from src.monte_carlo import summarize_distribution  # type: ignore
 
 # vehicles are in MILLIONS, material in GRAMS per vehicle:
@@ -1289,7 +1290,7 @@ def main() -> dict[str, Any]:
     p04 = params.materials
     scenario = (params.adjusted_flows.scenarios_to_run or ("BAU",))[0]
 
-    fig_dir = PROJECT_ROOT / "data" / "processed" / "figures"
+    fig_dir = get_paths(start=PROJECT_ROOT).figures      # the one folder, src/config.py
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     bev_dir = PROJECT_ROOT / "data" / "processed" / "bev_draws" / scenario
