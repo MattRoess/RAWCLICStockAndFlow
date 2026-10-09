@@ -193,9 +193,9 @@ ignored, so never `git add -A` there.
    delete.
 3. The small decisions above: the EEA file, the GitHub descriptions, the received engines.
 4. **Fixed 2026-10-09, in the code:** the `hash(segment)` seeds in `battery_capacity.py` and
-   `battery_voltage.py` (the note of 2026-10-08 below), a different matter from the 03_02 segment seeding of
-   item 1. It shows only with the next run of 04_04, which he will do later. **Decide the pack size /
-   voltage coupling first (the note of 2026-10-09 below), so that one run serves both.**
+   `battery_voltage.py` (the note of 2026-10-08 below), and the shared seeds: every random stream in the
+   battery modules has its own tag now (the note of 2026-10-09 below). A different matter from the 03_02
+   segment seeding of item 1. Both show only with the next run of 04_04, which he will do later.
 
 ## 2026-10-08 — the battery's recovery export is written per chemistry, not summed
 
@@ -270,44 +270,61 @@ about 03_02's fleet draws; this is the pack size and the voltage inside 04_04.
 `data/battery_sodium` has both. Still his to delete: the old single-sodium `Na_ion*` files in
 `battery_draws/` (8.2 GB) and, once `data/battery` is retired, the old summed export (2.8 GB).
 
-## 2026-10-09 — the hash seeds are fixed; and pack size and voltage are coupled draw by draw
+## 2026-10-09 — the hash seeds are fixed, and every random stream in the battery modules has its own tag
 
-**1. Fixed, as asked:** `src/battery_capacity.py` and `src/battery_voltage.py` seed each segment with
-`zlib.crc32(segment.encode())` and no longer with `abs(hash(segment))` (the note of 2026-10-08). Not re-run:
-04_04 takes six hours and he will do it later. Nothing downstream needs to change until then; after that run,
-press Run on RAWCLICRecoveryModel's `04_batteries.py` again, because its draws will have moved.
+**1. The hash seeds, fixed, as asked:** `src/battery_capacity.py` and `src/battery_voltage.py` seed each segment
+with `zlib.crc32(segment.encode())` and no longer with `abs(hash(segment))` (the note of 2026-10-08). Checked
+as a failing test and then a passing one: the pack size, the voltage, every chemistry share of every scenario
+and group and one composition call, in four separate processes, differ in 25 of 34 digests before the fix and
+in none after.
 
-**2. Found while there, NOT changed: the pack size and the voltage of a segment are coupled, draw by draw, and
-negatively.** Both functions are called with `seed=404` and both seed their stream with `[seed, segment]`, so
-they are the same stream: `level_draws` turns each uniform `u` into a pack size with `rng.choice`, and
-`voltage_draws` uses the same `u` as the car's place in the adoption order (800 V when `u` is below the
-share). A small `u` is therefore the smallest pack **and** 800 V. For segment A in 2050 the 25 kWh pack is
-800 V in 100 % of its draws, the 30 kWh pack in 63 % and the 35 kWh pack in 0.6 %; the rank correlation
-between pack size and 800 V is -0.56 in A, -0.15 in C and JC, -0.09 in JF. The design note
-(`DESIGN_bev_capacity_for_04_04.md`) says nothing about pack size and voltage being related, so this looks
-accidental. It was the same before the fix, since both functions took the same `hash(segment)` within a run.
+**2. Found in the same lines, and fixed on his word, "yes, give each stream its own tag": streams seeded alike
+are one stream, and four pairs of them were.**
 
-**How much it matters, measured on LFP per pack, 200,000 draws, the voltages as drawn against the same
-voltages shuffled across draws** (the 400/800 split kept, the link to the pack size broken): the mean copper
-in the cables is up to **+0.5 %** and in the cell terminals up to **+1.0 %** higher as drawn (segment A in
-2050, where the 800 V share is 0.73); in C and JC it is within 0.1 % and 0.5 %. The direction is the one to
-expect: the larger packs, which carry more copper, are the ones that stay at 400 V, which has no copper
-saving. The effect on the spread was not measured.
+- The pack size and the voltage of a segment were the same stream (both `[seed, segment]`): the uniform that
+  picked a pack size also placed the car in the 800 V adoption order, so a small pack was almost always 800 V
+  and a large one almost never. Segment A in 2050: the 25 kWh pack was 800 V in 100 % of its draws, the 30 kWh
+  pack in 63 % and the 35 kWh pack in 0.6 %; rank correlation between pack size and 800 V -0.56 in A, -0.15 in
+  C and JC, -0.09 in JF. Measured on LFP per pack, 200,000 draws, against the same voltages shuffled across
+  draws: mean cable copper up to +0.5 % and terminal copper up to +1.0 % too high (segment A, 2050), within
+  0.5 % in C and JC. The larger packs carry more copper and were the ones that stayed at 400 V.
+- The capacity growth rate and plateau year (`growth_draws`), the voltage band position and the composition's
+  extrapolation factor were all `default_rng(404)`: the growth rate and the band had rank correlation
+  **+1.0000**, so the world in which capacity grows fastest was, exactly, the one in which 800 V arrives
+  earliest. The design note says the growth is shared by every segment on purpose, and says nothing about its
+  being tied to the voltage.
 
-**The same mechanism, more widely.** Three more streams are seeded with the bare `seed`, 404, and so draw
-the same uniforms: the capacity growth rate and plateau year (`growth_draws`, `battery_capacity.py:65`), the
-voltage band position (`battery_voltage.py:115`) and the composition's extrapolation factor
-(`battery_composition.py:211`, used only for packs above the last anchor). Measured: **the growth rate per
-decade and the voltage band position have rank correlation +1.0000**, so a world in which capacity grows
-fast is, exactly, one in which the 800 V share sits at the same point of its band. The design note says
-the growth is "shared by every segment" on purpose, and says nothing about it being tied to the voltage.
-The size of those was not measured, only the pack-size one above.
+**3. What was done.** Every stream is seeded `[seed, crc32(<its name>)]` or `[seed, crc32(<its name>), crc32(<key>)]`
+and never with the bare seed:
 
-**His decision, and the moment is the next run of 04_04:** to give every stream its own tag, a second
-integer in the seed list, as `battery_chemistry.py` does with the chemistry's `crc32`; for the two segment
-streams that means different tags for the pack size and the voltage. It changes the draws once more, so it
-costs nothing if it goes into the same run as the hash fix, and costs a second six-hour run if it does not.
-Not done.
+| stream | tag (`crc32` of) | key | where |
+|---|---|---|---|
+| capacity growth rate, plateau year | `battery_capacity.growth` | — | `battery_capacity.growth_draws`; shared by every segment, on purpose |
+| pack size | `battery_capacity.level` | segment | `battery_capacity.level_draws` |
+| voltage adoption order | `battery_voltage.adoption` | segment | `battery_voltage.voltage_draws` |
+| voltage share band | `battery_voltage.band` | — | `battery_voltage.voltage_draws`; market-wide, on purpose |
+| composition extrapolation factor | `battery_composition.extrapolation` | — | `battery_composition._extrapolation_factor`; the same uniform for every call with the same seed, both levels and every chemistry, on purpose |
+| chemistry share multiplier | `battery_chemistry.share` | chemistry | `battery_chemistry._share_multiplier`; shared across groups, held across years |
+
+What is shared on purpose is still shared; only what was shared by accident is not. A new stream takes a new
+name. `documentation/DESIGN_bev_capacity_for_04_04.md` §9 has the same table.
+
+**4. Checked, red then green,** with a scratch script outside the repository that records the seeds numpy is
+asked for and replays the streams. Before: three streams seeded with the bare 404, two with the same
+`[404, segment]`, the uniforms of four pairs of purposes at rank correlation +1.0000, and -0.563 between pack
+size and 800 V through the real functions. After: every stream tagged, no two purposes sharing one, the worst
+rank correlation between any two streams' 200,000 uniforms 0.0024 (independent streams scatter by about
+0.002), pack size against 800 V +0.001, the copper comparison above +0.00 % in every segment and year, and the
+34 digests identical across four processes.
+
+**5. Not re-run: 04_04 is six hours, and he will do it later.** The draws change once more, and the hash fix
+and the tags take effect together with that run. The export on disk is from the old code, one coherent world
+that cannot be reproduced. After the run, press Run on RAWCLICRecoveryModel's `04_batteries.py` again, because
+its draws will have moved.
+
+**6. Not added, to ask:** a test that stays. The checks above are scratch scripts, outside the repository. A
+permanent one would be a new file here, `code/test_battery_seeds.py`: the same draws in two processes with
+different `PYTHONHASHSEED`, every stream tagged, no two sharing a stream. Say if he wants it.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 

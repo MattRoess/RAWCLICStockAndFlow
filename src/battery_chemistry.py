@@ -32,6 +32,15 @@ of sodium as a whole is narrower than one multiplier on all of it would give.
 The seed is offset with `zlib.crc32`, never `hash()`: Python salts `str` hashing
 per process, which cost this project its reproducibility once already.
 
+EVERY STREAM IN THE BATTERY MODULES HAS ITS OWN TAG, `crc32` of a name that says what
+it is -- `battery_chemistry.share` here, `battery_capacity.growth` and `.level`,
+`battery_voltage.adoption` and `.band`, `battery_composition.extrapolation` -- so a
+stream is `[seed, tag]` or `[seed, tag, key]` and never the bare seed. Streams seeded
+alike are one stream: until 2026-10-09 the capacity growth, the voltage band and the
+composition's extrapolation factor were three names for `default_rng(404)`, and the
+pack size and a segment's voltage were one stream between them. A new stream takes a
+new name.
+
 Lives in src/ rather than in the stage because the stage and its figures both
 need it, and a shared definition cannot drift apart the way two copies can.
 """
@@ -68,8 +77,12 @@ def _share_multiplier(params, chemistry: str, years, n_draws: int,
     materials = params.materials
     spread = materials.battery_chemistry_share_spread
     first, last = materials.battery_chemistry_share_spread_years
+    # Its own tag, like every stream in the battery modules (see
+    # `battery_capacity.growth_draws`): without one, a chemistry whose name happened to
+    # share a `crc32` with a segment's would be that segment's stream.
     rng = np.random.default_rng(
-        np.random.SeedSequence([int(seed), zlib.crc32(chemistry.encode())]))
+        np.random.SeedSequence([int(seed), zlib.crc32(b"battery_chemistry.share"),
+                                zlib.crc32(chemistry.encode())]))
     drawn = rng.triangular(spread["min"], spread["mode"], spread["max"], n_draws)
     ramp = np.clip((np.asarray(years, dtype=float) - first) / (last - first), 0.0, 1.0)
     # float32 throughout: five chemistries over sixty-seven build years at

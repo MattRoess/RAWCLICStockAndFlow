@@ -40,6 +40,7 @@ THREE THINGS VARY PER DRAW, AND EACH IS HANDLED WHERE IT BELONGS
 from __future__ import annotations
 
 import re
+import zlib
 from functools import lru_cache
 from pathlib import Path
 
@@ -208,7 +209,12 @@ class CompositionAtCapacity:
         half_width = rate * beyond / 100.0
         if not np.any(half_width > 0):
             return np.ones((capacity.size, 1))
-        rng = np.random.default_rng(seed)
+        # ITS OWN TAG: seeded with the bare seed this was the same stream as the capacity
+        # growth and the voltage band (rank correlation +1.0000; found 2026-10-08, fixed
+        # 2026-10-09). The tag does not change what is shared ON PURPOSE: every call with
+        # the same seed -- both levels, every chemistry -- still gets the same uniform
+        # for draw i. See `battery_capacity.growth_draws`.
+        rng = np.random.default_rng([seed, zlib.crc32(b"battery_composition.extrapolation")])
         # One uniform per draw, turned into a symmetric triangular of the right
         # width -- so the same draw is equally optimistic about every element of
         # the same pack rather than each element wandering on its own.

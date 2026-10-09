@@ -62,7 +62,14 @@ def growth_draws(params, n_draws: int, *, seed: int) -> tuple[np.ndarray, np.nda
     Shared by every segment on purpose -- see the module docstring.
     """
     materials = params.materials
-    rng = np.random.default_rng(seed)
+    # EVERY STREAM IN THE BATTERY MODULES HAS ITS OWN TAG: it is seeded
+    # `[seed, crc32(<its name>), ...]` and never with the bare seed. Two streams seeded
+    # alike are ONE stream. This growth rate, the voltage band (`battery_voltage`) and the
+    # composition's extrapolation factor were all `default_rng(404)` and had rank
+    # correlation +1.0000, so the world in which capacity grows fastest was, exactly,
+    # the one in which 800 V arrives earliest (found 2026-10-08, fixed 2026-10-09).
+    # Shared by every segment on purpose -- see the module docstring -- so no segment here.
+    rng = np.random.default_rng([seed, zlib.crc32(b"battery_capacity.growth")])
     rate = _triangular(rng, materials.battery_capacity_growth_per_decade, n_draws)
     plateau = _triangular(rng, materials.battery_capacity_plateau_year, n_draws)
     return rate, plateau
@@ -84,10 +91,15 @@ def level_draws(params, segment: str, n_draws: int, *, seed: int) -> np.ndarray:
     # THE SEGMENT ENTERS THROUGH `zlib.crc32`, NEVER `hash()`. Python salts the hash of
     # a `str` per process, so `abs(hash(segment))` drew a different pack size in every
     # run of 04_04 and an export could not be reproduced (found 2026-10-08, fixed
-    # 2026-10-09; it takes effect with the next run of 04_04). The same rule as
-    # `battery_chemistry.py`, and the same stream as before within a run: this and
-    # `voltage_draws` take the same seed list, as they did.
-    rng = np.random.default_rng([seed, zlib.crc32(segment.encode())])
+    # 2026-10-09; it takes effect with the next run of 04_04).
+    #
+    # AND THE STREAM HAS ITS OWN TAG. This and the voltage's adoption order were both
+    # `[seed, segment]`, so they were one stream: the uniform that picked a segment's
+    # pack size also placed the car in the 800 V adoption order, and a small pack was
+    # almost always 800 V and a large one almost never (segment A, 2050: 100 %, 63 %,
+    # 0.6 % for 25, 30 and 35 kWh). See `growth_draws` for the rule.
+    rng = np.random.default_rng([seed, zlib.crc32(b"battery_capacity.level"),
+                                 zlib.crc32(segment.encode())])
     return rng.choice(levels, size=n_draws, p=weights)
 
 

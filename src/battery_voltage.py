@@ -110,9 +110,16 @@ def voltage_draws(params, segment: str, years, *, n_draws: int,
     # The segment enters through `zlib.crc32`, never `hash()`: Python salts the hash of
     # a `str` per process, so this drew a different adoption order in every run of 04_04
     # (found 2026-10-08, fixed 2026-10-09; it takes effect with the next run).
-    rng = np.random.default_rng([seed, zlib.crc32(segment.encode())])
+    #
+    # EACH STREAM HAS ITS OWN TAG, which is what makes "independent" true. The adoption
+    # order used to be seeded exactly as the pack size is (`[seed, segment]`) and the band
+    # as the capacity growth is (the bare seed), so each pair was one stream: a small
+    # pack was almost always 800 V, and the growth rate and the band had rank correlation
+    # +1.0000 (found 2026-10-08, fixed 2026-10-09). See `battery_capacity.growth_draws`.
+    rng = np.random.default_rng([seed, zlib.crc32(b"battery_voltage.adoption"),
+                                 zlib.crc32(segment.encode())])
     adoption = rng.random(n_draws)
-    band_rng = np.random.default_rng(seed)          # the band is market-wide
+    band_rng = np.random.default_rng([seed, zlib.crc32(b"battery_voltage.band")])  # market-wide
     position = band_rng.random(n_draws)
 
     share = _share_curve(params, group, years, position)

@@ -269,3 +269,24 @@ count times cell capacity, not a round number. Full argument in
 6. **These are models, not registrations.** Every weight and level above is a
    share of model variants offered, not of cars sold. Sales weighting would
    change them, and the EEA data needed for it is already in this repo.
+
+## 9. The random streams, and their tags (2026-10-09)
+
+Every stream is seeded `[seed, crc32(<its name>)]`, or `[seed, crc32(<its name>), crc32(<key>)]` when it
+is per segment or per chemistry -- never with the bare seed, and never with `hash()`, which Python salts
+per process. Seeded alike, two streams are one stream; until 2026-10-09 four pairs of them were.
+
+| stream | tag (`crc32` of) | key | shared on purpose |
+|---|---|---|---|
+| capacity growth rate, plateau year | `battery_capacity.growth` | — | by every segment (§3) |
+| pack size | `battery_capacity.level` | segment | no; held across years |
+| voltage adoption order | `battery_voltage.adoption` | segment | no; held for the car's life |
+| voltage share band | `battery_voltage.band` | — | market-wide: a world in which 800 V is early is early everywhere |
+| composition extrapolation factor | `battery_composition.extrapolation` | — | the same uniform for draw *i* in every call with that seed, so both levels agree |
+| chemistry share multiplier | `battery_chemistry.share` | chemistry | across groups and years (`battery_chemistry.py`) |
+
+The pack size and the voltage of a segment are therefore independent, which they were not: the same
+uniform picked the pack size and placed the car in the adoption order, and a small pack was almost
+always 800 V. The capacity growth and the voltage band were tied exactly, rank correlation +1.0000.
+A new stream takes a new name. HANDOVER.md of 2026-10-09 has the measurements.
+
