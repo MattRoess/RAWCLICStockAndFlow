@@ -42,6 +42,8 @@ so, or a reader will take it for composition uncertainty.
 
 from __future__ import annotations
 
+import zlib
+
 import numpy as np
 
 
@@ -78,7 +80,14 @@ def level_draws(params, segment: str, n_draws: int, *, seed: int) -> np.ndarray:
     weights = weights / weights.sum()          # renormalised, as the parameter says
     # A stream per segment, spawned from the caller's seed: segments are
     # independent of each other but reproducible from one number.
-    rng = np.random.default_rng([seed, abs(hash(segment)) % (2**32)])
+    #
+    # THE SEGMENT ENTERS THROUGH `zlib.crc32`, NEVER `hash()`. Python salts the hash of
+    # a `str` per process, so `abs(hash(segment))` drew a different pack size in every
+    # run of 04_04 and an export could not be reproduced (found 2026-10-08, fixed
+    # 2026-10-09; it takes effect with the next run of 04_04). The same rule as
+    # `battery_chemistry.py`, and the same stream as before within a run: this and
+    # `voltage_draws` take the same seed list, as they did.
+    rng = np.random.default_rng([seed, zlib.crc32(segment.encode())])
     return rng.choice(levels, size=n_draws, p=weights)
 
 

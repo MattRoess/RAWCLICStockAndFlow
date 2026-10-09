@@ -192,8 +192,10 @@ ignored, so never `git add -A` there.
    sodium cells (the note of 2026-10-08 below). The 36 old `Na_ion*` draw files (8.2 GB) are still his to
    delete.
 3. The small decisions above: the EEA file, the GitHub descriptions, the received engines.
-4. The `hash(segment)` seeds in `battery_capacity.py` and `battery_voltage.py` (the note of 2026-10-08
-   below): a different matter from the 03_02 segment seeding of item 1.
+4. **Fixed 2026-10-09, in the code:** the `hash(segment)` seeds in `battery_capacity.py` and
+   `battery_voltage.py` (the note of 2026-10-08 below), a different matter from the 03_02 segment seeding of
+   item 1. It shows only with the next run of 04_04, which he will do later. **Decide the pack size /
+   voltage coupling first (the note of 2026-10-09 below), so that one run serves both.**
 
 ## 2026-10-08 — the battery's recovery export is written per chemistry, not summed
 
@@ -245,17 +247,21 @@ are gone by then, so the peak of the stage does not move.
 3. **Against the old summed folder `battery_recovery_draws/` of 10-07 the means agree to four decimals and
    the draws do not.** That is not the export. See the next section.
 
-**Found, and not fixed: 04_04 draws a different pack-size world on every run.** `src/battery_capacity.py:81`
+**Found 2026-10-08, fixed 2026-10-09: 04_04 drew a different pack-size world on every run.** `src/battery_capacity.py:81`
 and `src/battery_voltage.py:107` seed each segment's stream with `abs(hash(segment))`, and Python salts the
 hash of a string per process. The same call with the same seed gives `[33.7, 35.8, 34.1, ...]` kWh in one
 process and `[33.7, 29.9, 34.1, ...]` in the next, and identical numbers in both with `PYTHONHASHSEED=0`.
 Within a run nothing is wrong -- the capacity and voltage are drawn once per segment and shared by every
 chemistry and scenario -- but two runs differ, so an export cannot be reproduced. The 2026-09-28 sweep
-found one `hash()` and fixed it; these are the other two. The fix is `zlib.crc32(segment.encode())` in both,
-as `battery_chemistry.py` already does. It changes the draws once, and shows only with the next run of
-04_04, which is six hours. **His decision.** Also in RAWCLICRecoveryModel `DEFECTS.md` 3.27. It is not the
-segment seeding of the note of 2026-10-05, which is about 03_02's fleet draws; this is the pack size and the
-voltage inside 04_04.
+found one `hash()` and fixed it; these are the other two. **Fixed on 2026-10-09, on his word**, with
+`zlib.crc32(segment.encode())` in both, as `battery_chemistry.py` already does. It changes the draws once, and
+shows only with the next run of 04_04, six hours, which he will do later; the export on disk is from the
+unfixed code, one coherent world that cannot be reproduced. Checked first as a failing test and then as a
+passing one: the pack size, the voltage, every chemistry share of every scenario and group, and one
+composition call, computed in four separate processes (two with different pinned hash salts, two with
+random ones), differ before the fix in 25 of 34 digests and are identical after it. Also in
+RAWCLICRecoveryModel `DEFECTS.md` 3.27. It is not the segment seeding of the note of 2026-10-05, which is
+about 03_02's fleet draws; this is the pack size and the voltage inside 04_04.
 
 **Done afterwards:** `documentation/PARAMETER_REFERENCE.md` was regenerated with
 `code/generate_parameter_reference.py` -- not by `00_parameters.py`, as this entry first said -- and only
@@ -263,6 +269,45 @@ voltage inside 04_04.
 `batteryCellUnitemised` and the recovery model had no case for them, is closed on that side:
 `data/battery_sodium` has both. Still his to delete: the old single-sodium `Na_ion*` files in
 `battery_draws/` (8.2 GB) and, once `data/battery` is retired, the old summed export (2.8 GB).
+
+## 2026-10-09 — the hash seeds are fixed; and pack size and voltage are coupled draw by draw
+
+**1. Fixed, as asked:** `src/battery_capacity.py` and `src/battery_voltage.py` seed each segment with
+`zlib.crc32(segment.encode())` and no longer with `abs(hash(segment))` (the note of 2026-10-08). Not re-run:
+04_04 takes six hours and he will do it later. Nothing downstream needs to change until then; after that run,
+press Run on RAWCLICRecoveryModel's `04_batteries.py` again, because its draws will have moved.
+
+**2. Found while there, NOT changed: the pack size and the voltage of a segment are coupled, draw by draw, and
+negatively.** Both functions are called with `seed=404` and both seed their stream with `[seed, segment]`, so
+they are the same stream: `level_draws` turns each uniform `u` into a pack size with `rng.choice`, and
+`voltage_draws` uses the same `u` as the car's place in the adoption order (800 V when `u` is below the
+share). A small `u` is therefore the smallest pack **and** 800 V. For segment A in 2050 the 25 kWh pack is
+800 V in 100 % of its draws, the 30 kWh pack in 63 % and the 35 kWh pack in 0.6 %; the rank correlation
+between pack size and 800 V is -0.56 in A, -0.15 in C and JC, -0.09 in JF. The design note
+(`DESIGN_bev_capacity_for_04_04.md`) says nothing about pack size and voltage being related, so this looks
+accidental. It was the same before the fix, since both functions took the same `hash(segment)` within a run.
+
+**How much it matters, measured on LFP per pack, 200,000 draws, the voltages as drawn against the same
+voltages shuffled across draws** (the 400/800 split kept, the link to the pack size broken): the mean copper
+in the cables is up to **+0.5 %** and in the cell terminals up to **+1.0 %** higher as drawn (segment A in
+2050, where the 800 V share is 0.73); in C and JC it is within 0.1 % and 0.5 %. The direction is the one to
+expect: the larger packs, which carry more copper, are the ones that stay at 400 V, which has no copper
+saving. The effect on the spread was not measured.
+
+**The same mechanism, more widely.** Three more streams are seeded with the bare `seed`, 404, and so draw
+the same uniforms: the capacity growth rate and plateau year (`growth_draws`, `battery_capacity.py:65`), the
+voltage band position (`battery_voltage.py:115`) and the composition's extrapolation factor
+(`battery_composition.py:211`, used only for packs above the last anchor). Measured: **the growth rate per
+decade and the voltage band position have rank correlation +1.0000**, so a world in which capacity grows
+fast is, exactly, one in which the 800 V share sits at the same point of its band. The design note says
+the growth is "shared by every segment" on purpose, and says nothing about it being tied to the voltage.
+The size of those was not measured, only the pack-size one above.
+
+**His decision, and the moment is the next run of 04_04:** to give every stream its own tag, a second
+integer in the seed list, as `battery_chemistry.py` does with the chemistry's `crc32`; for the two segment
+streams that means different tags for the pack size and the voltage. It changes the draws once more, so it
+costs nothing if it goes into the same run as the hash fix, and costs a second six-hour run if it does not.
+Not done.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 

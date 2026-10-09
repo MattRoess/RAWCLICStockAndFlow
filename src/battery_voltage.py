@@ -39,6 +39,8 @@ so a world where 800 V arrives early stays early.
 
 from __future__ import annotations
 
+import zlib
+
 import numpy as np
 
 LOW_VOLTAGE = 400
@@ -104,7 +106,11 @@ def voltage_draws(params, segment: str, years, *, n_draws: int,
     years = np.asarray(years, dtype=float)
     # Two independent streams: where this car sits in the adoption order, and
     # where this world sits in the share's own band.
-    rng = np.random.default_rng([seed, abs(hash(segment)) % (2**32)])
+    #
+    # The segment enters through `zlib.crc32`, never `hash()`: Python salts the hash of
+    # a `str` per process, so this drew a different adoption order in every run of 04_04
+    # (found 2026-10-08, fixed 2026-10-09; it takes effect with the next run).
+    rng = np.random.default_rng([seed, zlib.crc32(segment.encode())])
     adoption = rng.random(n_draws)
     band_rng = np.random.default_rng(seed)          # the band is market-wide
     position = band_rng.random(n_draws)
