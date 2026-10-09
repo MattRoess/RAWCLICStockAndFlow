@@ -288,5 +288,6 @@ per process. Seeded alike, two streams are one stream; until 2026-10-09 four pai
 The pack size and the voltage of a segment are therefore independent, which they were not: the same
 uniform picked the pack size and placed the car in the adoption order, and a small pack was almost
 always 800 V. The capacity growth and the voltage band were tied exactly, rank correlation +1.0000.
-A new stream takes a new name. HANDOVER.md of 2026-10-09 has the measurements.
+A new stream takes a new name. HANDOVER.md of 2026-10-09 has the measurements, and
+`code/test_battery_seeds.py` keeps all of this true: run it after any change to these modules.
 

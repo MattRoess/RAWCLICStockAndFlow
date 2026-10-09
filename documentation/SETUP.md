@@ -142,6 +142,7 @@ What a clone can check on its own:
 ```bash
 .venv/bin/python code/00_parameters.py          # exits 0 and says where it saved the parameter file
 .venv/bin/python code/test_stage04_03_export.py # every check passes (nine today)
+.venv/bin/python code/test_battery_seeds.py     # every check passes (nine today)
 ```
 
 The other two checks need what §5 describes, and say so rather than failing quietly:

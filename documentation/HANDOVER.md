@@ -322,9 +322,15 @@ and the tags take effect together with that run. The export on disk is from the 
 that cannot be reproduced. After the run, press Run on RAWCLICRecoveryModel's `04_batteries.py` again, because
 its draws will have moved.
 
-**6. Not added, to ask:** a test that stays. The checks above are scratch scripts, outside the repository. A
-permanent one would be a new file here, `code/test_battery_seeds.py`: the same draws in two processes with
-different `PYTHONHASHSEED`, every stream tagged, no two sharing a stream. Say if he wants it.
+**6. The test that stays, added on his word, "yes, add the test": `code/test_battery_seeds.py`.** Nine checks,
+about two seconds, only the code: every stream tagged and no two purposes sharing a tag; per segment, per
+chemistry and market-wide the way the design says; the replayed uniforms of every pair uncorrelated; pack size
+and 800 V independent through the real functions; and the draws byte-identical in three processes with
+different hash salts. It records the seeds numpy is asked for, so a stream added later with a bare seed fails
+it. **It was run against the code as it was:** before the hash fix it fails 5 of 9 (including the +1.0000, the
+-0.563 and the differing digests), after the hash fix and before the tags 4 of 9, and now it passes 9 of 9.
+Run it after any change to the four battery modules; `README.md` and `SETUP.md` list it. It is not in
+`code/hooks/pre-commit`, which was not touched.
 
 ## ⚠️ READ FIRST IF YOU ARE ON THE OTHER MAC — git will not work until you do this
 

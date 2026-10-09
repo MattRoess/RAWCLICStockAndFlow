@@ -48,12 +48,13 @@ its name. `code/proof_0403_vehicle_draws.py` writes nothing.
 
 ## Checks
 
-Three scripts, each run directly. They exist because defects here once went
+Four scripts, each run directly. They exist because defects here once went
 unnoticed while every stage ran and every figure rendered; each asks one
 question about what a stage actually leaves behind or computes.
 
 ```bash
 .venv/bin/python code/test_stage04_03_export.py   # needs only the code: 9 checks, a second
+.venv/bin/python code/test_battery_seeds.py       # needs only the code: 9 checks, a few seconds; run it after any change to the battery modules' random draws
 .venv/bin/python code/test_stage04_02_export.py   # needs RAWCLICVehicleElectronics beside this repository, its draws written
 .venv/bin/python code/test_stage03_inflow.py      # needs the saved output of stages 01 and 03_02; about a second
 ```
