@@ -26,8 +26,8 @@ folder, exit 0, all nine figures drawn, the lithium totals identical to his last
 **To run it:** `00_parameters.py` first (04_04 refuses a saved file that predates the schema), then
 04_04. Expect about 48 GB, not 40 GB: six chemistries, not five -- and, as it turned out on 2026-10-08, about
 six hours, not 47 minutes.
-The 36 old `Na_ion*` files in `data/processed/battery_draws/` (8.2 GB) are not read any more; their
-removal was approved on 2026-10-09 (the entry "dead code, dead data and dead figures" below).
+The 36 old `Na_ion*` files in `data/processed/battery_draws/` (8.2 GB) are not read any more; they
+were removed on 2026-10-09 (the entry "dead code, dead data and dead figures" below).
 
 **Open:** the recovery export now carries one element it did not, Na, and a component,
 `batteryCellUnitemised`, that RAWCLICRecoveryModel's battery case has no process or coefficient
@@ -189,7 +189,7 @@ ignored, so never `git add -A` there.
 1. His answer on the normalisation, A or B, and whether the segment seeding is fixed in the same 03_02
    rerun (the note of 2026-10-05, later). Nothing is implemented.
 2. **Done 2026-10-08:** the real run of `00_parameters.py` and `04_04_batteries.py`, which reads the two
-   sodium cells (the note of 2026-10-08 below). The 36 old `Na_ion*` draw files (8.2 GB): removal approved
+   sodium cells (the note of 2026-10-08 below). The 36 old `Na_ion*` draw files (8.2 GB): removed
    2026-10-09, below.
 3. The small decisions above: the EEA file, the GitHub descriptions, the received engines.
 4. **Fixed 2026-10-09, in the code:** the `hash(segment)` seeds in `battery_capacity.py` and
@@ -267,7 +267,7 @@ about 03_02's fleet draws; this is the pack size and the voltage inside 04_04.
 `code/generate_parameter_reference.py` -- not by `00_parameters.py`, as this entry first said -- and only
 `battery_recovery_draws_dir` changed. The open item of 2026-10-05, that the export carries sodium and
 `batteryCellUnitemised` and the recovery model had no case for them, is closed on that side:
-`data/battery_sodium` has both. The old single-sodium `Na_ion*` files in `battery_draws/` (8.2 GB): removal approved
+`data/battery_sodium` has both. The old single-sodium `Na_ion*` files in `battery_draws/` (8.2 GB): removed
 2026-10-09 (below). Still his: the old summed export (2.8 GB), once `data/battery` is retired.
 
 ## 2026-10-09 — the hash seeds are fixed, and every random stream in the battery modules has its own tag
@@ -352,7 +352,7 @@ moved without finding all eight. RAWCLICRecoveryModel already keeps its figures 
 - `README.md`, `RUNNING.md` and the seven images of `BATTERY_MATERIAL_FLOWS.md` say and point to the new place.
 - **The old folder is not touched and not written to any more.** Last night's 104 figures were COPIED into
   `figures/` (18 MB, byte for byte, checked), so the folder is not empty until the next run of each stage and the
-  images in the documents resolve. (Its removal was approved the same day; see "dead code, dead data and dead
+  images in the documents resolve. (It was removed the same day; see "dead code, dead data and dead
   figures" below.)
 
 **Checked.** A scratch script, red then green: before, eight stage files defined the old folder and
@@ -401,15 +401,29 @@ defines, and the two code-only checks run (`test_battery_seeds.py` 9 of 9, `test
   `ev_share_long`, `bev_surv_outflow`, `mass_by_year_elem_dict`, `combined`, `ratio_df`, `stock_disagg_df`,
   `export_prob_by_age_drv`, `tracker_keyed_new` and `EXPORT_SHARE_BY_DRV`, with its open question.
 
-**Data and figures: approved, and done when his 04_04 has ended.** That run started at 09:04 and writes
-`battery_draws/`, the export and `figures/`, so nothing in them is touched while it runs: the 36 old `Na_ion*`
-files in `battery_draws/` (8.8 GB), `data/processed/figures/` (the 104 figures that are also in `figures/`,
-18 MB) and the 17 `... 2.png` older versions (09-01) of the 04_02 figures that are in both. The old files are
-named by exact name: `Na_ion*` also matches the two live sodium cells.
+**Data and figures: removed at 10:2x on the same day, once his run of 09:04 had stopped** (it writes
+`battery_draws/`, the export and `figures/`, so nothing in them was touched while it ran): the 36 old `Na_ion*`
+files in `battery_draws/` (8.8 GB), `data/processed/figures/` (104 figures, each a byte-identical copy in
+`figures/`, 18 MB) and the 17 `... 2.png` older versions (09-01) of the 04_02 figures. By exact name, every count
+and every date checked first: `Na_ion*` also matches the two live sodium cells. `figures/` holds 87 files now.
+After the pull the four checks pass on the working tree: `test_battery_seeds.py` 9/9,
+`test_stage04_03_export.py` 9/9, `test_stage03_inflow.py` 15/15, `test_stage04_02_export.py` 5/5.
 
 **The run of 06:24 that ended at 07:19** was stopped by him to switch the computer off. An earlier entry called it a
-run he had not started; it was not a stray. It had rewritten the inflow before it stopped, which is why the export
-was a mixture until the run of 09:04 replaced it.
+run he had not started; it was not a stray. It had rewritten the inflow before it stopped.
+
+**The run of 09:04 was stopped by him at 10:22:17.** He had meant to press Run on RAWCLICRecoveryModel's
+`04_batteries.py` and had started this one ("I did not want to rerun 04_04 but recovery 04"). It stopped between
+two writes (the last file, 10:17:41) and left nothing half-written: all 1,143 arrays of the export were checked,
+every one (200000, 11), float32, complete, with the same years. What it had rewritten: `battery_draws/inflow`
+(all of it), `battery_draws/outflow` at element level only (the `_components` files are still 10-08's), and the
+inflow of all 14 export folders. The summaries `intermediate/04_04_*.pkl` and the figures were not written.
+**The export is therefore a mixture:** the inflow of the 09:04 run (fixed seeds and tags), the outflow and
+collected arrays of the 10-08 run (the old code). The recovery model's recovered, lost and handed-on mass and its
+recovery rates are computed from `collected`, which is entirely 10-08's, so they are as checked; its figures that
+set inflow against outflow draw by draw (the net fleet, the share of inflow recovered) mix two runs, with right
+means and wrong bands. **The full rerun of 04_04 with the fixed code is still open**, about six hours, and
+`04_batteries.py` has to be pressed again after it.
 
 **Not removed, his call.** `data/processed/battery_recovery_draws/` (2.8 GB) is read by RAWCLICRecoveryModel's
 `data/battery`, which is still in its `combine.cases`. Stage 04_03 writes the grades `EH`, `SH` and `UH` (680 MB)
